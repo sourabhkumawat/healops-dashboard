@@ -1,0 +1,32 @@
+export const mockIncidents = [
+  {
+    id: 1,
+    title: "High Memory Usage in Payment Service",
+    status: "RESOLVED",
+    severity: "HIGH",
+    service: "payment-service",
+    createdAt: "2023-10-27T10:00:00Z",
+    rootCause: "Memory leak in worker process",
+    actionTaken: "restart_container",
+  },
+  {
+    id: 2,
+    title: "Database Connection Timeout",
+    status: "INVESTIGATING",
+    severity: "CRITICAL",
+    service: "user-db",
+    createdAt: "2023-10-27T10:30:00Z",
+    rootCause: "Pending analysis...",
+    actionTaken: null,
+  },
+  {
+    id: 3,
+    title: "Frontend 500 Errors",
+    status: "OPEN",
+    severity: "MEDIUM",
+    service: "frontend-proxy",
+    createdAt: "2023-10-27T11:00:00Z",
+    rootCause: null,
+    actionTaken: null,
+  },
+];
