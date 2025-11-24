@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+crewai
+python-dotenv
+sqlalchemy
+psycopg2-binary
+celery
+redis
+google-cloud-logging
+google-cloud-pubsub
+google-cloud-functions
+google-auth
+google-auth-oauthlib
+boto3
+pyyaml

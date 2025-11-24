@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'HealOps Log Ingestion - One-Click AWS Setup'
+
+Parameters:
+  HealOpsWebhookUrl:
+    Type: String
+    Description: 'HealOps webhook endpoint URL'
+    Default: 'https://api.healops.com/ingest/logs'
+  
+  HealOpsApiKey:
+    Type: String
+    Description: 'Your HealOps API key'
+    NoEcho: true
+
+Resources:
+  # IAM Role for Lambda
+  HealOpsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: CloudWatchLogsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+
+  # Lambda Function - Log Forwarder
+  HealOpsLogForwarder:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: healops-log-forwarder
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt HealOpsLambdaRole.Arn
+      Timeout: 60
+      Environment:
+        Variables:
+          HEALOPS_WEBHOOK_URL: !Ref HealOpsWebhookUrl
+          HEALOPS_API_KEY: !Ref HealOpsApiKey
+      Code:
+        ZipFile: |
+          import json
+          import gzip
+          import base64
+          import os
+          import urllib3
+          from datetime import datetime
+          
+          http = urllib3.PoolManager()
+          
+          def lambda_handler(event, context):
+              """Forward CloudWatch logs to HealOps."""
+              webhook_url = os.environ['HEALOPS_WEBHOOK_URL']
+              api_key = os.environ['HEALOPS_API_KEY']
+              
+              # Decode and decompress CloudWatch log data
+              log_data = json.loads(gzip.decompress(base64.b64decode(event['awslogs']['data'])))
+              
+              for log_event in log_data['logEvents']:
+                  # Transform to HealOps format
+                  payload = {
+                      'service_name': log_data['logGroup'],
+                      'level': 'ERROR' if 'error' in log_event['message'].lower() else 'INFO',
+                      'message': log_event['message'],
+                      'timestamp': datetime.fromtimestamp(log_event['timestamp'] / 1000).isoformat(),
+                      'metadata': {
+                          'log_stream': log_data['logStream'],
+                          'aws_account': log_data['owner'],
+                          'source': 'aws_cloudwatch'
+                      }
+                  }
+                  
+                  # Send to HealOps
+                  response = http.request(
+                      'POST',
+                      webhook_url,
+                      body=json.dumps(payload).encode('utf-8'),
+                      headers={
+                          'Content-Type': 'application/json',
+                          'X-API-Key': api_key
+                      }
+                  )
+                  
+                  print(f"Forwarded log to HealOps: {response.status}")
+              
+              return {'statusCode': 200, 'body': 'Logs forwarded successfully'}
+
+  # Permission for CloudWatch Logs to invoke Lambda
+  HealOpsLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HealOpsLogForwarder
+      Action: 'lambda:InvokeFunction'
+      Principal: 'logs.amazonaws.com'
+      SourceArn: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+
+  # CloudWatch Log Group (example - users can add their own)
+  HealOpsExampleLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/healops/example
+      RetentionInDays: 7
+
+  # Subscription Filter - Routes logs to Lambda
+  HealOpsLogSubscription:
+    Type: AWS::Logs::SubscriptionFilter
+    DependsOn: HealOpsLambdaInvokePermission
+    Properties:
+      LogGroupName: !Ref HealOpsExampleLogGroup
+      FilterPattern: '[level=ERROR || level=CRITICAL]'
+      DestinationArn: !GetAtt HealOpsLogForwarder.Arn
+
+Outputs:
+  LambdaFunctionArn:
+    Description: 'ARN of the HealOps log forwarder Lambda function'
+    Value: !GetAtt HealOpsLogForwarder.Arn
+  
+  LogGroupName:
+    Description: 'Example log group name'
+    Value: !Ref HealOpsExampleLogGroup
+  
+  SetupInstructions:
+    Description: 'Next steps'
+    Value: 'Add more log groups by creating subscription filters pointing to the Lambda function'
