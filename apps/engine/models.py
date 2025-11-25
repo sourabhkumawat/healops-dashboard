@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON, ForeignKey, Enum
+from sqlalchemy import Column, Integer, String, DateTime, JSON, ForeignKey, Enum, Text
 from sqlalchemy.sql import func
 import enum
 from database import Base
@@ -25,6 +25,14 @@ class Incident(Base):
     status = Column(String, default=IncidentStatus.OPEN)
     severity = Column(String, default=IncidentSeverity.MEDIUM)
     service_name = Column(String, index=True)
+    
+    # New fields for Phase 11
+    source = Column(String, nullable=True)  # gcp, aws, k8s, agent
+    log_ids = Column(JSON, default=[])  # List of related log IDs
+    first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at = Column(DateTime(timezone=True), server_default=func.now())
+    integration_id = Column(Integer, ForeignKey("integrations.id"), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
@@ -48,6 +56,21 @@ class LogEntry(Base):
     message = Column(String)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
     metadata_json = Column(JSON, nullable=True)
+    
+    # New fields for Phase 11
+    source = Column(String, index=True, nullable=True)
+    severity = Column(String, index=True, nullable=True)
+    integration_id = Column(Integer, ForeignKey("integrations.id"), nullable=True)
+
+class IntegrationStatus(Base):
+    __tablename__ = "integration_status"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    integration_id = Column(Integer, ForeignKey("integrations.id"))
+    last_log_time = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String, default="PENDING")  # ACTIVE, STALE, DISCONNECTED
+    details = Column(Text, nullable=True)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
 class User(Base):
     __tablename__ = "users"
@@ -64,7 +87,7 @@ class IntegrationProvider(str, enum.Enum):
     KUBERNETES = "KUBERNETES"
     AGENT = "AGENT"
 
-class IntegrationStatus(str, enum.Enum):
+class IntegrationStatusEnum(str, enum.Enum):
     PENDING = "PENDING"
     CONFIGURING = "CONFIGURING"
     ACTIVE = "ACTIVE"
@@ -77,7 +100,7 @@ class Integration(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
     provider = Column(String)  # GCP, AWS, K8S, AGENT
-    status = Column(String, default=IntegrationStatus.PENDING)
+    status = Column(String, default=IntegrationStatusEnum.PENDING)
     name = Column(String)  # User-friendly name
     
     # Provider-specific config (encrypted JSON)

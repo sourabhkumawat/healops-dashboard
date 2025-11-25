@@ -9,16 +9,19 @@ import {
 } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import Link from "next/link"
 
-interface Incident {
+export interface Incident {
   id: number
   title: string
   status: string
   severity: string
-  service: string
-  createdAt: string
-  rootCause: string | null
-  actionTaken: string | null
+  service_name: string
+  source: string
+  created_at: string
+  last_seen_at: string
+  root_cause: string | null
+  action_taken: string | null
 }
 
 export function IncidentTable({ incidents }: { incidents: Incident[] }) {
@@ -30,9 +33,10 @@ export function IncidentTable({ incidents }: { incidents: Incident[] }) {
           <TableHead className="w-[100px]">ID</TableHead>
           <TableHead>Title</TableHead>
           <TableHead>Service</TableHead>
+          <TableHead>Source</TableHead>
           <TableHead>Severity</TableHead>
           <TableHead>Status</TableHead>
-          <TableHead>Action Taken</TableHead>
+          <TableHead>Last Seen</TableHead>
           <TableHead className="text-right">View</TableHead>
         </TableRow>
       </TableHeader>
@@ -41,7 +45,8 @@ export function IncidentTable({ incidents }: { incidents: Incident[] }) {
           <TableRow key={incident.id}>
             <TableCell className="font-medium">{incident.id}</TableCell>
             <TableCell>{incident.title}</TableCell>
-            <TableCell>{incident.service}</TableCell>
+            <TableCell>{incident.service_name}</TableCell>
+            <TableCell className="uppercase text-xs font-mono">{incident.source || "N/A"}</TableCell>
             <TableCell>
               <Badge variant={incident.severity === "CRITICAL" ? "destructive" : "outline"}>
                 {incident.severity}
@@ -52,9 +57,13 @@ export function IncidentTable({ incidents }: { incidents: Incident[] }) {
                 {incident.status}
               </Badge>
             </TableCell>
-            <TableCell>{incident.actionTaken || "-"}</TableCell>
+            <TableCell className="text-muted-foreground text-sm">
+              {new Date(incident.last_seen_at).toLocaleString()}
+            </TableCell>
             <TableCell className="text-right">
-              <Button variant="ghost" size="sm">Details</Button>
+              <Link href={`/incidents/${incident.id}`}>
+                <Button variant="ghost" size="sm">Details</Button>
+              </Link>
             </TableCell>
           </TableRow>
         ))}

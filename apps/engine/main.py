@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Response
+from fastapi import FastAPI, Depends, HTTPException, status, Response, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import PlainTextResponse, FileResponse
 from sqlalchemy.orm import Session
@@ -10,6 +10,7 @@ from integrations.gcp import GCPIntegration
 from integrations.aws import AWSIntegration
 from integrations.k8s import K8sIntegration
 from integrations.agent import AgentIntegration
+from middleware import APIKeyMiddleware
 from datetime import timedelta
 import os
 from pydantic import BaseModel
@@ -20,11 +21,17 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Self-Healing SaaS Engine")
 
+# Add Middleware
+app.add_middleware(APIKeyMiddleware)
+
 class LogIngestRequest(BaseModel):
     service_name: str
-    level: str
+    severity: str  # Changed from level to match PRD
     message: str
+    source: str = "agent" # gcp, aws, k8s, agent
+    timestamp: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    integration_id: Optional[int] = None
 
 @app.get("/")
 def read_root():
@@ -73,11 +80,29 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 # ============================================================================
 
 @app.post("/ingest/logs")
-def ingest_log(log: LogIngestRequest, db: Session = Depends(get_db)):
+def ingest_log(log: LogIngestRequest, request: Request, db: Session = Depends(get_db)):
+    # API Key is already validated by middleware
+    api_key = request.state.api_key
+    
+    # Determine integration_id
+    # Priority: 1. API Key's integration_id (if set) -> 2. Payload's integration_id
+    integration_id = api_key.integration_id
+    if not integration_id and log.integration_id:
+        # Verify this integration belongs to the user
+        integration = db.query(Integration).filter(
+            Integration.id == log.integration_id,
+            Integration.user_id == api_key.user_id
+        ).first()
+        if integration:
+            integration_id = integration.id
+    
     db_log = LogEntry(
         service_name=log.service_name,
-        level=log.level,
+        level=log.severity, # Mapping severity to level for backward compat or just use severity
+        severity=log.severity,
         message=log.message,
+        source=log.source,
+        integration_id=integration_id,
         metadata_json=log.metadata
     )
     db.add(db_log)
@@ -86,9 +111,10 @@ def ingest_log(log: LogIngestRequest, db: Session = Depends(get_db)):
     
     # Trigger async analysis
     try:
-        from tasks import analyze_log
-        analyze_log.delay(db_log.id)
-    except:
+        from tasks import process_log_entry
+        process_log_entry.delay(db_log.id)
+    except Exception as e:
+        print(f"Failed to trigger task: {e}")
         pass  # Celery might not be running
     
     return {"status": "ingested", "id": db_log.id}
@@ -298,3 +324,50 @@ def list_providers():
     from integrations import IntegrationRegistry
     
     return IntegrationRegistry.list_providers()
+
+# ============================================================================
+# Incident Management
+# ============================================================================
+
+@app.get("/incidents")
+def list_incidents(status: Optional[str] = None, db: Session = Depends(get_db)):
+    """List incidents with optional status filter."""
+    query = db.query(Incident)
+    if status:
+        query = query.filter(Incident.status == status)
+    
+    incidents = query.order_by(Incident.last_seen_at.desc()).all()
+    return incidents
+
+@app.get("/incidents/{incident_id}")
+def get_incident(incident_id: int, db: Session = Depends(get_db)):
+    """Get incident details including related logs."""
+    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    
+    # Fetch related logs
+    logs = []
+    if incident.log_ids:
+        logs = db.query(LogEntry).filter(LogEntry.id.in_(incident.log_ids)).order_by(LogEntry.timestamp.desc()).all()
+    
+    return {
+        "incident": incident,
+        "logs": logs
+    }
+
+@app.patch("/incidents/{incident_id}")
+def update_incident(incident_id: int, update_data: dict, db: Session = Depends(get_db)):
+    """Update incident status or severity."""
+    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    
+    if "status" in update_data:
+        incident.status = update_data["status"]
+    if "severity" in update_data:
+        incident.severity = update_data["severity"]
+        
+    db.commit()
+    db.refresh(incident)
+    return incident

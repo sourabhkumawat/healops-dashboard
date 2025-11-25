@@ -84,8 +84,15 @@ export default function SettingsPage() {
   }
 
   const fetchIntegrations = async () => {
-    // TODO: Implement API call to fetch integrations
-    setIntegrations([])
+    try {
+      const response = await fetch("http://localhost:8000/integrations")
+      if (response.ok) {
+        const data = await response.json()
+        setIntegrations(data.integrations)
+      }
+    } catch (error) {
+      console.error("Failed to fetch integrations:", error)
+    }
   }
 
   useEffect(() => {
