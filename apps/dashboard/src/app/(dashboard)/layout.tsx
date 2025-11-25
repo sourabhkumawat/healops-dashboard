@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { MainNav } from "@/components/main-nav";
 import { UserNav } from "@/components/user-nav";
 
@@ -10,7 +11,9 @@ export default function DashboardLayout({
     <div className="flex-col md:flex">
       <div className="border-b">
         <div className="flex h-16 items-center px-4">
-          <h2 className="text-lg font-bold tracking-tight mr-6">Healops</h2>
+          <Link href="/" className="mr-6 flex items-center space-x-2">
+            <h2 className="text-lg font-bold tracking-tight cursor-pointer">Healops</h2>
+          </Link>
           <MainNav className="mx-6" />
           <div className="ml-auto flex items-center space-x-4">
 

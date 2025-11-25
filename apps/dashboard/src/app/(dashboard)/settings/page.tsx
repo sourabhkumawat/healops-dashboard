@@ -109,227 +109,258 @@ export default function SettingsPage() {
   }
 
   return (
-    <div className="flex h-screen bg-zinc-950">
-      {/* Sidebar */}
-      <div className="w-64 border-r border-zinc-800 bg-zinc-900 p-6">
-        <h2 className="text-xl font-bold text-zinc-100 mb-6">Settings</h2>
-        <nav className="space-y-2">
-          <a href="#integrations" className="block px-4 py-2 rounded-lg bg-zinc-800 text-zinc-100">
-            Integrations
-          </a>
-          <a href="#api-keys" className="block px-4 py-2 rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100">
-            API Keys
-          </a>
-        </nav>
+    <div className="space-y-6">
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold text-zinc-100 mb-2">Integration Settings</h1>
+        <p className="text-zinc-400">Manage your cloud integrations and API keys</p>
       </div>
 
-      {/* Main Content */}
-      <div className="flex-1 overflow-y-auto p-8">
-        <div className="max-w-6xl mx-auto">
-          <div className="mb-8">
-            <h1 className="text-3xl font-bold text-zinc-100 mb-2">Integration Settings</h1>
-            <p className="text-zinc-400">Manage your cloud integrations and API keys</p>
+      <Tabs defaultValue="general" className="space-y-6">
+        <TabsList className="bg-zinc-900 border border-zinc-800">
+          <TabsTrigger value="general" className="data-[state=active]:bg-zinc-800">
+            General
+          </TabsTrigger>
+          <TabsTrigger value="integrations" className="data-[state=active]:bg-zinc-800">
+            Integrations
+          </TabsTrigger>
+          <TabsTrigger value="api-keys" className="data-[state=active]:bg-zinc-800">
+            API Keys
+          </TabsTrigger>
+        </TabsList>
+
+        {/* General Tab */}
+        <TabsContent value="general" className="space-y-6">
+          <Card className="border-zinc-800 bg-zinc-900">
+            <CardHeader>
+              <CardTitle className="text-zinc-100">Profile Settings</CardTitle>
+              <CardDescription className="text-zinc-400">
+                Update your personal information
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-2">
+                <Label htmlFor="name" className="text-zinc-100">Display Name</Label>
+                <Input id="name" defaultValue="Admin User" className="bg-zinc-800 border-zinc-700 text-zinc-100" />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="email" className="text-zinc-100">Email Address</Label>
+                <Input id="email" defaultValue="admin@healops.ai" className="bg-zinc-800 border-zinc-700 text-zinc-100" />
+              </div>
+              <Button className="bg-green-600 hover:bg-green-700">
+                Save Changes
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card className="border-zinc-800 bg-zinc-900">
+            <CardHeader>
+              <CardTitle className="text-zinc-100">Organization</CardTitle>
+              <CardDescription className="text-zinc-400">
+                Manage your organization details
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-2">
+                <Label htmlFor="org-name" className="text-zinc-100">Organization Name</Label>
+                <Input id="org-name" defaultValue="HealOps Demo" className="bg-zinc-800 border-zinc-700 text-zinc-100" />
+              </div>
+              <Button variant="outline" className="border-zinc-700 text-zinc-100 hover:bg-zinc-800">
+                Update Organization
+              </Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Integrations Tab */}
+        <TabsContent value="integrations" className="space-y-4">
+          <div className="flex justify-between items-center">
+            <div>
+              <h3 className="text-lg font-medium text-zinc-100">Integrations</h3>
+              <p className="text-sm text-zinc-400">
+                Connect multiple cloud providers to start monitoring
+              </p>
+            </div>
+            <Button
+              onClick={() => setShowAddIntegration(!showAddIntegration)}
+              className="bg-green-600 hover:bg-green-700"
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              Add Integration
+            </Button>
           </div>
 
-          <Tabs defaultValue="integrations" className="space-y-6">
-            <TabsList className="bg-zinc-900 border border-zinc-800">
-              <TabsTrigger value="integrations" className="data-[state=active]:bg-zinc-800">
-                Integrations
-              </TabsTrigger>
-              <TabsTrigger value="api-keys" className="data-[state=active]:bg-zinc-800">
-                API Keys
-              </TabsTrigger>
-            </TabsList>
-
-            {/* Integrations Tab */}
-            <TabsContent value="integrations" className="space-y-4">
-              <div className="flex justify-between items-center">
-                <p className="text-zinc-400">
-                  {integrations.length} integration{integrations.length !== 1 ? 's' : ''} connected
-                </p>
-                <Button
-                  onClick={() => setShowAddIntegration(!showAddIntegration)}
-                  className="bg-green-600 hover:bg-green-700"
-                >
-                  <Plus className="h-4 w-4 mr-2" />
-                  Add Integration
-                </Button>
-              </div>
-
-              {showAddIntegration && (
-                <Card className="border-zinc-800 bg-zinc-900">
-                  <CardHeader>
-                    <CardTitle className="text-zinc-100">Add New Integration</CardTitle>
-                    <CardDescription className="text-zinc-400">
-                      Select a platform to connect
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                      {providers.map((provider) => {
-                        const Icon = provider.icon
-                        return (
-                          <Card
-                            key={provider.id}
-                            className={`cursor-pointer border-2 transition-all ${
-                              selectedProvider === provider.id
-                                ? "border-green-600 bg-zinc-800"
-                                : "border-zinc-700 bg-zinc-800/50 hover:border-zinc-600"
-                            }`}
-                            onClick={() => setSelectedProvider(provider.id)}
-                          >
-                            <CardContent className="p-4 text-center">
-                              <Icon className={`h-8 w-8 mx-auto mb-2 ${provider.color}`} />
-                              <p className="text-sm font-medium text-zinc-100">{provider.name}</p>
-                            </CardContent>
-                          </Card>
-                        )
-                      })}
-                    </div>
-
-                    {selectedProvider && (
-                      <div className="mt-6 space-y-4">
-                        <Alert className="bg-zinc-800 border-zinc-700">
-                          <AlertDescription className="text-zinc-300">
-                            Click below to generate an API key for this integration
-                          </AlertDescription>
-                        </Alert>
-
-                        <Button
-                          onClick={handleGenerateKey}
-                          disabled={loading}
-                          className="w-full bg-green-600 hover:bg-green-700"
-                        >
-                          {loading ? (
-                            <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                          ) : (
-                            <Key className="h-4 w-4 mr-2" />
-                          )}
-                          Generate API Key
-                        </Button>
-
-                        {newApiKey && (
-                          <div className="space-y-2">
-                            <Label className="text-zinc-100">Your API Key (save it now!)</Label>
-                            <div className="flex space-x-2">
-                              <Input
-                                value={newApiKey}
-                                readOnly
-                                className="bg-zinc-800 border-zinc-700 font-mono text-sm text-zinc-100"
-                              />
-                              <Button
-                                size="icon"
-                                variant="outline"
-                                onClick={() => copyToClipboard(newApiKey)}
-                                className="border-zinc-700"
-                              >
-                                <Copy className="h-4 w-4" />
-                              </Button>
-                            </div>
-                            <Button
-                              onClick={() => window.location.href = "/onboarding"}
-                              className="w-full"
-                              variant="outline"
-                            >
-                              <ExternalLink className="h-4 w-4 mr-2" />
-                              Continue Setup
-                            </Button>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              )}
-
-              {/* Integrations List */}
-              <div className="space-y-4">
-                {integrations.length === 0 ? (
-                  <Card className="border-zinc-800 bg-zinc-900">
-                    <CardContent className="p-12 text-center">
-                      <Cloud className="h-12 w-12 mx-auto mb-4 text-zinc-600" />
-                      <p className="text-zinc-400 mb-4">No integrations yet</p>
-                      <Button
-                        onClick={() => setShowAddIntegration(true)}
-                        variant="outline"
-                        className="border-zinc-700"
+          {showAddIntegration && (
+            <Card className="border-zinc-800 bg-zinc-900">
+              <CardHeader>
+                <CardTitle className="text-zinc-100">Add New Integration</CardTitle>
+                <CardDescription className="text-zinc-400">
+                  Select a platform to connect
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  {providers.map((provider) => {
+                    const Icon = provider.icon
+                    return (
+                      <Card
+                        key={provider.id}
+                        className={`cursor-pointer border-2 transition-all ${
+                          selectedProvider === provider.id
+                            ? "border-green-600 bg-zinc-800"
+                            : "border-zinc-700 bg-zinc-800/50 hover:border-zinc-600"
+                        }`}
+                        onClick={() => setSelectedProvider(provider.id)}
                       >
-                        Add Your First Integration
-                      </Button>
-                    </CardContent>
-                  </Card>
-                ) : (
-                  integrations.map((integration) => (
-                    <Card key={integration.id} className="border-zinc-800 bg-zinc-900">
-                      <CardContent className="p-6">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center space-x-4">
-                            <div className="rounded-lg bg-zinc-800 p-3">
-                              <Cloud className="h-6 w-6 text-green-500" />
-                            </div>
-                            <div>
-                              <h3 className="font-semibold text-zinc-100">{integration.name}</h3>
-                              <p className="text-sm text-zinc-400">{integration.provider}</p>
-                            </div>
-                          </div>
-                          <div className="flex items-center space-x-4">
-                            {getStatusBadge(integration.status)}
-                            <Button size="icon" variant="ghost" className="text-zinc-400 hover:text-red-500">
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))
-                )}
-              </div>
-            </TabsContent>
+                        <CardContent className="p-4 text-center">
+                          <Icon className={`h-8 w-8 mx-auto mb-2 ${provider.color}`} />
+                          <p className="text-sm font-medium text-zinc-100">{provider.name}</p>
+                        </CardContent>
+                      </Card>
+                    )
+                  })}
+                </div>
 
-            {/* API Keys Tab */}
-            <TabsContent value="api-keys" className="space-y-4">
-              <div className="flex justify-between items-center">
-                <p className="text-zinc-400">
-                  {apiKeys.length} API key{apiKeys.length !== 1 ? 's' : ''}
-                </p>
-              </div>
+                {selectedProvider && (
+                  <div className="mt-6 space-y-4">
+                    <Alert className="bg-zinc-800 border-zinc-700">
+                      <AlertDescription className="text-zinc-300">
+                        Click below to generate an API key for this integration
+                      </AlertDescription>
+                    </Alert>
 
-              <div className="space-y-4">
-                {apiKeys.map((key) => (
-                  <Card key={key.id} className="border-zinc-800 bg-zinc-900">
-                    <CardContent className="p-6">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center space-x-4">
-                          <div className="rounded-lg bg-zinc-800 p-3">
-                            <Key className="h-6 w-6 text-green-500" />
-                          </div>
-                          <div>
-                            <h3 className="font-semibold text-zinc-100">{key.name}</h3>
-                            <p className="text-sm text-zinc-400 font-mono">{key.key_prefix}...</p>
-                            <p className="text-xs text-zinc-500 mt-1">
-                              Created {new Date(key.created_at).toLocaleDateString()}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="flex items-center space-x-4">
-                          {key.is_active ? (
-                            <CheckCircle2 className="h-5 w-5 text-green-500" />
-                          ) : (
-                            <XCircle className="h-5 w-5 text-red-500" />
-                          )}
-                          <Button size="icon" variant="ghost" className="text-zinc-400 hover:text-red-500">
-                            <Trash2 className="h-4 w-4" />
+                    <Button
+                      onClick={handleGenerateKey}
+                      disabled={loading}
+                      className="w-full bg-green-600 hover:bg-green-700"
+                    >
+                      {loading ? (
+                        <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                      ) : (
+                        <Key className="h-4 w-4 mr-2" />
+                      )}
+                      Generate API Key
+                    </Button>
+
+                    {newApiKey && (
+                      <div className="space-y-2">
+                        <Label className="text-zinc-100">Your API Key (save it now!)</Label>
+                        <div className="flex space-x-2">
+                          <Input
+                            value={newApiKey}
+                            readOnly
+                            className="bg-zinc-800 border-zinc-700 font-mono text-sm text-zinc-100"
+                          />
+                          <Button
+                            size="icon"
+                            variant="outline"
+                            onClick={() => copyToClipboard(newApiKey)}
+                            className="border-zinc-700"
+                          >
+                            <Copy className="h-4 w-4" />
                           </Button>
                         </div>
+                        <Button
+                          onClick={() => window.location.href = "/onboarding"}
+                          className="w-full"
+                          variant="outline"
+                        >
+                          <ExternalLink className="h-4 w-4 mr-2" />
+                          Continue Setup
+                        </Button>
                       </div>
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
-            </TabsContent>
-          </Tabs>
-        </div>
-      </div>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Integrations List */}
+          <div className="space-y-4">
+            {integrations.length === 0 ? (
+              <Card className="border-zinc-800 bg-zinc-900">
+                <CardContent className="p-12 text-center">
+                  <Cloud className="h-12 w-12 mx-auto mb-4 text-zinc-600" />
+                  <p className="text-zinc-400 mb-4">No integrations yet</p>
+                  <Button
+                    onClick={() => setShowAddIntegration(true)}
+                    variant="outline"
+                    className="border-zinc-700"
+                  >
+                    Add Your First Integration
+                  </Button>
+                </CardContent>
+              </Card>
+            ) : (
+              integrations.map((integration) => (
+                <Card key={integration.id} className="border-zinc-800 bg-zinc-900">
+                  <CardContent className="p-6">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-4">
+                        <div className="rounded-lg bg-zinc-800 p-3">
+                          <Cloud className="h-6 w-6 text-green-500" />
+                        </div>
+                        <div>
+                          <h3 className="font-semibold text-zinc-100">{integration.name}</h3>
+                          <p className="text-sm text-zinc-400">{integration.provider}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center space-x-4">
+                        {getStatusBadge(integration.status)}
+                        <Button size="icon" variant="ghost" className="text-zinc-400 hover:text-red-500">
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))
+            )}
+          </div>
+        </TabsContent>
+
+        {/* API Keys Tab */}
+        <TabsContent value="api-keys" className="space-y-4">
+          <div className="flex justify-between items-center">
+            <p className="text-zinc-400">
+              {apiKeys.length} API key{apiKeys.length !== 1 ? 's' : ''}
+            </p>
+          </div>
+
+          <div className="space-y-4">
+            {apiKeys.map((key) => (
+              <Card key={key.id} className="border-zinc-800 bg-zinc-900">
+                <CardContent className="p-6">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-4">
+                      <div className="rounded-lg bg-zinc-800 p-3">
+                        <Key className="h-6 w-6 text-green-500" />
+                      </div>
+                      <div>
+                        <h3 className="font-semibold text-zinc-100">{key.name}</h3>
+                        <p className="text-sm text-zinc-400 font-mono">{key.key_prefix}...</p>
+                        <p className="text-xs text-zinc-500 mt-1">
+                          Created {new Date(key.created_at).toLocaleDateString()}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center space-x-4">
+                      {key.is_active ? (
+                        <CheckCircle2 className="h-5 w-5 text-green-500" />
+                      ) : (
+                        <XCircle className="h-5 w-5 text-red-500" />
+                      )}
+                      <Button size="icon" variant="ghost" className="text-zinc-400 hover:text-red-500">
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }
