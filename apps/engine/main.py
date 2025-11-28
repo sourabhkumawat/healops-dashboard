@@ -23,6 +23,17 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Self-Healing SaaS Engine")
 
 # Add Middleware
+# Add Middleware
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.add_middleware(APIKeyMiddleware)
 
 class LogIngestRequest(BaseModel):
@@ -76,20 +87,52 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
+from fastapi import WebSocket, WebSocketDisconnect, BackgroundTasks
+
+# WebSocket Connection Manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                # Handle disconnection gracefully
+                pass
+
+manager = ConnectionManager()
+
+@app.websocket("/ws/logs")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Keep connection alive
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
 # ============================================================================
 # Log Ingestion
 # ============================================================================
 
 @app.post("/ingest/logs")
-def ingest_log(log: LogIngestRequest, request: Request, db: Session = Depends(get_db)):
+async def ingest_log(log: LogIngestRequest, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     # API Key is already validated by middleware
     api_key = request.state.api_key
     
     # Determine integration_id
-    # Priority: 1. API Key's integration_id (if set) -> 2. Payload's integration_id
     integration_id = api_key.integration_id
     if not integration_id and log.integration_id:
-        # Verify this integration belongs to the user
         integration = db.query(Integration).filter(
             Integration.id == log.integration_id,
             Integration.user_id == api_key.user_id
@@ -97,28 +140,41 @@ def ingest_log(log: LogIngestRequest, request: Request, db: Session = Depends(ge
         if integration:
             integration_id = integration.id
     
-    db_log = LogEntry(
-        service_name=log.service_name,
-        level=log.severity, # Mapping severity to level for backward compat or just use severity
-        severity=log.severity,
-        message=log.message,
-        source=log.source,
-        integration_id=integration_id,
-        metadata_json=log.metadata
-    )
-    db.add(db_log)
-    db.commit()
-    db.refresh(db_log)
+    # Prepare log data
+    log_data = {
+        "service_name": log.service_name,
+        "severity": log.severity,
+        "message": log.message,
+        "source": log.source,
+        "timestamp": log.timestamp or datetime.utcnow().isoformat(),
+        "metadata": log.metadata
+    }
     
-    # Trigger async analysis
-    try:
+    # 1. Broadcast to WebSockets (ALL LOGS)
+    await manager.broadcast(log_data)
+    
+    # 2. Persistence & Incident Logic (ERRORS ONLY)
+    if log.severity.upper() in ["ERROR", "CRITICAL"]:
+        db_log = LogEntry(
+            service_name=log.service_name,
+            level=log.severity,
+            severity=log.severity,
+            message=log.message,
+            source=log.source,
+            integration_id=integration_id,
+            metadata_json=log.metadata
+        )
+        db.add(db_log)
+        db.commit()
+        db.refresh(db_log)
+        
+        # Trigger incident check
         from tasks import process_log_entry
-        process_log_entry.delay(db_log.id)
-    except Exception as e:
-        print(f"Failed to trigger task: {e}")
-        pass  # Celery might not be running
+        background_tasks.add_task(process_log_entry, db_log.id)
+        
+        return {"status": "ingested", "id": db_log.id, "persisted": True}
     
-    return {"status": "ingested", "id": db_log.id}
+    return {"status": "broadcasted", "persisted": False}
 
 # ============================================================================
 # OpenTelemetry Error Ingestion
@@ -152,10 +208,12 @@ class OTelErrorPayload(BaseModel):
     spans: List[OTelSpan]
 
 @app.post("/otel/errors")
-def ingest_otel_errors(payload: OTelErrorPayload, db: Session = Depends(get_db)):
+async def ingest_otel_errors(payload: OTelErrorPayload, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """
-    Ingest OpenTelemetry error spans from HealOps SDK.
-    This endpoint receives batched error spans and stores them as log entries.
+    Ingest OpenTelemetry spans from HealOps SDK.
+    Now receives ALL spans (success & error).
+    - Broadcasts ALL spans to WebSocket (Live Logs)
+    - Persists ONLY ERROR/CRITICAL spans to Database
     """
     # Verify API key
     from integrations import verify_api_key
@@ -175,7 +233,9 @@ def ingest_otel_errors(payload: OTelErrorPayload, db: Session = Depends(get_db))
     valid_key.last_used = datetime.utcnow()
     
     # Process each span
-    ingested_count = 0
+    persisted_count = 0
+    total_received = len(payload.spans)
+    
     for span in payload.spans:
         # Extract error information
         error_message = span.status.message or span.name
@@ -198,15 +258,19 @@ def ingest_otel_errors(payload: OTelErrorPayload, db: Session = Depends(get_db))
                 exception_stacktrace = span.attributes.get('exception.stacktrace', '')
                 exception_details = f"{exception_type}: {exception_message}\n{exception_stacktrace}"
         
-        # Use exception details as message if available
         if exception_details:
             error_message = exception_details
         
         # Determine severity based on status code
         # SpanStatusCode: UNSET=0, OK=1, ERROR=2
-        severity = "ERROR" if span.status.code == 2 else "WARNING"
+        is_error = span.status.code == 2
+        severity = "ERROR" if is_error else "INFO"
         
-        # Create metadata with all span information
+        # If it's not an error, check if it has exception details (could be a handled exception)
+        if not is_error and exception_details:
+            severity = "WARNING"
+            is_error = True # Treat warning as something to persist? Requirement says "error logs", usually implies ERROR/CRITICAL. Let's stick to strict ERROR code for persistence unless it has exception.
+        
         metadata = {
             "traceId": span.traceId,
             "spanId": span.spanId,
@@ -229,37 +293,56 @@ def ingest_otel_errors(payload: OTelErrorPayload, db: Session = Depends(get_db))
             "statusMessage": span.status.message
         }
         
-        # Create log entry
-        db_log = LogEntry(
-            service_name=payload.serviceName,
-            level=severity,
-            severity=severity,
-            message=error_message,
-            source="otel",  # Mark as coming from OpenTelemetry
-            integration_id=valid_key.integration_id,
-            metadata_json=metadata
-        )
-        db.add(db_log)
-        ingested_count += 1
+        # Prepare log data for broadcast
+        log_data = {
+            "service_name": payload.serviceName,
+            "severity": severity,
+            "message": error_message,
+            "source": "otel",
+            "timestamp": datetime.utcnow().isoformat(),
+            "metadata": metadata
+        }
+        
+        # 1. Broadcast (ALL SPANS)
+        await manager.broadcast(log_data)
+        
+        # 2. Persist (ONLY ERRORS)
+        if is_error or severity.upper() in ["ERROR", "CRITICAL"]:
+            db_log = LogEntry(
+                service_name=payload.serviceName,
+                level=severity,
+                severity=severity,
+                message=error_message,
+                source="otel",
+                integration_id=valid_key.integration_id,
+                metadata_json=metadata
+            )
+            db.add(db_log)
+            persisted_count += 1
     
-    db.commit()
-    
-    # Trigger async analysis for each log
-    try:
-        from tasks import process_log_entry
-        for log in db.query(LogEntry).filter(
-            LogEntry.service_name == payload.serviceName,
-            LogEntry.source == "otel"
-        ).order_by(LogEntry.id.desc()).limit(ingested_count).all():
-            process_log_entry.delay(log.id)
-    except Exception as e:
-        print(f"Failed to trigger tasks: {e}")
-        pass  # Celery might not be running
+    if persisted_count > 0:
+        db.commit()
+        
+        # Trigger async analysis for persisted logs
+        try:
+            from tasks import process_log_entry
+            # Fetch IDs of newly inserted logs
+            recent_logs = db.query(LogEntry).filter(
+                LogEntry.service_name == payload.serviceName,
+                LogEntry.source == "otel"
+            ).order_by(LogEntry.id.desc()).limit(persisted_count).all()
+            
+            for log in recent_logs:
+                background_tasks.add_task(process_log_entry, log.id)
+                
+        except Exception as e:
+            print(f"Failed to trigger tasks: {e}")
     
     return {
         "status": "success",
-        "ingested": ingested_count,
-        "message": f"Ingested {ingested_count} error spans"
+        "received": total_received,
+        "persisted": persisted_count,
+        "message": f"Received {total_received} spans, persisted {persisted_count} errors"
     }
 
 

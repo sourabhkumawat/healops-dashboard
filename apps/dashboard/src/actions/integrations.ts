@@ -57,3 +57,26 @@ export async function listProviders() {
         return {};
     }
 }
+
+export async function listApiKeys() {
+    try {
+        // Get auth token from cookies
+        const authToken = (await cookies()).get('auth_token')?.value;
+        
+        const response = await fetch(`${API_BASE}/api-keys`, {
+            headers: {
+                'Authorization': `Bearer ${authToken}`
+            }
+        });
+        
+        if (!response.ok) {
+            return [];
+        }
+        
+        const data = await response.json();
+        return data.keys || [];
+    } catch (error) {
+        console.error('Failed to list API keys:', error);
+        return [];
+    }
+}

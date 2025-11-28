@@ -1,12 +1,11 @@
-from celery_app import celery_app
 from database import SessionLocal
 from models import LogEntry, Incident, IncidentSeverity, IntegrationStatus, IntegrationStatusEnum
 from sqlalchemy import func
 from datetime import datetime, timedelta
 import json
 
-@celery_app.task
-def process_log_entry(log_id: int):
+# Converted from Celery task to regular async function for BackgroundTasks
+async def process_log_entry(log_id: int):
     db = SessionLocal()
     try:
         log = db.query(LogEntry).filter(LogEntry.id == log_id).first()
@@ -41,7 +40,7 @@ def process_log_entry(log_id: int):
 
         # 2. Incident Logic
         # Only care about ERROR or CRITICAL
-        if log.severity in ["ERROR", "CRITICAL"]:
+        if log.severity.upper() in ["ERROR", "CRITICAL"]:
             print(f"Detected critical log: {log.message}. Checking for existing incidents...")
             
             # Deduplication: Look for OPEN incidents for same service & source in last 3 mins
@@ -91,9 +90,6 @@ def process_log_entry(log_id: int):
                 db.add(incident)
                 db.commit()
                 
-                # Kick off AI diagnosis (Async)
-                # We can keep this logic or move it to another task
-                # For now, let's keep it simple and just log it
                 print(f"Incident created: {incident.id}")
                 
                 return f"Incident created: {incident.id}"

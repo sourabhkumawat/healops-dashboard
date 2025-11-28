@@ -4,10 +4,14 @@ import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { Resource } from '@opentelemetry/resources';
 import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
 import { HealOpsExporter } from './HealOpsExporter';
+import { HealOpsLogger } from './HealOpsLogger';
 import { HealOpsConfig } from './types';
 
-export { HealOpsConfig, HealOpsExporter };
+export { HealOpsConfig, HealOpsExporter, HealOpsLogger };
 
+/**
+ * Initialize HealOps OpenTelemetry SDK for automatic error span collection
+ */
 export function initHealOpsOTel(config: HealOpsConfig) {
   const exporter = new HealOpsExporter(config);
 
@@ -31,4 +35,11 @@ export function initHealOpsOTel(config: HealOpsConfig) {
       .then(() => console.log('HealOps OTel SDK terminated'))
       .catch((error) => console.error('Error terminating HealOps OTel SDK', error));
   });
+}
+
+/**
+ * Create a HealOps logger for direct log ingestion
+ */
+export function createLogger(config: { apiKey: string; serviceName: string; endpoint?: string; source?: string }) {
+  return new HealOpsLogger(config);
 }

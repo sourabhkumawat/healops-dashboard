@@ -55,3 +55,31 @@ export async function logoutAction() {
   (await cookies()).delete("auth_token")
   redirect("/login")
 }
+
+export async function registerAction(prevState: any, formData: FormData) {
+  const email = formData.get("email")
+  const password = formData.get("password")
+
+  try {
+    const response = await fetch("http://localhost:8000/auth/register", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email,
+        password,
+      }),
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      return { message: error.detail || "Registration failed" }
+    }
+
+    return { success: true, message: "Registration successful! Please login." }
+  } catch (error) {
+    console.error("Registration error:", error)
+    return { message: "An unexpected error occurred" }
+  }
+}

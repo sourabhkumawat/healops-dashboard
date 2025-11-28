@@ -90,18 +90,12 @@ export default function SettingsPage() {
     };
 
     const fetchApiKeys = async () => {
-        // TODO: Implement API call to fetch keys
-        // For now, using mock data
-        setApiKeys([
-            {
-                id: 1,
-                name: 'aws-integration',
-                key_prefix: 'healops_live',
-                created_at: new Date().toISOString(),
-                last_used: null,
-                is_active: true
-            }
-        ]);
+        try {
+            const keys = await import('@/actions/integrations').then(m => m.listApiKeys());
+            setApiKeys(keys);
+        } catch (error) {
+            console.error('Failed to fetch API keys:', error);
+        }
     };
 
     const fetchIntegrations = async () => {

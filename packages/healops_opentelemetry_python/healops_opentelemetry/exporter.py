@@ -13,15 +13,13 @@ class HealOpsSpanExporter(SpanExporter):
         self.endpoint = endpoint
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        error_spans = [span for span in spans if self._is_error_span(span)]
-
-        if not error_spans:
+        if not spans:
             return SpanExportResult.SUCCESS
 
         payload = {
             "apiKey": self.api_key,
             "serviceName": self.service_name,
-            "spans": [self._transform_span(span) for span in error_spans]
+            "spans": [self._transform_span(span) for span in spans]
         }
 
         try:
@@ -35,22 +33,7 @@ class HealOpsSpanExporter(SpanExporter):
     def shutdown(self) -> None:
         pass
 
-    def _is_error_span(self, span: ReadableSpan) -> bool:
-        # Check for Error status code
-        if span.status.status_code == StatusCode.ERROR:
-            return True
-        
-        # Check for exception events
-        for event in span.events:
-            if event.name == "exception":
-                return True
-        
-        # Check for exception attributes
-        attributes = span.attributes or {}
-        if "exception.type" in attributes or "exception.message" in attributes or "exception.stacktrace" in attributes:
-            return True
-            
-        return False
+    # _is_error_span method removed as we now export all spans
 
     def _transform_span(self, span: ReadableSpan) -> dict:
         return {

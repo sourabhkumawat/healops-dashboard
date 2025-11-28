@@ -4,7 +4,7 @@ import { LiveLogs } from "@/components/live-logs";
 import { mockIncidents } from "@/lib/mock-data";
 import { Activity, Cpu, HardDrive, Server } from "lucide-react";
 
-export default function DashboardPage() {
+export default async function DashboardPage() {
   const activeIncidents = mockIncidents.filter(i => i.status !== "RESOLVED").length;
   const resolvedIncidents = mockIncidents.filter(i => i.status === "RESOLVED").length;
   

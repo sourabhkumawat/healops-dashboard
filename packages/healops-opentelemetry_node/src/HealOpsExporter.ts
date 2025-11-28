@@ -14,16 +14,14 @@ export class HealOpsExporter implements SpanExporter {
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
-    const errorSpans = spans.filter(span => this.isErrorSpan(span));
-
-    if (errorSpans.length === 0) {
+    if (spans.length === 0) {
       return resultCallback({ code: ExportResultCode.SUCCESS });
     }
 
     const payload: HealOpsSpanPayload = {
       apiKey: this.config.apiKey,
       serviceName: this.config.serviceName,
-      spans: errorSpans.map(span => this.transformSpan(span)),
+      spans: spans.map(span => this.transformSpan(span)),
     };
 
     this.send(payload)
@@ -38,26 +36,7 @@ export class HealOpsExporter implements SpanExporter {
     return Promise.resolve();
   }
 
-  private isErrorSpan(span: ReadableSpan): boolean {
-    // Check for Error status code
-    if (span.status.code === SpanStatusCode.ERROR) {
-      return true;
-    }
-
-    // Check for exception events
-    const hasExceptionEvent = span.events.some(event => event.name === 'exception');
-    if (hasExceptionEvent) {
-      return true;
-    }
-
-    // Check for exception attributes
-    const attributes = span.attributes;
-    if (attributes['exception.type'] || attributes['exception.message'] || attributes['exception.stacktrace']) {
-      return true;
-    }
-
-    return false;
-  }
+  // isErrorSpan method removed as we now export all spans
 
   private transformSpan(span: ReadableSpan): HealOpsSpan {
     return {
