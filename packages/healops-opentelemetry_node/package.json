@@ -1,0 +1,42 @@
+{
+  "name": "@healops/opentelemetry",
+  "version": "0.1.0",
+  "description": "HealOps OpenTelemetry SDK for Node.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest",
+    "test:local": "node test-local.js",
+    "lint": "eslint src/**/*.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "opentelemetry",
+    "healops",
+    "observability",
+    "monitoring",
+    "errors"
+  ],
+  "author": "HealOps",
+  "license": "MIT",
+  "dependencies": {
+    "@opentelemetry/api": "^1.7.0",
+    "@opentelemetry/sdk-node": "^0.46.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.40.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.46.0",
+    "@opentelemetry/resources": "^1.19.0",
+    "@opentelemetry/semantic-conventions": "^1.19.0",
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.0",
+    "@types/node": "^20.10.0",
+    "@types/jest": "^29.5.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

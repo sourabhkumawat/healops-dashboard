@@ -7,9 +7,9 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Cloud, Server, Box, CheckCircle2, Copy, ExternalLink, Loader2 } from "lucide-react"
-import { generateApiKey, getAWSDeployUrl, getK8sManifest, getAgentInstallCommand } from "@/actions/integrations"
+import { generateApiKey, getAgentInstallCommand } from "@/actions/integrations"
 
-type Provider = "gcp" | "aws" | "k8s" | "agent" | null
+type Provider = "agent" | null
 
 export default function OnboardingPage() {
   const [step, setStep] = useState(1)
@@ -35,17 +35,7 @@ export default function OnboardingPage() {
   const handleProviderSetup = async () => {
     setLoading(true)
     
-    if (selectedProvider === "aws") {
-      const result = await getAWSDeployUrl(apiKey)
-      if (result.url) {
-        setDeployUrl(result.url)
-      }
-    } else if (selectedProvider === "k8s") {
-      const result = await getK8sManifest(apiKey)
-      if (result.manifest) {
-        setManifest(result.manifest)
-      }
-    } else if (selectedProvider === "agent") {
+    if (selectedProvider === "agent") {
       const result = await getAgentInstallCommand(apiKey)
       if (result.linux) {
         setInstallCommand(result.linux)
@@ -62,27 +52,6 @@ export default function OnboardingPage() {
   }
 
   const providers = [
-    {
-      id: "gcp",
-      name: "Google Cloud",
-      icon: Cloud,
-      description: "Auto-setup with OAuth",
-      time: "~20 seconds"
-    },
-    {
-      id: "aws",
-      name: "AWS",
-      icon: Cloud,
-      description: "One-click CloudFormation",
-      time: "~15 seconds"
-    },
-    {
-      id: "k8s",
-      name: "Kubernetes",
-      icon: Box,
-      description: "kubectl apply",
-      time: "~10 seconds"
-    },
     {
       id: "agent",
       name: "VM / On-Prem",
@@ -210,57 +179,7 @@ export default function OnboardingPage() {
               </div>
 
               {/* Provider-specific instructions */}
-              {selectedProvider === "aws" && (
-                <div className="space-y-4 mt-6">
-                  <h3 className="font-semibold text-lg">AWS Setup</h3>
-                  <p className="text-sm text-zinc-400">
-                    Click the button below to deploy the CloudFormation stack in your AWS account.
-                  </p>
-                  
-                  <Button
-                    className="w-full bg-green-600 hover:bg-green-700"
-                    onClick={async () => {
-                      await handleProviderSetup()
-                      if (deployUrl) {
-                        window.open(deployUrl, "_blank")
-                      }
-                    }}
-                    disabled={loading}
-                  >
-                    {loading ? (
-                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                    ) : (
-                      <ExternalLink className="h-4 w-4 mr-2" />
-                    )}
-                    Deploy to AWS
-                  </Button>
-                </div>
-              )}
 
-              {selectedProvider === "k8s" && (
-                <div className="space-y-4 mt-6">
-                  <h3 className="font-semibold text-lg">Kubernetes Setup</h3>
-                  <p className="text-sm text-zinc-400">
-                    Run this command in your cluster:
-                  </p>
-                  
-                  <div className="relative">
-                    <pre className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 overflow-x-auto text-sm">
-                      <code className="text-green-400">
-                        kubectl apply -f http://localhost:8000/integrations/k8s/manifest?api_key={apiKey}
-                      </code>
-                    </pre>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="absolute top-2 right-2"
-                      onClick={() => copyToClipboard(`kubectl apply -f http://localhost:8000/integrations/k8s/manifest?api_key=${apiKey}`)}
-                    >
-                      <Copy className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </div>
-              )}
 
               {selectedProvider === "agent" && (
                 <div className="space-y-4 mt-6">
@@ -296,25 +215,7 @@ export default function OnboardingPage() {
                 </div>
               )}
 
-              {selectedProvider === "gcp" && (
-                <div className="space-y-4 mt-6">
-                  <h3 className="font-semibold text-lg">Google Cloud Setup</h3>
-                  <p className="text-sm text-zinc-400">
-                    Click below to authorize HealOps to access your GCP project.
-                  </p>
-                  
-                  <Button
-                    className="w-full bg-green-600 hover:bg-green-700"
-                    onClick={() => {
-                      // TODO: Implement GCP OAuth
-                      alert("GCP OAuth flow - coming soon!")
-                    }}
-                  >
-                    <ExternalLink className="h-4 w-4 mr-2" />
-                    Connect Google Cloud
-                  </Button>
-                </div>
-              )}
+
 
               <div className="flex space-x-2 mt-6">
                 <Button

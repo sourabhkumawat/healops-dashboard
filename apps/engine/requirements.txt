@@ -13,3 +13,7 @@ google-auth
 google-auth-oauthlib
 boto3
 pyyaml
+cryptography
+requests
+python-jose[cryptography]
+passlib[bcrypt]

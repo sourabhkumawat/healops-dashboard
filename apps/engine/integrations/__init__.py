@@ -34,24 +34,6 @@ class IntegrationRegistry:
     """Registry of available integration providers."""
     
     PROVIDERS = {
-        "GCP": {
-            "name": "Google Cloud Platform",
-            "oauth_required": True,
-            "setup_time": "~20 seconds",
-            "features": ["Log Sink", "Pub/Sub", "Cloud Functions"]
-        },
-        "AWS": {
-            "name": "Amazon Web Services",
-            "oauth_required": False,
-            "setup_time": "~15 seconds",
-            "features": ["CloudWatch", "Lambda", "CloudFormation"]
-        },
-        "KUBERNETES": {
-            "name": "Kubernetes",
-            "oauth_required": False,
-            "setup_time": "~10 seconds",
-            "features": ["DaemonSet", "Fluent Bit", "Auto-discovery"]
-        },
         "AGENT": {
             "name": "Universal Agent",
             "oauth_required": False,

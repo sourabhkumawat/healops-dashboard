@@ -9,14 +9,19 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # Only enforce for /ingest/logs
         if request.url.path.startswith("/ingest/logs"):
+            # Support both X-HealOps-Key header and Authorization Bearer token
             api_key_header = request.headers.get("X-HealOps-Key")
+            if not api_key_header:
+                auth_header = request.headers.get("Authorization", "")
+                if auth_header.startswith("Bearer "):
+                    api_key_header = auth_header.replace("Bearer ", "").strip()
             
             if not api_key_header:
                 # Return 401 directly
                 from fastapi.responses import JSONResponse
                 return JSONResponse(
                     status_code=401,
-                    content={"detail": "Missing X-HealOps-Key header"}
+                    content={"detail": "Missing API key. Use X-HealOps-Key header or Authorization Bearer token"}
                 )
             
             # Hash the key to look it up

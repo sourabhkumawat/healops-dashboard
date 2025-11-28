@@ -27,7 +27,7 @@ class Incident(Base):
     service_name = Column(String, index=True)
     
     # New fields for Phase 11
-    source = Column(String, nullable=True)  # gcp, aws, k8s, agent
+    source = Column(String, nullable=True)  # agent
     log_ids = Column(JSON, default=[])  # List of related log IDs
     first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
     last_seen_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -82,9 +82,6 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class IntegrationProvider(str, enum.Enum):
-    GCP = "GCP"
-    AWS = "AWS"
-    KUBERNETES = "KUBERNETES"
     AGENT = "AGENT"
 
 class IntegrationStatusEnum(str, enum.Enum):
@@ -99,7 +96,7 @@ class Integration(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
-    provider = Column(String)  # GCP, AWS, K8S, AGENT
+    provider = Column(String)  # AGENT
     status = Column(String, default=IntegrationStatusEnum.PENDING)
     name = Column(String)  # User-friendly name
     
@@ -112,7 +109,7 @@ class Integration(Base):
     token_expiry = Column(DateTime(timezone=True), nullable=True)
     
     # Metadata
-    project_id = Column(String, nullable=True)  # GCP project, AWS account, K8s cluster
+    project_id = Column(String, nullable=True)
     region = Column(String, nullable=True)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -3,18 +3,19 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import PlainTextResponse, FileResponse
 from sqlalchemy.orm import Session
 from database import engine, Base, get_db
-from models import Incident, LogEntry, User, Integration, ApiKey
+from models import Incident, LogEntry, User, Integration, ApiKey, IntegrationStatus
 from auth import verify_password, get_password_hash, create_access_token, verify_token
 from integrations import generate_api_key
-from integrations.gcp import GCPIntegration
-from integrations.aws import AWSIntegration
-from integrations.k8s import K8sIntegration
+
 from integrations.agent import AgentIntegration
 from middleware import APIKeyMiddleware
-from datetime import timedelta
+from crypto_utils import encrypt_token, decrypt_token
+from datetime import timedelta, datetime
 import os
+import secrets
+import time
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -28,7 +29,7 @@ class LogIngestRequest(BaseModel):
     service_name: str
     severity: str  # Changed from level to match PRD
     message: str
-    source: str = "agent" # gcp, aws, k8s, agent
+    source: str = "agent" # agent
     timestamp: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     integration_id: Optional[int] = None
@@ -120,6 +121,149 @@ def ingest_log(log: LogIngestRequest, request: Request, db: Session = Depends(ge
     return {"status": "ingested", "id": db_log.id}
 
 # ============================================================================
+# OpenTelemetry Error Ingestion
+# ============================================================================
+
+class OTelSpanEvent(BaseModel):
+    name: str
+    time: float
+    attributes: Optional[Dict[str, Any]] = None
+
+class OTelSpanStatus(BaseModel):
+    code: int
+    message: Optional[str] = None
+
+class OTelSpan(BaseModel):
+    traceId: str
+    spanId: str
+    parentSpanId: Optional[str] = None
+    name: str
+    timestamp: float
+    startTime: float
+    endTime: float
+    attributes: Dict[str, Any]
+    events: List[OTelSpanEvent]
+    status: OTelSpanStatus
+    resource: Dict[str, Any]
+
+class OTelErrorPayload(BaseModel):
+    apiKey: str
+    serviceName: str
+    spans: List[OTelSpan]
+
+@app.post("/otel/errors")
+def ingest_otel_errors(payload: OTelErrorPayload, db: Session = Depends(get_db)):
+    """
+    Ingest OpenTelemetry error spans from HealOps SDK.
+    This endpoint receives batched error spans and stores them as log entries.
+    """
+    # Verify API key
+    from integrations import verify_api_key
+    
+    api_key_obj = db.query(ApiKey).filter(ApiKey.is_active == 1).all()
+    valid_key = None
+    
+    for key in api_key_obj:
+        if verify_api_key(payload.apiKey, key.key_hash):
+            valid_key = key
+            break
+    
+    if not valid_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    # Update last_used timestamp
+    valid_key.last_used = datetime.utcnow()
+    
+    # Process each span
+    ingested_count = 0
+    for span in payload.spans:
+        # Extract error information
+        error_message = span.status.message or span.name
+        
+        # Check for exception in events
+        exception_details = None
+        for event in span.events:
+            if event.name == 'exception' and event.attributes:
+                exception_type = event.attributes.get('exception.type', 'Unknown')
+                exception_message = event.attributes.get('exception.message', '')
+                exception_stacktrace = event.attributes.get('exception.stacktrace', '')
+                exception_details = f"{exception_type}: {exception_message}\n{exception_stacktrace}"
+                break
+        
+        # Check for exception in attributes
+        if not exception_details:
+            if 'exception.type' in span.attributes or 'exception.message' in span.attributes:
+                exception_type = span.attributes.get('exception.type', 'Unknown')
+                exception_message = span.attributes.get('exception.message', '')
+                exception_stacktrace = span.attributes.get('exception.stacktrace', '')
+                exception_details = f"{exception_type}: {exception_message}\n{exception_stacktrace}"
+        
+        # Use exception details as message if available
+        if exception_details:
+            error_message = exception_details
+        
+        # Determine severity based on status code
+        # SpanStatusCode: UNSET=0, OK=1, ERROR=2
+        severity = "ERROR" if span.status.code == 2 else "WARNING"
+        
+        # Create metadata with all span information
+        metadata = {
+            "traceId": span.traceId,
+            "spanId": span.spanId,
+            "parentSpanId": span.parentSpanId,
+            "spanName": span.name,
+            "startTime": span.startTime,
+            "endTime": span.endTime,
+            "duration": span.endTime - span.startTime,
+            "attributes": span.attributes,
+            "events": [
+                {
+                    "name": event.name,
+                    "time": event.time,
+                    "attributes": event.attributes
+                }
+                for event in span.events
+            ],
+            "resource": span.resource,
+            "statusCode": span.status.code,
+            "statusMessage": span.status.message
+        }
+        
+        # Create log entry
+        db_log = LogEntry(
+            service_name=payload.serviceName,
+            level=severity,
+            severity=severity,
+            message=error_message,
+            source="otel",  # Mark as coming from OpenTelemetry
+            integration_id=valid_key.integration_id,
+            metadata_json=metadata
+        )
+        db.add(db_log)
+        ingested_count += 1
+    
+    db.commit()
+    
+    # Trigger async analysis for each log
+    try:
+        from tasks import process_log_entry
+        for log in db.query(LogEntry).filter(
+            LogEntry.service_name == payload.serviceName,
+            LogEntry.source == "otel"
+        ).order_by(LogEntry.id.desc()).limit(ingested_count).all():
+            process_log_entry.delay(log.id)
+    except Exception as e:
+        print(f"Failed to trigger tasks: {e}")
+        pass  # Celery might not be running
+    
+    return {
+        "status": "success",
+        "ingested": ingested_count,
+        "message": f"Ingested {ingested_count} error spans"
+    }
+
+
+# ============================================================================
 # API Key Management
 # ============================================================================
 
@@ -175,87 +319,35 @@ def list_api_keys(db: Session = Depends(get_db)):
         ]
     }
 
-# ============================================================================
-# Google Cloud Integration
-# ============================================================================
-
-@app.get("/integrations/gcp/oauth/start")
-def gcp_oauth_start():
-    """Start GCP OAuth flow."""
-    import secrets
-    state = secrets.token_urlsafe(32)
+@app.get("/logs")
+def list_logs(db: Session = Depends(get_db), limit: int = 50, api_key: str = None):
+    """List recent log entries. Requires API key via X-API-Key header or query parameter."""
+    # Get API key from header or query parameter
+    from fastapi import Header
     
-    # TODO: Store state in session/redis
-    
-    gcp = GCPIntegration("", "")
-    oauth_url = gcp.get_oauth_url(state)
-    
-    return {"oauth_url": oauth_url, "state": state}
-
-@app.get("/integrations/gcp/oauth/callback")
-def gcp_oauth_callback(code: str, state: str, db: Session = Depends(get_db)):
-    """Handle GCP OAuth callback."""
-    # TODO: Verify state, exchange code for token
-    # TODO: Store integration in database
-    
-    return {"status": "success", "message": "GCP integration authorized"}
-
-@app.post("/integrations/gcp/setup")
-async def gcp_setup(integration_name: str, project_id: str, db: Session = Depends(get_db)):
-    """Complete GCP integration setup."""
-    # TODO: Get access token from database
-    access_token = ""
-    
-    gcp = GCPIntegration(project_id, access_token)
-    webhook_url = f"{os.getenv('BASE_URL', 'http://localhost:8000')}/ingest/logs"
-    
-    result = await gcp.setup_complete_integration(integration_name, webhook_url)
-    
-    return result
-
-# ============================================================================
-# AWS Integration
-# ============================================================================
-
-@app.get("/integrations/aws/template")
-def aws_get_template():
-    """Download AWS CloudFormation template."""
-    template_path = os.path.join(os.path.dirname(__file__), "templates/aws-logs.yml")
-    return FileResponse(template_path, media_type="text/yaml", filename="healops-aws.yml")
-
-@app.get("/integrations/aws/deploy-url")
-def aws_get_deploy_url(api_key: str, region: str = "us-east-1"):
-    """Get one-click AWS deployment URL."""
-    aws = AWSIntegration(region)
-    webhook_url = f"{os.getenv('BASE_URL', 'http://localhost:8000')}/ingest/logs"
-    
-    deploy_url = aws.get_deploy_url(api_key, webhook_url)
-    
-    return {"deploy_url": deploy_url}
-
-# ============================================================================
-# Kubernetes Integration
-# ============================================================================
-
-@app.get("/integrations/k8s/manifest")
-def k8s_get_manifest(api_key: str):
-    """Get Kubernetes manifest with API key."""
-    k8s = K8sIntegration()
-    endpoint = os.getenv('BASE_URL', 'http://localhost:8000')
-    
-    manifest = k8s.generate_manifest(api_key, endpoint)
-    
-    return Response(content=manifest, media_type="text/yaml")
-
-@app.get("/integrations/k8s/install-command")
-def k8s_get_install_command(api_key: str):
-    """Get kubectl install command."""
-    k8s = K8sIntegration()
+    # For testing, just return all logs
+    logs = db.query(LogEntry).order_by(LogEntry.timestamp.desc()).limit(limit).all()
     
     return {
-        "kubectl": k8s.get_install_command(),
-        "helm": k8s.get_helm_install_command(api_key)
+        "logs": [
+            {
+                "id": log.id,
+                "service_name": log.service_name,
+                "severity": log.severity or log.level,
+                "level": log.level,
+                "message": log.message,
+                "source": log.source,
+                "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                "metadata": log.metadata_json,
+                "integration_id": log.integration_id
+            }
+            for log in logs
+        ]
     }
+
+
+
+
 
 # ============================================================================
 # Universal Agent Integration
