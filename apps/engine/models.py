@@ -27,7 +27,7 @@ class Incident(Base):
     service_name = Column(String, index=True)
     
     # New fields for Phase 11
-    source = Column(String, nullable=True)  # agent
+    source = Column(String, nullable=True)  # github
     log_ids = Column(JSON, default=[])  # List of related log IDs
     first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
     last_seen_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -82,7 +82,7 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class IntegrationProvider(str, enum.Enum):
-    AGENT = "AGENT"
+    GITHUB = "GITHUB"
 
 class IntegrationStatusEnum(str, enum.Enum):
     PENDING = "PENDING"
@@ -96,7 +96,7 @@ class Integration(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
-    provider = Column(String)  # AGENT
+    provider = Column(String)  # GITHUB
     status = Column(String, default=IntegrationStatusEnum.PENDING)
     name = Column(String)  # User-friendly name
     

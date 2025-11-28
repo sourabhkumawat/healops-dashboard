@@ -1,10 +1,10 @@
 """
-Integration registry and utilities for one-click onboarding.
+Integration registry and utilities.
 """
 import secrets
 import hashlib
-from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
+from .github_integration import GithubIntegration
 
 def generate_api_key() -> tuple[str, str, str]:
     """
@@ -34,11 +34,11 @@ class IntegrationRegistry:
     """Registry of available integration providers."""
     
     PROVIDERS = {
-        "AGENT": {
-            "name": "Universal Agent",
-            "oauth_required": False,
-            "setup_time": "~5 seconds",
-            "features": ["VM Support", "Bare Metal", "On-Prem"]
+        "GITHUB": {
+            "name": "GitHub",
+            "oauth_required": False, # Using PAT for simplicity as per "new integration"
+            "setup_time": "~1 minute",
+            "features": ["PR Creation", "Code Analysis", "Issue Management"]
         }
     }
     

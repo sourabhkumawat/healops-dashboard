@@ -29,7 +29,8 @@ import {
 } from 'lucide-react';
 import {
     generateApiKey,
-    getAgentInstallCommand
+    connectGithub,
+    listApiKeys
 } from '@/actions/integrations';
 
 type Integration = {
@@ -64,34 +65,45 @@ export default function SettingsPage() {
 
     const providers = [
         {
-            id: 'agent',
-            name: 'VM / Agent',
-            icon: Server,
-            color: 'text-purple-500'
+            id: 'github',
+            name: 'GitHub',
+            icon: Box,
+            color: 'text-white'
         }
     ];
 
-    const handleGenerateKey = async () => {
-        if (!selectedProvider) {
-            return;
-        }
-        setLoading(true);
-        keyCounterRef.current += 1;
-        const result = await generateApiKey(
-            `${selectedProvider}-integration-${keyCounterRef.current}`
-        );
-        setLoading(false);
+    const handleConnect = async () => {
+        if (!selectedProvider) return;
 
-        if (result.apiKey) {
-            setNewApiKey(result.apiKey);
-            // Refresh API keys list
-            fetchApiKeys();
+        setLoading(true);
+        if (selectedProvider === 'github') {
+            const result = await connectGithub(newApiKey);
+            if (result.status === 'connected') {
+                setShowAddIntegration(false);
+                fetchIntegrations();
+                setNewApiKey('');
+            } else {
+                // Handle error
+                console.error(result.error);
+            }
+        } else {
+            // Legacy key generation
+            keyCounterRef.current += 1;
+            const result = await generateApiKey(
+                `${selectedProvider}-integration-${keyCounterRef.current}`
+            );
+
+            if (result.apiKey) {
+                setNewApiKey(result.apiKey);
+                fetchApiKeys();
+            }
         }
+        setLoading(false);
     };
 
     const fetchApiKeys = async () => {
         try {
-            const keys = await import('@/actions/integrations').then(m => m.listApiKeys());
+            const keys = await listApiKeys();
             setApiKeys(keys);
         } catch (error) {
             console.error('Failed to fetch API keys:', error);
@@ -313,6 +325,44 @@ export default function SettingsPage() {
 
                                 {selectedProvider && (
                                     <div className="mt-6 space-y-4">
+                                        {selectedProvider === 'github' ? (
+                                            <>
+                                                <div className="grid gap-2">
+                                                    <Label className="text-zinc-100">
+                                                        Personal Access Token
+                                                    </Label>
+                                                    <Input
+                                                        type="password"
+                                                        placeholder="ghp_..."
+                                                        value={newApiKey}
+                                                        onChange={(e) =>
+                                                            setNewApiKey(
+                                                                e.target.value
+                                                            )
+                                                        }
+                                                        className="bg-zinc-800 border-zinc-700 text-zinc-100"
+                                                    />
+                                                    <p className="text-xs text-zinc-500">
+                                                        Token requires 'repo'
+                                                        scope to create PRs.
+                                                    </p>
+                                                </div>
+                                                <Button
+                                                    onClick={handleConnect}
+                                                    disabled={
+                                                        loading || !newApiKey
+                                                    }
+                                                    className="w-full bg-green-600 hover:bg-green-700"
+                                                >
+                                                    {loading ? (
+                                                        <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                                                    ) : (
+                                                        <Cloud className="h-4 w-4 mr-2" />
+                                                    )}
+                                                    Connect GitHub
+                                                </Button>
+                                            </>
+                                        ) : (
                                             <>
                                                 <Alert className="bg-zinc-800 border-zinc-700">
                                                     <AlertDescription className="text-zinc-300">
@@ -322,7 +372,7 @@ export default function SettingsPage() {
                                                     </AlertDescription>
                                                 </Alert>
                                                 <Button
-                                                    onClick={handleGenerateKey}
+                                                    onClick={handleConnect}
                                                     disabled={loading}
                                                     className="w-full bg-green-600 hover:bg-green-700"
                                                 >
@@ -375,6 +425,7 @@ export default function SettingsPage() {
                                                     </div>
                                                 )}
                                             </>
+                                        )}
                                     </div>
                                 )}
                             </CardContent>

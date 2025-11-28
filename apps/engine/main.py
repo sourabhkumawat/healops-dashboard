@@ -7,7 +7,7 @@ from models import Incident, LogEntry, User, Integration, ApiKey, IntegrationSta
 from auth import verify_password, get_password_hash, create_access_token, verify_token
 from integrations import generate_api_key
 
-from integrations.agent import AgentIntegration
+from integrations.github_integration import GithubIntegration
 from middleware import APIKeyMiddleware
 from crypto_utils import encrypt_token, decrypt_token
 from datetime import timedelta, datetime
@@ -40,7 +40,7 @@ class LogIngestRequest(BaseModel):
     service_name: str
     severity: str  # Changed from level to match PRD
     message: str
-    source: str = "agent" # agent
+    source: str = "github" # agent
     timestamp: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     integration_id: Optional[int] = None
@@ -433,38 +433,32 @@ def list_logs(db: Session = Depends(get_db), limit: int = 50, api_key: str = Non
 
 
 # ============================================================================
-# Universal Agent Integration
+# GitHub Integration
 # ============================================================================
 
-@app.get("/integrations/agent/install.sh", response_class=PlainTextResponse)
-def agent_get_install_script():
-    """Download agent install script."""
-    script_path = os.path.join(os.path.dirname(__file__), "templates/install.sh")
-    
-    with open(script_path, 'r') as f:
-        return f.read()
+class GithubConfig(BaseModel):
+    access_token: str
+    repo_name: Optional[str] = None
 
-@app.get("/integrations/agent/install-command")
-def agent_get_install_command(api_key: str):
-    """Get one-line install command."""
-    agent = AgentIntegration()
-    endpoint = os.getenv('BASE_URL', 'http://localhost:8000')
+@app.post("/integrations/github/connect")
+def github_connect(config: GithubConfig, db: Session = Depends(get_db)):
+    """Connect GitHub integration."""
+    # Verify token
+    gh = GithubIntegration(access_token=config.access_token)
+    verification = gh.verify_connection()
+    
+    if verification["status"] == "error":
+        raise HTTPException(status_code=400, detail=verification["message"])
+        
+    # TODO: Associate with user/integration in DB
+    # For now, we just return success to simulate the connection
+    # In a real app, we'd update the Integration record
     
     return {
-        "linux": agent.get_install_command(api_key, endpoint),
-        "windows": agent.get_windows_install_command(api_key, endpoint)
+        "status": "connected",
+        "username": verification.get("username"),
+        "message": "GitHub connected successfully"
     }
-
-@app.post("/integrations/agent/register")
-def agent_register(hostname: str, os_type: str, api_key_hash: str, db: Session = Depends(get_db)):
-    """Register a new agent."""
-    agent = AgentIntegration()
-    
-    result = agent.register_agent(hostname, os_type, api_key_hash)
-    
-    # TODO: Store in database
-    
-    return result
 
 # ============================================================================
 # Integration Management

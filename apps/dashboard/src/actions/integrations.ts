@@ -32,19 +32,28 @@ export async function generateApiKey(name: string) {
     }
 }
 
-
-
-export async function getAgentInstallCommand(apiKey: string) {
+export async function connectGithub(accessToken: string) {
     try {
         const response = await fetch(
-            `${API_BASE}/integrations/agent/install-command?api_key=${encodeURIComponent(
-                apiKey
-            )}`
+            `${API_BASE}/integrations/github/connect`,
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ access_token: accessToken })
+            }
         );
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            return { error: errorText };
+        }
+
         const data = await response.json();
-        return { linux: data.linux, windows: data.windows };
+        return data;
     } catch (error) {
-        return { error: 'Failed to get install command' };
+        return { error: 'Failed to connect to GitHub' };
     }
 }
 
@@ -62,17 +71,17 @@ export async function listApiKeys() {
     try {
         // Get auth token from cookies
         const authToken = (await cookies()).get('auth_token')?.value;
-        
+
         const response = await fetch(`${API_BASE}/api-keys`, {
             headers: {
-                'Authorization': `Bearer ${authToken}`
+                Authorization: `Bearer ${authToken}`
             }
         });
-        
+
         if (!response.ok) {
             return [];
         }
-        
+
         const data = await response.json();
         return data.keys || [];
     } catch (error) {
