@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+test.db
+test_*.py
+quick_test.py
+
+# Environment
+.env
+.env.local
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Node (if any)
+node_modules/
+
+# Celery (not used in Cloud Functions)
+celery_app.py
+tasks.py
+
+# Documentation
+*.md
+!README.md
+
+# Git
+.git/
+.gitignore
+
+# Misc
+.DS_Store
+*.log

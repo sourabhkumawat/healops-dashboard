@@ -1,11 +1,11 @@
-# @healops/opentelemetry
+# @sourabhkumawat0105/healops-opentelemetry
 
 The official HealOps OpenTelemetry SDK for Node.js. Automatically captures and reports error spans to the HealOps platform.
 
 ## Installation
 
 ```bash
-npm install @healops/opentelemetry
+npm install @sourabhkumawat0105/healops-opentelemetry
 ```
 
 ## Usage
@@ -13,7 +13,7 @@ npm install @healops/opentelemetry
 Initialize the SDK at the very beginning of your application (e.g., in `index.ts` or `app.ts`).
 
 ```typescript
-import { initHealOpsOTel } from '@healops/opentelemetry';
+import { initHealOpsOTel } from '@sourabhkumawat0105/healops-opentelemetry';
 
 initHealOpsOTel({
   apiKey: process.env.HEALOPS_API_KEY || 'your-api-key',

@@ -1,5 +1,5 @@
 {
-  "name": "@healops/opentelemetry",
+  "name": "@sourabhkumawat0105/healops-opentelemetry",
   "version": "0.1.0",
   "description": "HealOps OpenTelemetry SDK for Node.js",
   "main": "dist/index.js",
