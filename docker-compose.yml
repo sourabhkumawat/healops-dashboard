@@ -24,7 +24,7 @@ services:
     volumes:
       - ./apps/engine:/app
     environment:
-      - DATABASE_URL=postgresql://user:password@db:5432/healops
+      - DATABASE_URL=postgresql://postgres:Bkdo1J4YWoe912UP@db.hbciocbdafaplqfexqjj.supabase.co:5432/postgres
       - REDIS_URL=redis://redis:6379/0
     depends_on:
       - db
