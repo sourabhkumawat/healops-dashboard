@@ -4,7 +4,10 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 # Use PostgreSQL for production (Supabase)
-DATABASE_URL = "postgresql://postgres:Bkdo1J4YWoe912UP@db.hbciocbdafaplqfexqjj.supabase.co:5432/postgres"
+DATABASE_URL = os.getenv(
+    "DATABASE_URL", 
+    "postgresql://postgres:Bkdo1J4YWoe912UP@db.hbciocbdafaplqfexqjj.supabase.co:5432/postgres"
+)
 
 # Create engine with appropriate connection args
 if "sqlite" in DATABASE_URL:
