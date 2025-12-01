@@ -9,7 +9,12 @@ SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__ident="2b",  # Use bcrypt 2b variant
+    bcrypt__truncate_error=False,  # Don't error on long passwords
+)
 
 def truncate_password(password: str) -> str:
     """Truncate password to 72 bytes (bcrypt limit)"""
