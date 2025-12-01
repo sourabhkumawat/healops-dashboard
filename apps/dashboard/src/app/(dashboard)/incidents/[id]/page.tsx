@@ -35,12 +35,56 @@ export default function IncidentDetailsPage() {
     } | null>(null);
     const [loading, setLoading] = useState(true);
     const [resolving, setResolving] = useState(false);
+    const [analyzing, setAnalyzing] = useState(false);
     const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
+    const triggerAnalysis = async () => {
+        try {
+            const apiBase = getApiBaseUrl();
+            setAnalyzing(true);
+            await fetch(`${apiBase}/incidents/${params.id}/analyze`, {
+                method: 'POST'
+            });
+            // Start polling after triggering analysis
+            if (!pollIntervalRef.current) {
+                pollIntervalRef.current = setInterval(async () => {
+                    const apiBase = getApiBaseUrl();
+                    try {
+                        const response = await fetch(
+                            `${apiBase}/incidents/${params.id}`
+                        );
+                        if (response.ok) {
+                            const result = await response.json();
+                            setData(result);
+                            if (result.incident?.root_cause) {
+                                if (pollIntervalRef.current) {
+                                    clearInterval(pollIntervalRef.current);
+                                    pollIntervalRef.current = null;
+                                }
+                                setAnalyzing(false);
+                            }
+                        }
+                    } catch (error) {
+                        console.error(
+                            'Failed to fetch incident during polling:',
+                            error
+                        );
+                    }
+                }, 3000);
+            }
+        } catch (error) {
+            console.error('Failed to trigger analysis:', error);
+            setAnalyzing(false);
+        }
+    };
+
     useEffect(() => {
+        const apiBase = getApiBaseUrl();
+        let pollCount = 0;
+        const MAX_POLL_ATTEMPTS = 40; // 2 minutes max (40 * 3 seconds)
+
         const fetchIncident = async () => {
             try {
-                const apiBase = getApiBaseUrl();
                 const response = await fetch(
                     `${apiBase}/incidents/${params.id}`
                 );
@@ -49,16 +93,22 @@ export default function IncidentDetailsPage() {
                     setData(result);
                     setLoading(false);
 
-                    // Stop polling if root_cause is available
-                    if (
-                        result.incident?.root_cause &&
-                        pollIntervalRef.current
-                    ) {
-                        clearInterval(pollIntervalRef.current);
-                        pollIntervalRef.current = null;
-                        return false; // Signal polling should stop
+                    // Check if analysis is available
+                    const hasRootCause = !!result.incident?.root_cause;
+
+                    if (hasRootCause) {
+                        // Analysis complete - stop polling
+                        if (pollIntervalRef.current) {
+                            clearInterval(pollIntervalRef.current);
+                            pollIntervalRef.current = null;
+                        }
+                        setAnalyzing(false);
+                        return false; // Don't poll
+                    } else {
+                        // Still analyzing
+                        setAnalyzing(true);
+                        return true; // Continue polling
                     }
-                    return !result.incident?.root_cause; // Return true if polling should continue
                 }
             } catch (error) {
                 console.error('Failed to fetch incident:', error);
@@ -67,11 +117,44 @@ export default function IncidentDetailsPage() {
             return false;
         };
 
-        // Initial fetch and check if polling is needed
+        // Initial fetch and trigger analysis if needed
         fetchIncident().then((shouldPoll) => {
+            // Always start polling if root_cause is not available
             if (shouldPoll && !pollIntervalRef.current) {
-                pollIntervalRef.current = setInterval(() => {
-                    fetchIncident();
+                console.log('Starting polling for AI analysis...');
+                pollIntervalRef.current = setInterval(async () => {
+                    pollCount++;
+
+                    // Stop polling after max attempts
+                    if (pollCount >= MAX_POLL_ATTEMPTS) {
+                        console.warn(
+                            'Max polling attempts reached. Stopping polling.'
+                        );
+                        if (pollIntervalRef.current) {
+                            clearInterval(pollIntervalRef.current);
+                            pollIntervalRef.current = null;
+                        }
+                        setAnalyzing(false);
+                        return;
+                    }
+
+                    const response = await fetch(
+                        `${apiBase}/incidents/${params.id}`
+                    );
+                    if (response.ok) {
+                        const result = await response.json();
+                        setData(result);
+
+                        if (result.incident?.root_cause) {
+                            // Analysis complete!
+                            console.log('AI analysis completed!');
+                            if (pollIntervalRef.current) {
+                                clearInterval(pollIntervalRef.current);
+                                pollIntervalRef.current = null;
+                            }
+                            setAnalyzing(false);
+                        }
+                    }
                 }, 3000);
             }
         });
@@ -244,15 +327,65 @@ export default function IncidentDetailsPage() {
                         </CardHeader>
                         <CardContent className="space-y-4">
                             {incident.root_cause ? (
-                                <div className="rounded-lg bg-zinc-900 p-4 border border-zinc-800">
-                                    <p className="text-sm text-zinc-300">
+                                <div
+                                    className={`rounded-lg p-4 border ${
+                                        incident.root_cause.includes(
+                                            'failed'
+                                        ) ||
+                                        incident.root_cause.includes('error') ||
+                                        incident.root_cause.includes(
+                                            'not configured'
+                                        )
+                                            ? 'bg-red-900/20 border-red-900/50'
+                                            : 'bg-zinc-900 border-zinc-800'
+                                    }`}
+                                >
+                                    <p
+                                        className={`text-sm ${
+                                            incident.root_cause.includes(
+                                                'failed'
+                                            ) ||
+                                            incident.root_cause.includes(
+                                                'error'
+                                            ) ||
+                                            incident.root_cause.includes(
+                                                'not configured'
+                                            )
+                                                ? 'text-red-300'
+                                                : 'text-zinc-300'
+                                        }`}
+                                    >
                                         {incident.root_cause}
                                     </p>
+                                    {(incident.root_cause.includes('failed') ||
+                                        incident.root_cause.includes('error') ||
+                                        incident.root_cause.includes(
+                                            'not configured'
+                                        )) && (
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={triggerAnalysis}
+                                            className="mt-4"
+                                        >
+                                            Retry Analysis
+                                        </Button>
+                                    )}
                                 </div>
                             ) : (
-                                <div className="flex items-center justify-center p-8 text-muted-foreground">
-                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                    Analyzing incident...
+                                <div className="flex flex-col items-center justify-center p-8 text-muted-foreground">
+                                    <Loader2 className="mr-2 h-4 w-4 animate-spin mb-2" />
+                                    <p>Analyzing incident...</p>
+                                    {!analyzing && (
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={triggerAnalysis}
+                                            className="mt-4"
+                                        >
+                                            Retry Analysis
+                                        </Button>
+                                    )}
                                 </div>
                             )}
 

@@ -646,9 +646,11 @@ async def analyze_incident_async(incident_id: int):
     from ai_analysis import analyze_incident_with_openrouter
     
     db = SessionLocal()
+    incident = None
     try:
         incident = db.query(Incident).filter(Incident.id == incident_id).first()
         if not incident:
+            print(f"❌ Incident {incident_id} not found for analysis")
             return
         
         # Fetch related logs
@@ -660,17 +662,41 @@ async def analyze_incident_async(incident_id: int):
         analysis = analyze_incident_with_openrouter(incident, logs, db)
         
         # Update incident with analysis results
+        # Always update root_cause (even if it's an error message) to stop infinite loading
         if analysis.get("root_cause"):
             incident.root_cause = analysis["root_cause"]
         if analysis.get("action_taken"):
             incident.action_taken = analysis["action_taken"]
         
+        # Ensure we always set something to stop infinite loading
+        if not incident.root_cause:
+            incident.root_cause = "Analysis failed - no results returned. Please check logs."
+        
         db.commit()
-        print(f"✅ AI analysis completed for incident {incident_id}")
+        print(f"✅ AI analysis completed for incident {incident_id}: {incident.root_cause[:100]}")
         
     except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
         print(f"❌ Error analyzing incident {incident_id}: {e}")
-        db.rollback()
+        print(f"Full traceback: {error_trace}")
+        
+        # Set error message to stop infinite loading in UI
+        try:
+            if incident:
+                incident.root_cause = f"Analysis error: {str(e)[:200]}. Please check server logs."
+                db.commit()
+                print(f"✅ Set error message for incident {incident_id}")
+            else:
+                # Try to get incident again if we lost the reference
+                incident = db.query(Incident).filter(Incident.id == incident_id).first()
+                if incident:
+                    incident.root_cause = f"Analysis error: {str(e)[:200]}. Please check server logs."
+                    db.commit()
+                    print(f"✅ Set error message for incident {incident_id}")
+        except Exception as commit_error:
+            print(f"❌ Failed to update incident with error message: {commit_error}")
+            db.rollback()
     finally:
         db.close()
 

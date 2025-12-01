@@ -23,13 +23,20 @@ def analyze_incident_with_openrouter(incident: Incident, logs: list[LogEntry], d
     api_key = os.getenv("OPENCOUNCIL_API")
     if not api_key:
         print("⚠️  OPENCOUNCIL_API not set, skipping AI analysis")
-        return {"root_cause": None, "action_taken": None}
+        # Return an error message instead of None so UI stops loading
+        return {
+            "root_cause": "AI analysis is not configured. Please set OPENCOUNCIL_API environment variable.",
+            "action_taken": None
+        }
     
     # Prepare context from incident and logs
     log_context = "\n".join([
-        f"[{log.timestamp}] {log.level}: {log.message}" 
-        for log in logs[:20]  # Limit to last 20 logs
+        f"[{log.timestamp or 'N/A'}] {log.level or 'UNKNOWN'}: {log.message or 'No message'}" 
+        for log in (logs or [])[:20]  # Limit to last 20 logs
     ])
+    
+    if not log_context:
+        log_context = "No related logs available."
     
     incident_context = f"""
 Incident Details:
@@ -90,8 +97,13 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
         )
         
         if response.status_code != 200:
-            print(f"❌ OpenRouter API error: {response.status_code} - {response.text}")
-            return {"root_cause": None, "action_taken": None}
+            error_msg = f"OpenRouter API error (status {response.status_code}): {response.text[:200]}"
+            print(f"❌ {error_msg}")
+            # Return error message so UI stops loading
+            return {
+                "root_cause": f"Analysis failed: {error_msg}",
+                "action_taken": None
+            }
         
         result = response.json()
         content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -126,5 +138,12 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
             }
             
     except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
         print(f"❌ Error calling OpenRouter API: {e}")
-        return {"root_cause": None, "action_taken": None}
+        print(f"Full traceback: {error_trace}")
+        # Return a fallback message instead of None so the UI stops loading
+        return {
+            "root_cause": f"Analysis failed: {str(e)[:200]}. Please check OPENCOUNCIL_API configuration.",
+            "action_taken": None
+        }
