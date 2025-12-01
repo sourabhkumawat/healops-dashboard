@@ -52,6 +52,8 @@ type ApiKey = {
     is_active: boolean;
 };
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 export default function SettingsPage() {
     const [integrations, setIntegrations] = useState<Integration[]>([]);
     const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
@@ -112,7 +114,7 @@ export default function SettingsPage() {
 
     const fetchIntegrations = async () => {
         try {
-            const response = await fetch('http://localhost:8000/integrations');
+            const response = await fetch(`${API_BASE}/integrations`);
             if (response.ok) {
                 const data = await response.json();
                 setIntegrations(data.integrations || []);
@@ -343,7 +345,7 @@ export default function SettingsPage() {
                                                         Connect your GitHub account to enable automatic pull request creation and code management.
                                                     </p>
                                                     <Button
-                                                        onClick={() => window.location.href = 'http://localhost:8000/integrations/github/authorize'}
+                                                        onClick={() => window.location.href = `${API_BASE}/integrations/github/authorize`}
                                                         className="w-full bg-[#24292F] hover:bg-[#24292F]/90 text-white"
                                                     >
                                                         <Cloud className="h-4 w-4 mr-2" />
