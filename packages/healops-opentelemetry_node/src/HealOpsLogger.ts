@@ -26,6 +26,49 @@ export class HealOpsLogger {
   }
 
   /**
+   * Extract caller information from stack trace
+   * This works in browsers (Chrome, Firefox, Safari, Edge)
+   */
+  private getCallerInfo(): { filePath?: string; line?: number; column?: number } {
+    try {
+      const stack = new Error().stack;
+      if (!stack) return {};
+
+      const stackLines = stack.split('\n');
+      // Skip: "Error", "getCallerInfo", "sendLog", and the public method (info/warn/error/critical)
+      // Line 4 is the actual caller
+      const callerLine = stackLines[4] || stackLines[3];
+      if (!callerLine) return {};
+
+      // Chrome/Edge format: "at functionName (file:line:column)" or "at file:line:column"
+      const chromeMatch = callerLine.match(/\(([^)]+):(\d+):(\d+)\)/) || 
+                          callerLine.match(/at\s+([^:]+):(\d+):(\d+)/);
+      if (chromeMatch) {
+        return {
+          filePath: chromeMatch[1].trim(),
+          line: parseInt(chromeMatch[2]),
+          column: parseInt(chromeMatch[3])
+        };
+      }
+
+      // Firefox format: "functionName@file:line:column"
+      const firefoxMatch = callerLine.match(/@([^:]+):(\d+):(\d+)/);
+      if (firefoxMatch) {
+        return {
+          filePath: firefoxMatch[1].trim(),
+          line: parseInt(firefoxMatch[2]),
+          column: parseInt(firefoxMatch[3])
+        };
+      }
+
+      return {};
+    } catch (e) {
+      // Silent fail - don't break logging if stack parsing fails
+      return {};
+    }
+  }
+
+  /**
    * Send an INFO level log
    */
   info(message: string, metadata?: Record<string, any>): void {
@@ -58,13 +101,20 @@ export class HealOpsLogger {
     message: string,
     metadata?: Record<string, any>
   ): Promise<void> {
+    // Automatically capture caller info and merge with user metadata
+    const callerInfo = this.getCallerInfo();
+    const enrichedMetadata = {
+      ...metadata,
+      ...callerInfo
+    };
+
     const payload: LogPayload = {
       service_name: this.config.serviceName,
       severity,
       message,
       source: this.config.source || 'healops-sdk',
       timestamp: new Date().toISOString(),
-      metadata,
+      metadata: enrichedMetadata,
     };
 
     try {
