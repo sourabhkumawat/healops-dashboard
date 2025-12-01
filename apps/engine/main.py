@@ -1,11 +1,12 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import json
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import PlainTextResponse, FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
-from database import engine, Base, get_db
+from database import engine, Base, get_db, SessionLocal
 from models import Incident, LogEntry, User, Integration, ApiKey, IntegrationStatus
 from auth import verify_password, get_password_hash, create_access_token, verify_token
 from integrations import generate_api_key
@@ -20,6 +21,56 @@ import time
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import requests
+
+def get_user_id_from_request(request: Request, default: int = 1, db: Session = None) -> int:
+    """
+    Get user_id from request state (API key) or JWT token if available, otherwise return default.
+    This allows endpoints to work with or without authentication.
+    
+    Args:
+        request: FastAPI Request object
+        default: Default user_id to return if not found
+        db: Optional database session (if not provided, will create a new one)
+    """
+    # First, try to get from API key (for API key authenticated requests)
+    if hasattr(request.state, 'api_key') and request.state.api_key:
+        return request.state.api_key.user_id
+    
+    # Second, try to get from JWT token (for dashboard/frontend requests)
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header.replace("Bearer ", "").strip()
+        try:
+            from jose import JWTError, jwt
+            import os
+            SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
+            ALGORITHM = "HS256"
+            
+            try:
+                payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+                email = payload.get("sub")
+                if email:
+                    # Look up user by email to get user_id
+                    # Use provided db session or create a new one
+                    should_close = False
+                    if db is None:
+                        db = SessionLocal()
+                        should_close = True
+                    
+                    try:
+                        user = db.query(User).filter(User.email == email).first()
+                        if user:
+                            return user.id
+                    finally:
+                        if should_close:
+                            db.close()
+            except JWTError:
+                pass  # Invalid token, fall through to default
+        except Exception as e:
+            # Silently fail and use default
+            pass
+    
+    return default
 
 
 # Create tables
@@ -92,7 +143,12 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     access_token = create_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    # Return token in both body (standard OAuth2) and Authorization header (for convenience)
+    return Response(
+        content=json.dumps({"access_token": access_token, "token_type": "bearer"}),
+        media_type="application/json",
+        headers={"Authorization": f"Bearer {access_token}"}
+    )
 
 from fastapi import WebSocket, WebSocketDisconnect, BackgroundTasks
 
@@ -363,10 +419,10 @@ class ApiKeyRequest(BaseModel):
     name: str
 
 @app.post("/api-keys/generate")
-def create_api_key(request: ApiKeyRequest, db: Session = Depends(get_db)):
+def create_api_key(request: ApiKeyRequest, http_request: Request, db: Session = Depends(get_db)):
     """Generate a new API key for integrations."""
-    # TODO: Get user from JWT token
-    user_id = 1  # Placeholder
+    # Get user_id from request if available (from API key or JWT), otherwise default to 1
+    user_id = get_user_id_from_request(http_request, default=1, db=db)
     
     full_key, key_hash, key_prefix = generate_api_key()
     
@@ -390,10 +446,10 @@ def create_api_key(request: ApiKeyRequest, db: Session = Depends(get_db)):
     }
 
 @app.get("/api-keys")
-def list_api_keys(db: Session = Depends(get_db)):
+def list_api_keys(request: Request, db: Session = Depends(get_db)):
     """List all API keys (without revealing the actual keys)."""
-    # TODO: Get user from JWT token
-    user_id = 1  # Placeholder
+    # Get user_id from request if available, otherwise default to 1
+    user_id = get_user_id_from_request(request, default=1, db=db)
     
     keys = db.query(ApiKey).filter(ApiKey.user_id == user_id).all()
     
@@ -412,13 +468,18 @@ def list_api_keys(db: Session = Depends(get_db)):
     }
 
 @app.get("/logs")
-def list_logs(db: Session = Depends(get_db), limit: int = 50, api_key: str = None):
-    """List recent log entries. Requires API key via X-API-Key header or query parameter."""
-    # Get API key from header or query parameter
-    from fastapi import Header
+def list_logs(limit: int = 50, user_id: Optional[int] = None, request: Request = None, db: Session = Depends(get_db)):
+    """List recent log entries. Optionally filter by user_id."""
+    query = db.query(LogEntry)
     
-    # For testing, just return all logs
-    logs = db.query(LogEntry).order_by(LogEntry.timestamp.desc()).limit(limit).all()
+    # If user_id is provided as query param, use it; otherwise try to get from request
+    if user_id is None and request:
+        user_id = get_user_id_from_request(request, default=None, db=db)
+    
+    if user_id:
+        query = query.filter(LogEntry.user_id == user_id)
+    
+    logs = query.order_by(LogEntry.timestamp.desc()).limit(limit).all()
     
     return {
         "logs": [
@@ -505,11 +566,10 @@ def github_callback(code: str, db: Session = Depends(get_db)):
     if user_info["status"] == "error":
         raise HTTPException(status_code=400, detail="Invalid token obtained")
         
-    # TODO: Get actual user_id from session/auth. 
-    # Since this is a callback, we might need to rely on a state parameter or cookie to identify the user if not using a global session.
-    # For this MVP/Agent context, we'll assume user_id=1 or try to get it if possible, but the callback comes from GitHub.
-    # A common pattern is to pass a state param with the user's session token, but for simplicity here we'll default to 1 
-    # or assume single-user mode for the demo.
+    # NOTE: GitHub OAuth callback doesn't have user context in the request.
+    # In production, you should pass a 'state' parameter in the OAuth flow with the user's session token.
+    # For now, defaulting to user_id=1 for existing data compatibility.
+    # TODO: Implement state parameter in OAuth flow to get actual user_id
     user_id = 1 
     
     # Encrypt token
@@ -543,7 +603,7 @@ def github_callback(code: str, db: Session = Depends(get_db)):
 
 
 @app.post("/integrations/github/connect")
-def github_connect(config: GithubConfig, db: Session = Depends(get_db)):
+def github_connect(config: GithubConfig, request: Request, db: Session = Depends(get_db)):
     """Connect GitHub integration."""
     # Verify token
     gh = GithubIntegration(access_token=config.access_token)
@@ -551,10 +611,36 @@ def github_connect(config: GithubConfig, db: Session = Depends(get_db)):
     
     if verification["status"] == "error":
         raise HTTPException(status_code=400, detail=verification["message"])
-        
-    # TODO: Associate with user/integration in DB
-    # For now, we just return success to simulate the connection
-    # In a real app, we'd update the Integration record
+    
+    # Get user_id from request if available, otherwise default to 1
+    user_id = get_user_id_from_request(request, default=1, db=db)
+    
+    # Encrypt token
+    encrypted_token = encrypt_token(config.access_token)
+    
+    # Check if integration already exists
+    integration = db.query(Integration).filter(
+        Integration.user_id == user_id,
+        Integration.provider == "GITHUB"
+    ).first()
+    
+    if not integration:
+        integration = Integration(
+            user_id=user_id,
+            provider="GITHUB",
+            name=f"GitHub ({verification.get('username', 'User')})",
+            status="ACTIVE",
+            access_token=encrypted_token,
+            last_verified=datetime.utcnow()
+        )
+        db.add(integration)
+    else:
+        integration.access_token = encrypted_token
+        integration.status = "ACTIVE"
+        integration.last_verified = datetime.utcnow()
+        integration.name = f"GitHub ({verification.get('username', 'User')})"
+    
+    db.commit()
     
     return {
         "status": "connected",
@@ -567,10 +653,10 @@ def github_connect(config: GithubConfig, db: Session = Depends(get_db)):
 # ============================================================================
 
 @app.get("/integrations")
-def list_integrations(db: Session = Depends(get_db)):
+def list_integrations(request: Request, db: Session = Depends(get_db)):
     """List all user integrations."""
-    # TODO: Get user from JWT token
-    user_id = 1  # Placeholder
+    # Get user_id from request if available, otherwise default to 1
+    user_id = get_user_id_from_request(request, default=1, db=db)
     
     integrations = db.query(Integration).filter(Integration.user_id == user_id).all()
     
@@ -597,10 +683,10 @@ def list_providers():
     return IntegrationRegistry.list_providers()
 
 @app.get("/integrations/{integration_id}/config")
-def get_integration_config(integration_id: int, db: Session = Depends(get_db)):
+def get_integration_config(integration_id: int, request: Request, db: Session = Depends(get_db)):
     """Get integration configuration including service mappings."""
-    # TODO: Get user from JWT token
-    user_id = 1  # Placeholder
+    # Get user_id from request if available, otherwise default to 1
+    user_id = get_user_id_from_request(request, default=1, db=db)
     
     integration = db.query(Integration).filter(
         Integration.id == integration_id,
@@ -622,10 +708,10 @@ def get_integration_config(integration_id: int, db: Session = Depends(get_db)):
     }
 
 @app.post("/integrations/{integration_id}/service-mapping")
-def add_service_mapping(integration_id: int, mapping: ServiceMappingRequest, db: Session = Depends(get_db)):
+def add_service_mapping(integration_id: int, mapping: ServiceMappingRequest, request: Request, db: Session = Depends(get_db)):
     """Add or update a service-to-repo mapping."""
-    # TODO: Get user from JWT token
-    user_id = 1  # Placeholder
+    # Get user_id from request if available, otherwise default to 1
+    user_id = get_user_id_from_request(request, default=1, db=db)
     
     integration = db.query(Integration).filter(
         Integration.id == integration_id,
@@ -660,10 +746,10 @@ def add_service_mapping(integration_id: int, mapping: ServiceMappingRequest, db:
     }
 
 @app.put("/integrations/{integration_id}/service-mappings")
-def update_service_mappings(integration_id: int, update: ServiceMappingsUpdateRequest, db: Session = Depends(get_db)):
+def update_service_mappings(integration_id: int, update: ServiceMappingsUpdateRequest, request: Request, db: Session = Depends(get_db)):
     """Update all service-to-repo mappings at once."""
-    # TODO: Get user from JWT token
-    user_id = 1  # Placeholder
+    # Get user_id from request if available, otherwise default to 1
+    user_id = get_user_id_from_request(request, default=1, db=db)
     
     integration = db.query(Integration).filter(
         Integration.id == integration_id,
@@ -700,10 +786,10 @@ def update_service_mappings(integration_id: int, update: ServiceMappingsUpdateRe
     }
 
 @app.delete("/integrations/{integration_id}/service-mapping/{service_name}")
-def remove_service_mapping(integration_id: int, service_name: str, db: Session = Depends(get_db)):
+def remove_service_mapping(integration_id: int, service_name: str, request: Request, db: Session = Depends(get_db)):
     """Remove a service-to-repo mapping."""
-    # TODO: Get user from JWT token
-    user_id = 1  # Placeholder
+    # Get user_id from request if available, otherwise default to 1
+    user_id = get_user_id_from_request(request, default=1, db=db)
     
     integration = db.query(Integration).filter(
         Integration.id == integration_id,
@@ -732,12 +818,16 @@ def remove_service_mapping(integration_id: int, service_name: str, db: Session =
     }
 
 @app.get("/services")
-def list_services(user_id: Optional[int] = None, db: Session = Depends(get_db)):
+def list_services(user_id: Optional[int] = None, request: Request = None, db: Session = Depends(get_db)):
     """Get list of unique service names from logs and incidents.
     If user_id is provided, only returns services for that user.
     Otherwise returns all services (for backward compatibility).
     """
     try:
+        # If user_id not provided, try to get from request
+        if user_id is None and request:
+            user_id = get_user_id_from_request(request, default=None, db=db)
+        
         # Get unique service names from logs
         log_query = db.query(LogEntry.service_name).distinct().filter(
             LogEntry.service_name.isnot(None),
@@ -785,10 +875,10 @@ def list_services(user_id: Optional[int] = None, db: Session = Depends(get_db)):
         }
 
 @app.get("/integrations/{integration_id}/repositories")
-def list_repositories(integration_id: int, db: Session = Depends(get_db)):
+def list_repositories(integration_id: int, request: Request, db: Session = Depends(get_db)):
     """Get list of repositories accessible by the GitHub integration."""
-    # TODO: Get user from JWT token
-    user_id = 1  # Placeholder
+    # Get user_id from request if available, otherwise default to 1
+    user_id = get_user_id_from_request(request, default=1, db=db)
     
     try:
         integration = db.query(Integration).filter(
@@ -848,11 +938,15 @@ def list_repositories(integration_id: int, db: Session = Depends(get_db)):
 # ============================================================================
 
 @app.get("/incidents")
-def list_incidents(status: Optional[str] = None, user_id: Optional[int] = None, db: Session = Depends(get_db)):
+def list_incidents(status: Optional[str] = None, user_id: Optional[int] = None, request: Request = None, db: Session = Depends(get_db)):
     """List incidents with optional status and user_id filter.
     If user_id is provided, only returns incidents for that user.
     Otherwise returns all incidents (for backward compatibility).
     """
+    # If user_id not provided, try to get from request
+    if user_id is None and request:
+        user_id = get_user_id_from_request(request, default=None, db=db)
+    
     query = db.query(Incident)
     if status:
         query = query.filter(Incident.status == status)
@@ -863,16 +957,25 @@ def list_incidents(status: Optional[str] = None, user_id: Optional[int] = None, 
     return incidents
 
 @app.get("/incidents/{incident_id}")
-async def get_incident(incident_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def get_incident(incident_id: int, background_tasks: BackgroundTasks, request: Request, db: Session = Depends(get_db)):
     """Get incident details including related logs. Triggers AI analysis if not already done."""
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+    # Get user_id from request if available
+    user_id = get_user_id_from_request(request, default=None, db=db)
+    
+    query = db.query(Incident).filter(Incident.id == incident_id)
+    if user_id:
+        query = query.filter(Incident.user_id == user_id)
+    incident = query.first()
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     
-    # Fetch related logs
+    # Fetch related logs (filter by user_id if available)
     logs = []
     if incident.log_ids:
-        logs = db.query(LogEntry).filter(LogEntry.id.in_(incident.log_ids)).order_by(LogEntry.timestamp.desc()).all()
+        log_query = db.query(LogEntry).filter(LogEntry.id.in_(incident.log_ids))
+        if user_id:
+            log_query = log_query.filter(LogEntry.user_id == user_id)
+        logs = log_query.order_by(LogEntry.timestamp.desc()).all()
     
     # Trigger AI analysis in background if root_cause is not set
     if not incident.root_cause:
@@ -885,9 +988,15 @@ async def get_incident(incident_id: int, background_tasks: BackgroundTasks, db: 
     }
 
 @app.post("/incidents/{incident_id}/analyze")
-async def analyze_incident(incident_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def analyze_incident(incident_id: int, background_tasks: BackgroundTasks, request: Request, db: Session = Depends(get_db)):
     """Manually trigger AI analysis for an incident."""
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+    # Get user_id from request if available
+    user_id = get_user_id_from_request(request, default=None, db=db)
+    
+    query = db.query(Incident).filter(Incident.id == incident_id)
+    if user_id:
+        query = query.filter(Incident.user_id == user_id)
+    incident = query.first()
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     
@@ -972,9 +1081,15 @@ async def analyze_incident_async(incident_id: int):
         db.close()
 
 @app.patch("/incidents/{incident_id}")
-def update_incident(incident_id: int, update_data: dict, db: Session = Depends(get_db)):
+def update_incident(incident_id: int, update_data: dict, request: Request, db: Session = Depends(get_db)):
     """Update incident status or severity."""
-    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+    # Get user_id from request if available
+    user_id = get_user_id_from_request(request, default=None, db=db)
+    
+    query = db.query(Incident).filter(Incident.id == incident_id)
+    if user_id:
+        query = query.filter(Incident.user_id == user_id)
+    incident = query.first()
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     

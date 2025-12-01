@@ -3,15 +3,15 @@
 import { cookies } from 'next/headers';
 
 import { API_BASE } from '@/lib/config';
+import { fetchWithAuth, getAuthHeaders } from '@/lib/api-client';
 
 export async function generateApiKey(name: string) {
     try {
         console.log('Generating API key for:', name);
-        const response = await fetch(`${API_BASE}/api-keys/generate`, {
+        const headers = await getAuthHeaders();
+        const response = await fetchWithAuth(`${API_BASE}/api-keys/generate`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers,
             body: JSON.stringify({ name })
         });
 
@@ -67,15 +67,27 @@ export async function listProviders() {
     }
 }
 
+export async function listIntegrations() {
+    try {
+        const headers = await getAuthHeaders();
+        const response = await fetchWithAuth(`${API_BASE}/integrations`, {
+            headers
+        });
+        if (!response.ok) {
+            return { integrations: [] };
+        }
+        return await response.json();
+    } catch (error) {
+        console.error('Error fetching integrations:', error);
+        return { integrations: [] };
+    }
+}
+
 export async function listApiKeys() {
     try {
-        // Get auth token from cookies
-        const authToken = (await cookies()).get('auth_token')?.value;
-
-        const response = await fetch(`${API_BASE}/api-keys`, {
-            headers: {
-                Authorization: `Bearer ${authToken}`
-            }
+        const headers = await getAuthHeaders();
+        const response = await fetchWithAuth(`${API_BASE}/api-keys`, {
+            headers
         });
 
         if (!response.ok) {
@@ -102,7 +114,7 @@ export async function getAgentInstallCommand(apiKey: string) {
 
 export async function getIntegrationConfig(integrationId: number) {
     try {
-        const response = await fetch(
+        const response = await fetchWithAuth(
             `${API_BASE}/integrations/${integrationId}/config`
         );
         if (!response.ok) {
@@ -120,13 +132,12 @@ export async function addServiceMapping(
     repoName: string
 ) {
     try {
-        const response = await fetch(
+        const headers = await getAuthHeaders();
+        const response = await fetchWithAuth(
             `${API_BASE}/integrations/${integrationId}/service-mapping`,
             {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers,
                 body: JSON.stringify({
                     service_name: serviceName,
                     repo_name: repoName
@@ -148,7 +159,7 @@ export async function removeServiceMapping(
     serviceName: string
 ) {
     try {
-        const response = await fetch(
+        const response = await fetchWithAuth(
             `${API_BASE}/integrations/${integrationId}/service-mapping/${serviceName}`,
             {
                 method: 'DELETE'
@@ -168,11 +179,10 @@ export async function getServices() {
     try {
         const apiUrl = `${API_BASE}/services`;
         console.log('Fetching services from:', apiUrl);
-        const response = await fetch(apiUrl, {
+        const headers = await getAuthHeaders();
+        const response = await fetchWithAuth(apiUrl, {
             method: 'GET',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers,
             cache: 'no-store'
         });
         console.log('Services response status:', response.status);
@@ -198,11 +208,10 @@ export async function getRepositories(integrationId: number) {
     try {
         const apiUrl = `${API_BASE}/integrations/${integrationId}/repositories`;
         console.log('Fetching repositories from:', apiUrl);
-        const response = await fetch(apiUrl, {
+        const headers = await getAuthHeaders();
+        const response = await fetchWithAuth(apiUrl, {
             method: 'GET',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers,
             cache: 'no-store'
         });
         console.log('Repositories response status:', response.status);
