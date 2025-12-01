@@ -52,7 +52,7 @@ type ApiKey = {
     is_active: boolean;
 };
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+import { API_BASE } from '@/lib/config';
 
 export default function SettingsPage() {
     const [integrations, setIntegrations] = useState<Integration[]>([]);
@@ -339,20 +339,26 @@ export default function SettingsPage() {
                                     <div className="mt-6 space-y-4">
                                         {selectedProvider === 'github' ? (
                                             <>
-                                            <>
-                                                <div className="text-center space-y-4 py-4">
-                                                    <p className="text-sm text-zinc-400">
-                                                        Connect your GitHub account to enable automatic pull request creation and code management.
-                                                    </p>
-                                                    <Button
-                                                        onClick={() => window.location.href = `${API_BASE}/integrations/github/authorize`}
-                                                        className="w-full bg-[#24292F] hover:bg-[#24292F]/90 text-white"
-                                                    >
-                                                        <Cloud className="h-4 w-4 mr-2" />
-                                                        Connect with GitHub
-                                                    </Button>
-                                                </div>
-                                            </>
+                                                <>
+                                                    <div className="text-center space-y-4 py-4">
+                                                        <p className="text-sm text-zinc-400">
+                                                            Connect your GitHub
+                                                            account to enable
+                                                            automatic pull
+                                                            request creation and
+                                                            code management.
+                                                        </p>
+                                                        <Button
+                                                            onClick={() =>
+                                                                (window.location.href = `${API_BASE}/integrations/github/authorize`)
+                                                            }
+                                                            className="w-full bg-[#24292F] hover:bg-[#24292F]/90 text-white"
+                                                        >
+                                                            <Cloud className="h-4 w-4 mr-2" />
+                                                            Connect with GitHub
+                                                        </Button>
+                                                    </div>
+                                                </>
                                             </>
                                         ) : (
                                             <>
