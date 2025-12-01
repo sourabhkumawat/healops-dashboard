@@ -89,3 +89,13 @@ export async function listApiKeys() {
         return [];
     }
 }
+
+export async function getAgentInstallCommand(apiKey: string) {
+    // In a real app, this might fetch from an API or be constructed dynamically
+    const installUrl = `${API_BASE}/agent/install.sh`;
+    return {
+        linux: `curl -sL ${installUrl} | sudo bash -s -- --api-key=${apiKey}`,
+        windows: `iwr -useb ${API_BASE}/agent/install.ps1 | iex`,
+        macos: `curl -sL ${installUrl} | sudo bash -s -- --api-key=${apiKey}`
+    };
+}
