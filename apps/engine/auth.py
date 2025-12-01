@@ -21,7 +21,19 @@ def truncate_password(password: str) -> str:
     return password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
 
 def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(truncate_password(plain_password), hashed_password)
+    """Verify a plain password against a hashed password."""
+    if not plain_password or not hashed_password:
+        return False
+    if not isinstance(plain_password, str) or not isinstance(hashed_password, str):
+        return False
+    try:
+        return pwd_context.verify(truncate_password(plain_password), hashed_password)
+    except Exception as e:
+        # Handle invalid hash format or other verification errors
+        # Log the error for debugging but don't expose it to the user
+        import logging
+        logging.error(f"Password verification error: {type(e).__name__}: {str(e)}")
+        return False
 
 def get_password_hash(password):
     return pwd_context.hash(truncate_password(password))
