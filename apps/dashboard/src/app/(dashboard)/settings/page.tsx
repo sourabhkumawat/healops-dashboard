@@ -128,6 +128,16 @@ export default function SettingsPage() {
             await Promise.all([fetchApiKeys(), fetchIntegrations()]);
         };
         loadData();
+
+        // Check for success param
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('github_connected') === 'true') {
+            // Clear param
+            window.history.replaceState({}, '', window.location.pathname);
+            // Refresh integrations
+            fetchIntegrations();
+            // Show success (could add a toast here if available, or just rely on the list updating)
+        }
     }, []);
 
     const copyToClipboard = (text: string) => {
@@ -327,40 +337,20 @@ export default function SettingsPage() {
                                     <div className="mt-6 space-y-4">
                                         {selectedProvider === 'github' ? (
                                             <>
-                                                <div className="grid gap-2">
-                                                    <Label className="text-zinc-100">
-                                                        Personal Access Token
-                                                    </Label>
-                                                    <Input
-                                                        type="password"
-                                                        placeholder="ghp_..."
-                                                        value={newApiKey}
-                                                        onChange={(e) =>
-                                                            setNewApiKey(
-                                                                e.target.value
-                                                            )
-                                                        }
-                                                        className="bg-zinc-800 border-zinc-700 text-zinc-100"
-                                                    />
-                                                    <p className="text-xs text-zinc-500">
-                                                        Token requires 'repo'
-                                                        scope to create PRs.
+                                            <>
+                                                <div className="text-center space-y-4 py-4">
+                                                    <p className="text-sm text-zinc-400">
+                                                        Connect your GitHub account to enable automatic pull request creation and code management.
                                                     </p>
-                                                </div>
-                                                <Button
-                                                    onClick={handleConnect}
-                                                    disabled={
-                                                        loading || !newApiKey
-                                                    }
-                                                    className="w-full bg-green-600 hover:bg-green-700"
-                                                >
-                                                    {loading ? (
-                                                        <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                                                    ) : (
+                                                    <Button
+                                                        onClick={() => window.location.href = 'http://localhost:8000/integrations/github/authorize'}
+                                                        className="w-full bg-[#24292F] hover:bg-[#24292F]/90 text-white"
+                                                    >
                                                         <Cloud className="h-4 w-4 mr-2" />
-                                                    )}
-                                                    Connect GitHub
-                                                </Button>
+                                                        Connect with GitHub
+                                                    </Button>
+                                                </div>
+                                            </>
                                             </>
                                         ) : (
                                             <>

@@ -12,9 +12,16 @@ def get_encryption_key() -> bytes:
     """Get or generate encryption key from environment or derive from SECRET_KEY."""
     key_str = os.getenv("ENCRYPTION_KEY")
     if key_str:
-        return key_str.encode()
+        try:
+            # Validate key
+            decoded = base64.urlsafe_b64decode(key_str)
+            if len(decoded) == 32:
+                return key_str.encode()
+        except Exception:
+            pass
+        print("WARNING: Invalid ENCRYPTION_KEY in environment. Falling back to derived key.")
     
-    # Derive key from SECRET_KEY if ENCRYPTION_KEY not set
+    # Derive key from SECRET_KEY if ENCRYPTION_KEY not set or invalid
     secret = os.getenv("SECRET_KEY", "supersecretkey")
     salt = b'healops_salt_2024'  # In production, use a random salt stored securely
     kdf = PBKDF2HMAC(

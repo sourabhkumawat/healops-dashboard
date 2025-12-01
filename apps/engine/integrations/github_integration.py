@@ -17,8 +17,13 @@ class GithubIntegration:
             db = SessionLocal()
             try:
                 integration = db.query(Integration).filter(Integration.id == integration_id).first()
-                if integration:
-                    self.access_token = integration.access_token
+                if integration and integration.access_token:
+                    from crypto_utils import decrypt_token
+                    try:
+                        self.access_token = decrypt_token(integration.access_token)
+                    except Exception:
+                        # Fallback for legacy plain text tokens
+                        self.access_token = integration.access_token
             finally:
                 db.close()
                 
@@ -92,4 +97,7 @@ class GithubIntegration:
             
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+
+
 

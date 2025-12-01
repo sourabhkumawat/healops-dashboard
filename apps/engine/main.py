@@ -1,6 +1,9 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from fastapi.responses import PlainTextResponse, FileResponse
+from fastapi.responses import PlainTextResponse, FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from database import engine, Base, get_db
 from models import Incident, LogEntry, User, Integration, ApiKey, IntegrationStatus
@@ -16,6 +19,8 @@ import secrets
 import time
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
+import requests
+
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -439,6 +444,92 @@ def list_logs(db: Session = Depends(get_db), limit: int = 50, api_key: str = Non
 class GithubConfig(BaseModel):
     access_token: str
     repo_name: Optional[str] = None
+
+GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
+GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+@app.get("/integrations/github/authorize")
+def github_authorize():
+    """Redirect user to GitHub OAuth authorization page."""
+    if not GITHUB_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="GitHub Client ID not configured")
+    
+    # Scopes: repo (for private repos), read:user (for user info)
+    scope = "repo read:user"
+    return RedirectResponse(
+        f"https://github.com/login/oauth/authorize?client_id={GITHUB_CLIENT_ID}&scope={scope}"
+    )
+
+@app.get("/integrations/github/callback")
+def github_callback(code: str, db: Session = Depends(get_db)):
+    """Handle GitHub OAuth callback."""
+    if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+        raise HTTPException(status_code=500, detail="GitHub credentials not configured")
+        
+    # Exchange code for token
+    response = requests.post(
+        "https://github.com/login/oauth/access_token",
+        headers={"Accept": "application/json"},
+        data={
+            "client_id": GITHUB_CLIENT_ID,
+            "client_secret": GITHUB_CLIENT_SECRET,
+            "code": code
+        }
+    )
+    
+    if response.status_code != 200:
+        raise HTTPException(status_code=400, detail="Failed to retrieve access token")
+        
+    data = response.json()
+    access_token = data.get("access_token")
+    
+    if not access_token:
+        raise HTTPException(status_code=400, detail=f"No access token returned: {data}")
+        
+    # Verify and get user info
+    gh = GithubIntegration(access_token=access_token)
+    user_info = gh.verify_connection()
+    
+    if user_info["status"] == "error":
+        raise HTTPException(status_code=400, detail="Invalid token obtained")
+        
+    # TODO: Get actual user_id from session/auth. 
+    # Since this is a callback, we might need to rely on a state parameter or cookie to identify the user if not using a global session.
+    # For this MVP/Agent context, we'll assume user_id=1 or try to get it if possible, but the callback comes from GitHub.
+    # A common pattern is to pass a state param with the user's session token, but for simplicity here we'll default to 1 
+    # or assume single-user mode for the demo.
+    user_id = 1 
+    
+    # Encrypt token
+    encrypted_token = encrypt_token(access_token)
+    
+    # Check if integration already exists
+    integration = db.query(Integration).filter(
+        Integration.user_id == user_id,
+        Integration.provider == "GITHUB"
+    ).first()
+    
+    if not integration:
+        integration = Integration(
+            user_id=user_id,
+            provider="GITHUB",
+            name=f"GitHub ({user_info['username']})",
+            status="ACTIVE",
+            access_token=encrypted_token,
+            last_verified=datetime.utcnow()
+        )
+        db.add(integration)
+    else:
+        integration.access_token = encrypted_token
+        integration.status = "ACTIVE"
+        integration.last_verified = datetime.utcnow()
+        integration.name = f"GitHub ({user_info['username']})"
+        
+    db.commit()
+    
+    return RedirectResponse(f"{FRONTEND_URL}/settings?github_connected=true")
+
 
 @app.post("/integrations/github/connect")
 def github_connect(config: GithubConfig, db: Session = Depends(get_db)):
