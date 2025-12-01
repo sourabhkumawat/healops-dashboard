@@ -30,8 +30,20 @@ import {
 import {
     generateApiKey,
     connectGithub,
-    listApiKeys
+    listApiKeys,
+    getIntegrationConfig,
+    addServiceMapping,
+    removeServiceMapping,
+    getServices,
+    getRepositories
 } from '@/actions/integrations';
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue
+} from '@/components/ui/select';
 
 type Integration = {
     id: number;
@@ -64,6 +76,23 @@ export default function SettingsPage() {
     const [newApiKey, setNewApiKey] = useState('');
     const [loading, setLoading] = useState(false);
     const keyCounterRef = useRef(0);
+    const [expandedIntegration, setExpandedIntegration] = useState<
+        number | null
+    >(null);
+    const [integrationConfigs, setIntegrationConfigs] = useState<
+        Record<number, any>
+    >({});
+    const [newServiceName, setNewServiceName] = useState('');
+    const [newRepoName, setNewRepoName] = useState('');
+    const [mappingLoading, setMappingLoading] = useState<number | null>(null);
+    const [availableServices, setAvailableServices] = useState<string[]>([]);
+    const [availableRepos, setAvailableRepos] = useState<
+        Record<number, Array<{ full_name: string; name: string }>>
+    >({});
+    const [loadingServices, setLoadingServices] = useState(false);
+    const [loadingRepos, setLoadingRepos] = useState<Record<number, boolean>>(
+        {}
+    );
 
     const providers = [
         {
@@ -144,6 +173,125 @@ export default function SettingsPage() {
 
     const copyToClipboard = (text: string) => {
         navigator.clipboard.writeText(text);
+    };
+
+    const fetchIntegrationConfig = async (integrationId: number) => {
+        const config = await getIntegrationConfig(integrationId);
+        if (!config.error) {
+            setIntegrationConfigs((prev) => ({
+                ...prev,
+                [integrationId]: config
+            }));
+        }
+    };
+
+    const handleToggleIntegration = async (integrationId: number) => {
+        if (expandedIntegration === integrationId) {
+            setExpandedIntegration(null);
+        } else {
+            setExpandedIntegration(integrationId);
+            if (!integrationConfigs[integrationId]) {
+                await fetchIntegrationConfig(integrationId);
+            }
+            // Fetch services first (always fetch to get latest)
+            setLoadingServices(true);
+            try {
+                const servicesData = await getServices();
+                console.log('Services data:', servicesData);
+                if (
+                    servicesData.services &&
+                    Array.isArray(servicesData.services)
+                ) {
+                    setAvailableServices(servicesData.services);
+                    console.log(
+                        'Set available services:',
+                        servicesData.services
+                    );
+                } else {
+                    console.warn(
+                        'No services found or invalid format:',
+                        servicesData
+                    );
+                    setAvailableServices([]);
+                }
+            } catch (error) {
+                console.error('Error loading services:', error);
+                setAvailableServices([]);
+            } finally {
+                setLoadingServices(false);
+            }
+
+            // Fetch repositories for this integration
+            setLoadingRepos((prev) => ({ ...prev, [integrationId]: true }));
+            try {
+                const reposData = await getRepositories(integrationId);
+                console.log(
+                    'Repos data for integration',
+                    integrationId,
+                    ':',
+                    reposData
+                );
+                if (
+                    reposData.repositories &&
+                    Array.isArray(reposData.repositories)
+                ) {
+                    setAvailableRepos((prev) => ({
+                        ...prev,
+                        [integrationId]: reposData.repositories
+                    }));
+                    console.log('Set available repos:', reposData.repositories);
+                } else {
+                    console.warn(
+                        'No repositories found or invalid format:',
+                        reposData
+                    );
+                    setAvailableRepos((prev) => ({
+                        ...prev,
+                        [integrationId]: []
+                    }));
+                }
+            } catch (error) {
+                console.error('Error loading repositories:', error);
+                setAvailableRepos((prev) => ({
+                    ...prev,
+                    [integrationId]: []
+                }));
+            } finally {
+                setLoadingRepos((prev) => ({
+                    ...prev,
+                    [integrationId]: false
+                }));
+            }
+        }
+    };
+
+    const handleAddServiceMapping = async (integrationId: number) => {
+        if (!newServiceName || !newRepoName) return;
+
+        setMappingLoading(integrationId);
+        const result = await addServiceMapping(
+            integrationId,
+            newServiceName,
+            newRepoName
+        );
+        if (!result.error) {
+            await fetchIntegrationConfig(integrationId);
+            setNewServiceName('');
+            setNewRepoName('');
+        }
+        setMappingLoading(null);
+    };
+
+    const handleRemoveServiceMapping = async (
+        integrationId: number,
+        serviceName: string
+    ) => {
+        setMappingLoading(integrationId);
+        const result = await removeServiceMapping(integrationId, serviceName);
+        if (!result.error) {
+            await fetchIntegrationConfig(integrationId);
+        }
+        setMappingLoading(null);
     };
 
     const getStatusBadge = (status: string) => {
@@ -451,49 +599,352 @@ export default function SettingsPage() {
                                 </CardContent>
                             </Card>
                         ) : (
-                            integrations.map((integration) => (
-                                <Card
-                                    key={integration.id}
-                                    className="border-zinc-800 bg-zinc-900"
-                                >
-                                    <CardContent className="p-6">
-                                        <div className="flex items-center justify-between">
-                                            <div className="flex items-center space-x-4">
-                                                <div className="rounded-lg bg-zinc-800 p-3">
-                                                    <Cloud className="h-6 w-6 text-green-500" />
-                                                </div>
-                                                <div>
-                                                    <h3 className="font-semibold text-zinc-100">
-                                                        {integration.name}
-                                                    </h3>
-                                                    <p className="text-sm text-zinc-400">
-                                                        {integration.provider}
-                                                    </p>
-                                                    {integration.project_id && (
-                                                        <p className="text-xs text-zinc-500 mt-1 font-mono">
+                            integrations.map((integration) => {
+                                const isExpanded =
+                                    expandedIntegration === integration.id;
+                                const config =
+                                    integrationConfigs[integration.id];
+                                const serviceMappings =
+                                    config?.service_mappings || {};
+                                const isGitHub =
+                                    integration.provider === 'GITHUB';
+
+                                return (
+                                    <Card
+                                        key={integration.id}
+                                        className="border-zinc-800 bg-zinc-900"
+                                    >
+                                        <CardContent className="p-6">
+                                            <div className="flex items-center justify-between">
+                                                <div className="flex items-center space-x-4 flex-1">
+                                                    <div className="rounded-lg bg-zinc-800 p-3">
+                                                        <Cloud className="h-6 w-6 text-green-500" />
+                                                    </div>
+                                                    <div className="flex-1">
+                                                        <h3 className="font-semibold text-zinc-100">
+                                                            {integration.name}
+                                                        </h3>
+                                                        <p className="text-sm text-zinc-400">
                                                             {
-                                                                integration.project_id
+                                                                integration.provider
                                                             }
                                                         </p>
+                                                        {integration.project_id && (
+                                                            <p className="text-xs text-zinc-500 mt-1 font-mono">
+                                                                {
+                                                                    integration.project_id
+                                                                }
+                                                            </p>
+                                                        )}
+                                                        {config?.default_repo && (
+                                                            <p className="text-xs text-zinc-500 mt-1">
+                                                                Default:{' '}
+                                                                <span className="font-mono">
+                                                                    {
+                                                                        config.default_repo
+                                                                    }
+                                                                </span>
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center space-x-4">
+                                                    {getStatusBadge(
+                                                        integration.status
                                                     )}
+                                                    {isGitHub && (
+                                                        <Button
+                                                            size="sm"
+                                                            variant="outline"
+                                                            onClick={() =>
+                                                                handleToggleIntegration(
+                                                                    integration.id
+                                                                )
+                                                            }
+                                                            className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                                                        >
+                                                            {isExpanded
+                                                                ? 'Hide'
+                                                                : 'Configure'}
+                                                        </Button>
+                                                    )}
+                                                    <Button
+                                                        size="icon"
+                                                        variant="ghost"
+                                                        className="text-zinc-400 hover:text-red-500"
+                                                    >
+                                                        <Trash2 className="h-4 w-4" />
+                                                    </Button>
                                                 </div>
                                             </div>
-                                            <div className="flex items-center space-x-4">
-                                                {getStatusBadge(
-                                                    integration.status
-                                                )}
-                                                <Button
-                                                    size="icon"
-                                                    variant="ghost"
-                                                    className="text-zinc-400 hover:text-red-500"
-                                                >
-                                                    <Trash2 className="h-4 w-4" />
-                                                </Button>
-                                            </div>
-                                        </div>
-                                    </CardContent>
-                                </Card>
-                            ))
+
+                                            {isExpanded && isGitHub && (
+                                                <div className="mt-6 pt-6 border-t border-zinc-800 space-y-4">
+                                                    <div>
+                                                        <h4 className="text-sm font-semibold text-zinc-100 mb-3">
+                                                            Service to
+                                                            Repository Mappings
+                                                        </h4>
+                                                        <p className="text-xs text-zinc-400 mb-4">
+                                                            Map service names to
+                                                            GitHub repositories
+                                                            for automatic PR
+                                                            creation
+                                                        </p>
+
+                                                        {Object.keys(
+                                                            serviceMappings
+                                                        ).length > 0 ? (
+                                                            <div className="space-y-2 mb-4">
+                                                                {Object.entries(
+                                                                    serviceMappings
+                                                                ).map(
+                                                                    ([
+                                                                        serviceName,
+                                                                        repoName
+                                                                    ]) => (
+                                                                        <div
+                                                                            key={
+                                                                                serviceName
+                                                                            }
+                                                                            className="flex items-center justify-between p-3 bg-zinc-800 rounded-lg"
+                                                                        >
+                                                                            <div>
+                                                                                <span className="text-sm font-medium text-zinc-100">
+                                                                                    {
+                                                                                        serviceName
+                                                                                    }
+                                                                                </span>
+                                                                                <span className="text-xs text-zinc-400 mx-2">
+                                                                                    →
+                                                                                </span>
+                                                                                <span className="text-sm text-zinc-300 font-mono">
+                                                                                    {
+                                                                                        repoName as string
+                                                                                    }
+                                                                                </span>
+                                                                            </div>
+                                                                            <Button
+                                                                                size="icon"
+                                                                                variant="ghost"
+                                                                                onClick={() =>
+                                                                                    handleRemoveServiceMapping(
+                                                                                        integration.id,
+                                                                                        serviceName
+                                                                                    )
+                                                                                }
+                                                                                disabled={
+                                                                                    mappingLoading ===
+                                                                                    integration.id
+                                                                                }
+                                                                                className="text-zinc-400 hover:text-red-500 h-8 w-8"
+                                                                            >
+                                                                                {mappingLoading ===
+                                                                                integration.id ? (
+                                                                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                                                                ) : (
+                                                                                    <Trash2 className="h-4 w-4" />
+                                                                                )}
+                                                                            </Button>
+                                                                        </div>
+                                                                    )
+                                                                )}
+                                                            </div>
+                                                        ) : (
+                                                            <p className="text-sm text-zinc-500 mb-4">
+                                                                No service
+                                                                mappings
+                                                                configured
+                                                            </p>
+                                                        )}
+
+                                                        <div className="flex gap-2">
+                                                            {loadingServices ? (
+                                                                <div className="flex-1 flex items-center justify-center p-2 bg-zinc-800 border border-zinc-700 rounded-md">
+                                                                    <Loader2 className="h-4 w-4 animate-spin text-zinc-400" />
+                                                                    <span className="ml-2 text-sm text-zinc-400">
+                                                                        Loading
+                                                                        services...
+                                                                    </span>
+                                                                </div>
+                                                            ) : (
+                                                                <Select
+                                                                    value={
+                                                                        newServiceName
+                                                                    }
+                                                                    onValueChange={
+                                                                        setNewServiceName
+                                                                    }
+                                                                    disabled={
+                                                                        availableServices.length ===
+                                                                        0
+                                                                    }
+                                                                >
+                                                                    <SelectTrigger className="bg-zinc-800 border-zinc-700 text-zinc-100 flex-1 disabled:opacity-50 disabled:cursor-not-allowed">
+                                                                        <SelectValue
+                                                                            placeholder={
+                                                                                availableServices.length ===
+                                                                                0
+                                                                                    ? 'No services available'
+                                                                                    : 'Select service name'
+                                                                            }
+                                                                        />
+                                                                    </SelectTrigger>
+                                                                    <SelectContent className="bg-zinc-800 border-zinc-700">
+                                                                        {availableServices.length >
+                                                                        0 ? (
+                                                                            availableServices.map(
+                                                                                (
+                                                                                    service
+                                                                                ) => (
+                                                                                    <SelectItem
+                                                                                        key={
+                                                                                            service
+                                                                                        }
+                                                                                        value={
+                                                                                            service
+                                                                                        }
+                                                                                        className="text-zinc-100 focus:bg-zinc-700"
+                                                                                    >
+                                                                                        {
+                                                                                            service
+                                                                                        }
+                                                                                    </SelectItem>
+                                                                                )
+                                                                            )
+                                                                        ) : (
+                                                                            <SelectItem
+                                                                                value="no-services"
+                                                                                disabled
+                                                                            >
+                                                                                No
+                                                                                services
+                                                                                found
+                                                                            </SelectItem>
+                                                                        )}
+                                                                    </SelectContent>
+                                                                </Select>
+                                                            )}
+                                                            {loadingRepos[
+                                                                integration.id
+                                                            ] ? (
+                                                                <div className="flex-1 flex items-center justify-center p-2 bg-zinc-800 border border-zinc-700 rounded-md">
+                                                                    <Loader2 className="h-4 w-4 animate-spin text-zinc-400" />
+                                                                    <span className="ml-2 text-sm text-zinc-400">
+                                                                        Loading
+                                                                        repos...
+                                                                    </span>
+                                                                </div>
+                                                            ) : (
+                                                                <Select
+                                                                    value={
+                                                                        newRepoName
+                                                                    }
+                                                                    onValueChange={
+                                                                        setNewRepoName
+                                                                    }
+                                                                    disabled={
+                                                                        !availableRepos[
+                                                                            integration
+                                                                                .id
+                                                                        ] ||
+                                                                        availableRepos[
+                                                                            integration
+                                                                                .id
+                                                                        ]
+                                                                            .length ===
+                                                                            0
+                                                                    }
+                                                                >
+                                                                    <SelectTrigger className="bg-zinc-800 border-zinc-700 text-zinc-100 flex-1 disabled:opacity-50 disabled:cursor-not-allowed">
+                                                                        <SelectValue
+                                                                            placeholder={
+                                                                                !availableRepos[
+                                                                                    integration
+                                                                                        .id
+                                                                                ] ||
+                                                                                availableRepos[
+                                                                                    integration
+                                                                                        .id
+                                                                                ]
+                                                                                    .length ===
+                                                                                    0
+                                                                                    ? 'No repositories available'
+                                                                                    : 'Select repository'
+                                                                            }
+                                                                        />
+                                                                    </SelectTrigger>
+                                                                    <SelectContent className="bg-zinc-800 border-zinc-700">
+                                                                        {availableRepos[
+                                                                            integration
+                                                                                .id
+                                                                        ]
+                                                                            ?.length >
+                                                                        0 ? (
+                                                                            availableRepos[
+                                                                                integration
+                                                                                    .id
+                                                                            ].map(
+                                                                                (
+                                                                                    repo
+                                                                                ) => (
+                                                                                    <SelectItem
+                                                                                        key={
+                                                                                            repo.full_name
+                                                                                        }
+                                                                                        value={
+                                                                                            repo.full_name
+                                                                                        }
+                                                                                        className="text-zinc-100 focus:bg-zinc-700"
+                                                                                    >
+                                                                                        {
+                                                                                            repo.full_name
+                                                                                        }
+                                                                                    </SelectItem>
+                                                                                )
+                                                                            )
+                                                                        ) : (
+                                                                            <SelectItem
+                                                                                value="no-repos"
+                                                                                disabled
+                                                                            >
+                                                                                No
+                                                                                repositories
+                                                                                found
+                                                                            </SelectItem>
+                                                                        )}
+                                                                    </SelectContent>
+                                                                </Select>
+                                                            )}
+                                                            <Button
+                                                                onClick={() =>
+                                                                    handleAddServiceMapping(
+                                                                        integration.id
+                                                                    )
+                                                                }
+                                                                disabled={
+                                                                    !newServiceName ||
+                                                                    !newRepoName ||
+                                                                    mappingLoading ===
+                                                                        integration.id
+                                                                }
+                                                                className="bg-green-600 hover:bg-green-700"
+                                                            >
+                                                                {mappingLoading ===
+                                                                integration.id ? (
+                                                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                                                ) : (
+                                                                    <Plus className="h-4 w-4" />
+                                                                )}
+                                                            </Button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </CardContent>
+                                    </Card>
+                                );
+                            })
                         )}
                     </div>
                 </TabsContent>

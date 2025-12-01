@@ -32,6 +32,7 @@ class Incident(Base):
     first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
     last_seen_at = Column(DateTime(timezone=True), server_default=func.now())
     integration_id = Column(Integer, ForeignKey("integrations.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # User who owns this incident
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -61,6 +62,7 @@ class LogEntry(Base):
     source = Column(String, index=True, nullable=True)
     severity = Column(String, index=True, nullable=True)
     integration_id = Column(Integer, ForeignKey("integrations.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # User who owns this log
 
 class IntegrationStatus(Base):
     __tablename__ = "integration_status"

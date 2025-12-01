@@ -50,6 +50,7 @@ async def process_log_entry(log_id: int):
                 Incident.status == "OPEN",
                 Incident.service_name == log.service_name,
                 Incident.source == log.source,
+                Incident.user_id == log.user_id,  # Match by user_id as well
                 Incident.last_seen_at >= three_mins_ago
             ).first()
             
@@ -79,6 +80,7 @@ async def process_log_entry(log_id: int):
                     service_name=log.service_name,
                     source=log.source,
                     integration_id=log.integration_id,
+                    user_id=log.user_id,  # Store user_id from log
                     log_ids=[log.id],
                     trigger_event=json.loads(json.dumps({
                         "log_id": log.id,

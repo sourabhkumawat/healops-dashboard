@@ -10,18 +10,29 @@ from sqlalchemy.orm import Session
 from integrations.github_integration import GithubIntegration
 
 
-def get_repo_name_from_integration(integration: Integration) -> Optional[str]:
+def get_repo_name_from_integration(integration: Integration, service_name: Optional[str] = None) -> Optional[str]:
     """
     Extract repository name from integration config or project_id.
+    Supports service-to-repo mapping for multiple services.
     
     Args:
         integration: Integration model instance
+        service_name: Optional service name to look up in service mappings
         
     Returns:
         Repository name in format "owner/repo" or None
     """
     # Check config first
     if integration.config and isinstance(integration.config, dict):
+        # If service_name is provided, check service mappings first
+        if service_name:
+            service_mappings = integration.config.get("service_mappings", {})
+            if isinstance(service_mappings, dict) and service_name in service_mappings:
+                repo_name = service_mappings[service_name]
+                if repo_name:
+                    return repo_name
+        
+        # Fallback to default repo_name or repository
         repo_name = integration.config.get("repo_name") or integration.config.get("repository")
         if repo_name:
             return repo_name
@@ -490,9 +501,10 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                 try:
                     integration = db.query(Integration).filter(Integration.id == incident.integration_id).first()
                     if integration and integration.provider == "GITHUB":
-                        repo_name = get_repo_name_from_integration(integration)
+                        # Get repo name using service-to-repo mapping
+                        repo_name = get_repo_name_from_integration(integration, service_name=incident.service_name)
                         if repo_name:
-                            print(f"🔍 Analyzing repository {repo_name} for incident {incident.id}")
+                            print(f"🔍 Analyzing repository {repo_name} for incident {incident.id} (service: {incident.service_name})")
                             github_integration = GithubIntegration(integration_id=integration.id)
                             pr_result = analyze_repository_and_create_pr(
                                 incident=incident,

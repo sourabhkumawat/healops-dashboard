@@ -99,3 +99,127 @@ export async function getAgentInstallCommand(apiKey: string) {
         macos: `curl -sL ${installUrl} | sudo bash -s -- --api-key=${apiKey}`
     };
 }
+
+export async function getIntegrationConfig(integrationId: number) {
+    try {
+        const response = await fetch(
+            `${API_BASE}/integrations/${integrationId}/config`
+        );
+        if (!response.ok) {
+            return { error: 'Failed to fetch integration config' };
+        }
+        return await response.json();
+    } catch (error) {
+        return { error: 'Failed to fetch integration config' };
+    }
+}
+
+export async function addServiceMapping(
+    integrationId: number,
+    serviceName: string,
+    repoName: string
+) {
+    try {
+        const response = await fetch(
+            `${API_BASE}/integrations/${integrationId}/service-mapping`,
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    service_name: serviceName,
+                    repo_name: repoName
+                })
+            }
+        );
+        if (!response.ok) {
+            const errorText = await response.text();
+            return { error: errorText };
+        }
+        return await response.json();
+    } catch (error) {
+        return { error: 'Failed to add service mapping' };
+    }
+}
+
+export async function removeServiceMapping(
+    integrationId: number,
+    serviceName: string
+) {
+    try {
+        const response = await fetch(
+            `${API_BASE}/integrations/${integrationId}/service-mapping/${serviceName}`,
+            {
+                method: 'DELETE'
+            }
+        );
+        if (!response.ok) {
+            const errorText = await response.text();
+            return { error: errorText };
+        }
+        return await response.json();
+    } catch (error) {
+        return { error: 'Failed to remove service mapping' };
+    }
+}
+
+export async function getServices() {
+    try {
+        const apiUrl = `${API_BASE}/services`;
+        console.log('Fetching services from:', apiUrl);
+        const response = await fetch(apiUrl, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            cache: 'no-store'
+        });
+        console.log('Services response status:', response.status);
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error(
+                'Failed to fetch services:',
+                response.status,
+                errorText
+            );
+            return { services: [] };
+        }
+        const data = await response.json();
+        console.log('Services fetched:', data);
+        return data;
+    } catch (error) {
+        console.error('Error fetching services:', error);
+        return { services: [] };
+    }
+}
+
+export async function getRepositories(integrationId: number) {
+    try {
+        const apiUrl = `${API_BASE}/integrations/${integrationId}/repositories`;
+        console.log('Fetching repositories from:', apiUrl);
+        const response = await fetch(apiUrl, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            cache: 'no-store'
+        });
+        console.log('Repositories response status:', response.status);
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error(
+                'Failed to fetch repositories:',
+                response.status,
+                errorText
+            );
+            return { repositories: [] };
+        }
+        const data = await response.json();
+        console.log('Repositories fetched:', data);
+        return data;
+    } catch (error) {
+        console.error('Error fetching repositories:', error);
+        return { repositories: [] };
+    }
+}
