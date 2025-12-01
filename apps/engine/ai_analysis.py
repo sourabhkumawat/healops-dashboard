@@ -84,6 +84,8 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                 "X-Title": "HealOps Incident Analysis",  # Optional
             },
             json={
+                # Note: For lower costs, consider using cheaper models like:
+                # "google/gemini-flash-1.5" or "anthropic/claude-3-haiku"
                 "model": "anthropic/claude-3.5-sonnet",  # You can change this to any model
                 "messages": [
                     {
@@ -92,16 +94,32 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                     }
                 ],
                 "temperature": 0.3,  # Lower temperature for more deterministic analysis
+                "max_tokens": 500,  # Limit tokens to reduce cost - sufficient for root cause analysis
             },
             timeout=30
         )
         
-        if response.status_code != 200:
-            error_msg = f"OpenRouter API error (status {response.status_code}): {response.text[:200]}"
-            print(f"❌ {error_msg}")
+        if response.status_code == 402:
+            # Insufficient credits error - provide helpful message
+            error_data = response.json() if response.text else {}
+            error_msg = error_data.get("error", {}).get("message", "Insufficient credits")
+            print(f"❌ OpenRouter API: Insufficient credits - {error_msg}")
+            return {
+                "root_cause": "AI analysis is currently unavailable due to insufficient API credits. Please add credits at https://openrouter.ai/settings/credits or contact your administrator.",
+                "action_taken": None
+            }
+        elif response.status_code != 200:
+            error_text = response.text[:300] if response.text else "Unknown error"
+            try:
+                error_data = response.json()
+                error_msg = error_data.get("error", {}).get("message", error_text)
+            except:
+                error_msg = error_text
+            
+            print(f"❌ OpenRouter API error (status {response.status_code}): {error_msg}")
             # Return error message so UI stops loading
             return {
-                "root_cause": f"Analysis failed: {error_msg}",
+                "root_cause": f"Analysis failed: {error_msg}. Please check OpenRouter API configuration or try again later.",
                 "action_taken": None
             }
         

@@ -335,13 +335,17 @@ export default function IncidentDetailsPage() {
                                         incident.root_cause.includes('error') ||
                                         incident.root_cause.includes(
                                             'not configured'
-                                        )
+                                        ) ||
+                                        incident.root_cause.includes(
+                                            'insufficient'
+                                        ) ||
+                                        incident.root_cause.includes('credits')
                                             ? 'bg-red-900/20 border-red-900/50'
                                             : 'bg-zinc-900 border-zinc-800'
                                     }`}
                                 >
                                     <p
-                                        className={`text-sm ${
+                                        className={`text-sm whitespace-pre-wrap ${
                                             incident.root_cause.includes(
                                                 'failed'
                                             ) ||
@@ -350,6 +354,12 @@ export default function IncidentDetailsPage() {
                                             ) ||
                                             incident.root_cause.includes(
                                                 'not configured'
+                                            ) ||
+                                            incident.root_cause.includes(
+                                                'insufficient'
+                                            ) ||
+                                            incident.root_cause.includes(
+                                                'credits'
                                             )
                                                 ? 'text-red-300'
                                                 : 'text-zinc-300'
@@ -361,6 +371,12 @@ export default function IncidentDetailsPage() {
                                         incident.root_cause.includes('error') ||
                                         incident.root_cause.includes(
                                             'not configured'
+                                        ) ||
+                                        incident.root_cause.includes(
+                                            'insufficient'
+                                        ) ||
+                                        incident.root_cause.includes(
+                                            'credits'
                                         )) && (
                                         <Button
                                             variant="outline"
