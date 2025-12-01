@@ -3,6 +3,8 @@
 import { cookies } from "next/headers"
 import { redirect } from "next/navigation"
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 export async function loginAction(prevState: any, formData: FormData) {
   console.log("🔐 Login action called")
   const email = formData.get("email")
@@ -11,7 +13,7 @@ export async function loginAction(prevState: any, formData: FormData) {
 
   try {
     console.log("🌐 Calling API...")
-    const response = await fetch("http://localhost:8000/auth/login", {
+    const response = await fetch(`${API_BASE}/auth/login`, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -61,7 +63,7 @@ export async function registerAction(prevState: any, formData: FormData) {
   const password = formData.get("password")
 
   try {
-    const response = await fetch("http://localhost:8000/auth/register", {
+    const response = await fetch(`${API_BASE}/auth/register`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
