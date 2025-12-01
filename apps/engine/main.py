@@ -169,6 +169,7 @@ async def ingest_log(log: LogIngestRequest, request: Request, background_tasks: 
             message=log.message,
             source=log.source,
             integration_id=integration_id,
+            user_id=api_key.user_id,  # Store user_id from API key
             metadata_json=log.metadata
         )
         db.add(db_log)
@@ -322,6 +323,7 @@ async def ingest_otel_errors(payload: OTelErrorPayload, background_tasks: Backgr
                 message=error_message,
                 source="otel",
                 integration_id=valid_key.integration_id,
+                user_id=valid_key.user_id,  # Store user_id from API key
                 metadata_json=metadata
             )
             db.add(db_log)
@@ -445,7 +447,14 @@ def list_logs(db: Session = Depends(get_db), limit: int = 50, api_key: str = Non
 
 class GithubConfig(BaseModel):
     access_token: str
-    repo_name: Optional[str] = None
+
+class ServiceMappingRequest(BaseModel):
+    service_name: str
+    repo_name: str  # Format: "owner/repo"
+
+class ServiceMappingsUpdateRequest(BaseModel):
+    service_mappings: Dict[str, str]  # Dict of {service_name: repo_name}
+    default_repo: Optional[str] = None  # Default repo for services without mapping
 
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
@@ -587,16 +596,268 @@ def list_providers():
     
     return IntegrationRegistry.list_providers()
 
+@app.get("/integrations/{integration_id}/config")
+def get_integration_config(integration_id: int, db: Session = Depends(get_db)):
+    """Get integration configuration including service mappings."""
+    # TODO: Get user from JWT token
+    user_id = 1  # Placeholder
+    
+    integration = db.query(Integration).filter(
+        Integration.id == integration_id,
+        Integration.user_id == user_id
+    ).first()
+    
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    
+    config = integration.config or {}
+    service_mappings = config.get("service_mappings", {})
+    default_repo = config.get("repo_name") or config.get("repository") or integration.project_id
+    
+    return {
+        "integration_id": integration.id,
+        "provider": integration.provider,
+        "default_repo": default_repo,
+        "service_mappings": service_mappings
+    }
+
+@app.post("/integrations/{integration_id}/service-mapping")
+def add_service_mapping(integration_id: int, mapping: ServiceMappingRequest, db: Session = Depends(get_db)):
+    """Add or update a service-to-repo mapping."""
+    # TODO: Get user from JWT token
+    user_id = 1  # Placeholder
+    
+    integration = db.query(Integration).filter(
+        Integration.id == integration_id,
+        Integration.user_id == user_id
+    ).first()
+    
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    
+    if integration.provider != "GITHUB":
+        raise HTTPException(status_code=400, detail="Service mappings are only supported for GitHub integrations")
+    
+    # Initialize config if needed
+    if not integration.config:
+        integration.config = {}
+    
+    # Initialize service_mappings if needed
+    if "service_mappings" not in integration.config:
+        integration.config["service_mappings"] = {}
+    
+    # Add or update the mapping
+    integration.config["service_mappings"][mapping.service_name] = mapping.repo_name
+    integration.updated_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(integration)
+    
+    return {
+        "status": "success",
+        "message": f"Service mapping added: {mapping.service_name} -> {mapping.repo_name}",
+        "service_mappings": integration.config.get("service_mappings", {})
+    }
+
+@app.put("/integrations/{integration_id}/service-mappings")
+def update_service_mappings(integration_id: int, update: ServiceMappingsUpdateRequest, db: Session = Depends(get_db)):
+    """Update all service-to-repo mappings at once."""
+    # TODO: Get user from JWT token
+    user_id = 1  # Placeholder
+    
+    integration = db.query(Integration).filter(
+        Integration.id == integration_id,
+        Integration.user_id == user_id
+    ).first()
+    
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    
+    if integration.provider != "GITHUB":
+        raise HTTPException(status_code=400, detail="Service mappings are only supported for GitHub integrations")
+    
+    # Initialize config if needed
+    if not integration.config:
+        integration.config = {}
+    
+    # Update service mappings
+    integration.config["service_mappings"] = update.service_mappings
+    
+    # Update default repo if provided
+    if update.default_repo:
+        integration.config["repo_name"] = update.default_repo
+    
+    integration.updated_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(integration)
+    
+    return {
+        "status": "success",
+        "message": "Service mappings updated",
+        "service_mappings": integration.config.get("service_mappings", {}),
+        "default_repo": integration.config.get("repo_name")
+    }
+
+@app.delete("/integrations/{integration_id}/service-mapping/{service_name}")
+def remove_service_mapping(integration_id: int, service_name: str, db: Session = Depends(get_db)):
+    """Remove a service-to-repo mapping."""
+    # TODO: Get user from JWT token
+    user_id = 1  # Placeholder
+    
+    integration = db.query(Integration).filter(
+        Integration.id == integration_id,
+        Integration.user_id == user_id
+    ).first()
+    
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    
+    if not integration.config or "service_mappings" not in integration.config:
+        raise HTTPException(status_code=404, detail="Service mapping not found")
+    
+    if service_name not in integration.config["service_mappings"]:
+        raise HTTPException(status_code=404, detail="Service mapping not found")
+    
+    # Remove the mapping
+    del integration.config["service_mappings"][service_name]
+    integration.updated_at = datetime.utcnow()
+    
+    db.commit()
+    
+    return {
+        "status": "success",
+        "message": f"Service mapping removed: {service_name}",
+        "service_mappings": integration.config.get("service_mappings", {})
+    }
+
+@app.get("/services")
+def list_services(user_id: Optional[int] = None, db: Session = Depends(get_db)):
+    """Get list of unique service names from logs and incidents.
+    If user_id is provided, only returns services for that user.
+    Otherwise returns all services (for backward compatibility).
+    """
+    try:
+        # Get unique service names from logs
+        log_query = db.query(LogEntry.service_name).distinct().filter(
+            LogEntry.service_name.isnot(None),
+            LogEntry.service_name != ""
+        )
+        if user_id:
+            log_query = log_query.filter(LogEntry.user_id == user_id)
+        log_services = log_query.all()
+        
+        # Get unique service names from incidents
+        incident_query = db.query(Incident.service_name).distinct().filter(
+            Incident.service_name.isnot(None),
+            Incident.service_name != ""
+        )
+        if user_id:
+            incident_query = incident_query.filter(Incident.user_id == user_id)
+        incident_services = incident_query.all()
+        
+        print(f"DEBUG: Found {len(log_services)} log services and {len(incident_services)} incident services")
+        
+        # Combine and deduplicate
+        all_services = set()
+        for (service,) in log_services:
+            if service:
+                all_services.add(service)
+                print(f"DEBUG: Added service from logs: {service}")
+        for (service,) in incident_services:
+            if service:
+                all_services.add(service)
+                print(f"DEBUG: Added service from incidents: {service}")
+        
+        result = sorted(list(all_services))
+        print(f"DEBUG: Returning {len(result)} unique services: {result}")
+        
+        return {
+            "services": result
+        }
+    except Exception as e:
+        print(f"ERROR in list_services: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "services": [],
+            "error": str(e)
+        }
+
+@app.get("/integrations/{integration_id}/repositories")
+def list_repositories(integration_id: int, db: Session = Depends(get_db)):
+    """Get list of repositories accessible by the GitHub integration."""
+    # TODO: Get user from JWT token
+    user_id = 1  # Placeholder
+    
+    try:
+        integration = db.query(Integration).filter(
+            Integration.id == integration_id,
+            Integration.user_id == user_id
+        ).first()
+        
+        if not integration:
+            print(f"DEBUG: Integration {integration_id} not found for user {user_id}")
+            raise HTTPException(status_code=404, detail="Integration not found")
+        
+        if integration.provider != "GITHUB":
+            raise HTTPException(status_code=400, detail="This endpoint is only for GitHub integrations")
+        
+        print(f"DEBUG: Found integration {integration_id}, provider: {integration.provider}")
+        
+        github_integration = GithubIntegration(integration_id=integration.id)
+        
+        # Get user's repositories
+        if not github_integration.client:
+            print("DEBUG: GitHub client is None")
+            return {"repositories": []}
+        
+        print("DEBUG: Fetching repositories from GitHub...")
+        user = github_integration.client.get_user()
+        repos = []
+        
+        # Get user's repos (limit to 100 for performance)
+        repo_list = list(user.get_repos(type="all", sort="updated")[:100])
+        print(f"DEBUG: Found {len(repo_list)} repositories from GitHub")
+        
+        for repo in repo_list:
+            repos.append({
+                "full_name": repo.full_name,
+                "name": repo.name,
+                "private": repo.private
+            })
+            print(f"DEBUG: Added repo: {repo.full_name}")
+        
+        print(f"DEBUG: Returning {len(repos)} repositories")
+        return {
+            "repositories": repos
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERROR fetching repositories: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "repositories": [],
+            "error": str(e)
+        }
+
 # ============================================================================
 # Incident Management
 # ============================================================================
 
 @app.get("/incidents")
-def list_incidents(status: Optional[str] = None, db: Session = Depends(get_db)):
-    """List incidents with optional status filter."""
+def list_incidents(status: Optional[str] = None, user_id: Optional[int] = None, db: Session = Depends(get_db)):
+    """List incidents with optional status and user_id filter.
+    If user_id is provided, only returns incidents for that user.
+    Otherwise returns all incidents (for backward compatibility).
+    """
     query = db.query(Incident)
     if status:
         query = query.filter(Incident.status == status)
+    if user_id:
+        query = query.filter(Incident.user_id == user_id)
     
     incidents = query.order_by(Incident.last_seen_at.desc()).all()
     return incidents
