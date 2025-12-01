@@ -59,16 +59,27 @@ def verify_password(plain_password, hashed_password):
         # Handle password length errors or invalid hash format
         import logging
         error_msg = str(e)
+        password_byte_len = len(password_bytes)
+        
         if "cannot be longer than 72 bytes" in error_msg:
-            # This shouldn't happen with our truncation, but handle it anyway
-            logging.error(f"Password still too long after truncation: {len(password_bytes)} bytes")
+            # This error can occur if the stored hash is corrupted/invalid
+            # Log detailed info for debugging
+            logging.error(
+                f"Bcrypt verification failed - Password length: {password_byte_len} bytes "
+                f"(hash format: {hashed_password[:20]}...). "
+                f"Error: {error_msg}. "
+                f"This usually indicates a corrupted or invalid password hash in the database."
+            )
             return False
-        logging.error(f"Password verification ValueError: {error_msg}")
+        logging.error(f"Password verification ValueError: {error_msg} (password length: {password_byte_len} bytes)")
         return False
     except Exception as e:
         # Handle other verification errors
         import logging
-        logging.error(f"Password verification error: {type(e).__name__}: {str(e)}")
+        logging.error(
+            f"Password verification error: {type(e).__name__}: {str(e)} "
+            f"(password length: {len(password_bytes)} bytes, hash: {hashed_password[:20]}...)"
+        )
         return False
 
 def get_password_hash(password):
