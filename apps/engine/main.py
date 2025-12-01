@@ -608,8 +608,8 @@ def list_incidents(status: Optional[str] = None, db: Session = Depends(get_db)):
     return incidents
 
 @app.get("/incidents/{incident_id}")
-def get_incident(incident_id: int, db: Session = Depends(get_db)):
-    """Get incident details including related logs."""
+async def get_incident(incident_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Get incident details including related logs. Triggers AI analysis if not already done."""
     incident = db.query(Incident).filter(Incident.id == incident_id).first()
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
@@ -619,10 +619,60 @@ def get_incident(incident_id: int, db: Session = Depends(get_db)):
     if incident.log_ids:
         logs = db.query(LogEntry).filter(LogEntry.id.in_(incident.log_ids)).order_by(LogEntry.timestamp.desc()).all()
     
+    # Trigger AI analysis in background if root_cause is not set
+    if not incident.root_cause:
+        from ai_analysis import analyze_incident_with_openrouter
+        background_tasks.add_task(analyze_incident_async, incident_id)
+    
     return {
         "incident": incident,
         "logs": logs
     }
+
+@app.post("/incidents/{incident_id}/analyze")
+async def analyze_incident(incident_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Manually trigger AI analysis for an incident."""
+    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    
+    background_tasks.add_task(analyze_incident_async, incident_id)
+    
+    return {"status": "analysis_triggered", "message": "AI analysis started in background"}
+
+async def analyze_incident_async(incident_id: int):
+    """Background task to analyze an incident."""
+    from database import SessionLocal
+    from ai_analysis import analyze_incident_with_openrouter
+    
+    db = SessionLocal()
+    try:
+        incident = db.query(Incident).filter(Incident.id == incident_id).first()
+        if not incident:
+            return
+        
+        # Fetch related logs
+        logs = []
+        if incident.log_ids:
+            logs = db.query(LogEntry).filter(LogEntry.id.in_(incident.log_ids)).order_by(LogEntry.timestamp.desc()).all()
+        
+        # Perform analysis
+        analysis = analyze_incident_with_openrouter(incident, logs, db)
+        
+        # Update incident with analysis results
+        if analysis.get("root_cause"):
+            incident.root_cause = analysis["root_cause"]
+        if analysis.get("action_taken"):
+            incident.action_taken = analysis["action_taken"]
+        
+        db.commit()
+        print(f"✅ AI analysis completed for incident {incident_id}")
+        
+    except Exception as e:
+        print(f"❌ Error analyzing incident {incident_id}: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 @app.patch("/incidents/{incident_id}")
 def update_incident(incident_id: int, update_data: dict, db: Session = Depends(get_db)):

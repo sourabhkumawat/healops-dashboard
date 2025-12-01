@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
     Card,
@@ -12,14 +12,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import {
-    Loader2,
-    ArrowLeft,
-    CheckCircle2,
-    AlertTriangle,
-    AlertOctagon,
-    Info
-} from 'lucide-react';
+import { Loader2, ArrowLeft, CheckCircle2 } from 'lucide-react';
 import { Incident } from '@/components/incident-table';
 import { getApiBaseUrl } from '@/lib/config';
 
@@ -30,11 +23,7 @@ interface LogEntry {
     message: string;
     service_name: string;
     source: string;
-    metadata_json: any;
-}
-
-interface IncidentDetails extends Incident {
-    logs: LogEntry[];
+    metadata_json: unknown;
 }
 
 export default function IncidentDetailsPage() {
@@ -46,6 +35,7 @@ export default function IncidentDetailsPage() {
     } | null>(null);
     const [loading, setLoading] = useState(true);
     const [resolving, setResolving] = useState(false);
+    const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
     useEffect(() => {
         const fetchIncident = async () => {
@@ -57,15 +47,41 @@ export default function IncidentDetailsPage() {
                 if (response.ok) {
                     const result = await response.json();
                     setData(result);
+                    setLoading(false);
+
+                    // Stop polling if root_cause is available
+                    if (
+                        result.incident?.root_cause &&
+                        pollIntervalRef.current
+                    ) {
+                        clearInterval(pollIntervalRef.current);
+                        pollIntervalRef.current = null;
+                        return false; // Signal polling should stop
+                    }
+                    return !result.incident?.root_cause; // Return true if polling should continue
                 }
             } catch (error) {
                 console.error('Failed to fetch incident:', error);
-            } finally {
                 setLoading(false);
             }
+            return false;
         };
 
-        fetchIncident();
+        // Initial fetch and check if polling is needed
+        fetchIncident().then((shouldPoll) => {
+            if (shouldPoll && !pollIntervalRef.current) {
+                pollIntervalRef.current = setInterval(() => {
+                    fetchIncident();
+                }, 3000);
+            }
+        });
+
+        return () => {
+            if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+                pollIntervalRef.current = null;
+            }
+        };
     }, [params.id]);
 
     const handleResolve = async () => {
