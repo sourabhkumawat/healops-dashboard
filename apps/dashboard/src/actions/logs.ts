@@ -1,8 +1,7 @@
 'use server';
 
-import { cookies } from 'next/headers';
-
 import { API_BASE } from '@/lib/config';
+import { fetchWithAuth } from '@/lib/api-client';
 
 export type LogEntry = {
     id: number;
@@ -18,20 +17,12 @@ export type LogEntry = {
 
 export async function getLogs(limit: number = 50): Promise<LogEntry[]> {
     try {
-        // Get auth token from cookies
-        const authToken = (await cookies()).get('auth_token')?.value;
-
-        // We can also use the API key if we had one stored, but for dashboard we use JWT
-        // However, the backend /logs endpoint currently expects an API key in header or query param
-        // OR it falls back to listing all logs if no auth is provided (for testing)
-        // Let's try to fetch with the auth token first
-
-        const response = await fetch(`${API_BASE}/logs?limit=${limit}`, {
-            headers: {
-                Authorization: `Bearer ${authToken}`
-            },
-            cache: 'no-store' // Ensure we always get fresh data
-        });
+        const response = await fetchWithAuth(
+            `${API_BASE}/logs?limit=${limit}`,
+            {
+                cache: 'no-store' // Ensure we always get fresh data
+            }
+        );
 
         if (!response.ok) {
             console.error(

@@ -14,7 +14,11 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Loader2, ArrowLeft, CheckCircle2 } from 'lucide-react';
 import { Incident } from '@/components/incident-table';
-import { getApiBaseUrl } from '@/lib/config';
+import {
+    getIncident,
+    triggerIncidentAnalysis,
+    updateIncidentStatus
+} from '@/actions/incidents';
 
 interface LogEntry {
     id: number;
@@ -40,21 +44,14 @@ export default function IncidentDetailsPage() {
 
     const triggerAnalysis = async () => {
         try {
-            const apiBase = getApiBaseUrl();
             setAnalyzing(true);
-            await fetch(`${apiBase}/incidents/${params.id}/analyze`, {
-                method: 'POST'
-            });
+            await triggerIncidentAnalysis(Number(params.id));
             // Start polling after triggering analysis
             if (!pollIntervalRef.current) {
                 pollIntervalRef.current = setInterval(async () => {
-                    const apiBase = getApiBaseUrl();
                     try {
-                        const response = await fetch(
-                            `${apiBase}/incidents/${params.id}`
-                        );
-                        if (response.ok) {
-                            const result = await response.json();
+                        const result = await getIncident(Number(params.id));
+                        if (result) {
                             setData(result);
                             if (result.incident?.root_cause) {
                                 if (pollIntervalRef.current) {
@@ -79,17 +76,13 @@ export default function IncidentDetailsPage() {
     };
 
     useEffect(() => {
-        const apiBase = getApiBaseUrl();
         let pollCount = 0;
         const MAX_POLL_ATTEMPTS = 40; // 2 minutes max (40 * 3 seconds)
 
-        const fetchIncident = async () => {
+        const fetchIncident = async (): Promise<boolean> => {
             try {
-                const response = await fetch(
-                    `${apiBase}/incidents/${params.id}`
-                );
-                if (response.ok) {
-                    const result = await response.json();
+                const result = await getIncident(Number(params.id));
+                if (result) {
                     setData(result);
                     setLoading(false);
 
@@ -138,11 +131,8 @@ export default function IncidentDetailsPage() {
                         return;
                     }
 
-                    const response = await fetch(
-                        `${apiBase}/incidents/${params.id}`
-                    );
-                    if (response.ok) {
-                        const result = await response.json();
+                    const result = await getIncident(Number(params.id));
+                    if (result) {
                         setData(result);
 
                         if (result.incident?.root_cause) {
@@ -170,16 +160,12 @@ export default function IncidentDetailsPage() {
     const handleResolve = async () => {
         setResolving(true);
         try {
-            const apiBase = getApiBaseUrl();
-            const response = await fetch(`${apiBase}/incidents/${params.id}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ status: 'RESOLVED' })
-            });
+            const updatedIncident = await updateIncidentStatus(
+                Number(params.id),
+                'RESOLVED'
+            );
 
-            if (response.ok) {
-                // Refresh data
-                const updatedIncident = await response.json();
+            if (updatedIncident) {
                 setData((prev) =>
                     prev ? { ...prev, incident: updatedIncident } : null
                 );

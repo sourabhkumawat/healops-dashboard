@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { IncidentTable, Incident } from '@/components/incident-table';
 import { Loader2 } from 'lucide-react';
-import { getApiBaseUrl } from '@/lib/config';
+import { getIncidents } from '@/actions/incidents';
 
 export default function IncidentsPage() {
     const [incidents, setIncidents] = useState<Incident[]>([]);
@@ -12,12 +12,8 @@ export default function IncidentsPage() {
     useEffect(() => {
         const fetchIncidents = async () => {
             try {
-                const apiBase = getApiBaseUrl();
-                const response = await fetch(`${apiBase}/incidents`);
-                if (response.ok) {
-                    const data = await response.json();
-                    setIncidents(data);
-                }
+                const data = await getIncidents();
+                setIncidents(data);
             } catch (error) {
                 console.error('Failed to fetch incidents:', error);
             } finally {

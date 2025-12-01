@@ -35,7 +35,8 @@ import {
     addServiceMapping,
     removeServiceMapping,
     getServices,
-    getRepositories
+    getRepositories,
+    listIntegrations
 } from '@/actions/integrations';
 import {
     Select,
@@ -143,11 +144,8 @@ export default function SettingsPage() {
 
     const fetchIntegrations = async () => {
         try {
-            const response = await fetch(`${API_BASE}/integrations`);
-            if (response.ok) {
-                const data = await response.json();
-                setIntegrations(data.integrations || []);
-            }
+            const data = await listIntegrations();
+            setIntegrations(data.integrations || []);
         } catch (error) {
             console.error('Failed to fetch integrations:', error);
         }
