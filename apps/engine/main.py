@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # CORS Configuration - Read from environment variables
 # Supports multiple origins separated by commas
 # Example: CORS_ALLOWED_ORIGINS=http://localhost:3000,https://app.healops.ai
-CORS_ALLOWED_ORIGINS_ENV = os.getenv("CORS_ALLOWED_ORIGINS","https://experiment.healops.ai", "http://localhost:3000,http://localhost:3001")
+CORS_ALLOWED_ORIGINS_ENV = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001,https://experiment.healops.ai/")
 cors_origins = [origin.strip() for origin in CORS_ALLOWED_ORIGINS_ENV.split(",") if origin.strip()]
 
 print(f"🌐 CORS Allowed Origins: {cors_origins}")
