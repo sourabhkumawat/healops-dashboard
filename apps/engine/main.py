@@ -31,18 +31,12 @@ app = FastAPI(title="Self-Healing SaaS Engine")
 # Add Middleware
 from fastapi.middleware.cors import CORSMiddleware
 
-# CORS Configuration - Read from environment variables
-# Supports multiple origins separated by commas
-# Example: CORS_ALLOWED_ORIGINS=http://localhost:3000,https://app.healops.ai
-CORS_ALLOWED_ORIGINS_ENV = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001,https://experiment.healops.ai")
-cors_origins = [origin.strip() for origin in CORS_ALLOWED_ORIGINS_ENV.split(",") if origin.strip()]
-
-print(f"🌐 CORS Allowed Origins: {cors_origins}")
-
+# CORS Configuration - Allow all origins
+# Note: allow_credentials must be False when allowing all origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
