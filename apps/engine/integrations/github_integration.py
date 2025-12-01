@@ -45,6 +45,129 @@ class GithubIntegration:
         except GithubException as e:
             return {"status": "error", "message": str(e)}
 
+    def get_repo_info(self, repo_name: str) -> Dict[str, Any]:
+        """
+        Get repository information.
+        
+        Args:
+            repo_name: "owner/repo"
+            
+        Returns:
+            Repository information
+        """
+        if not self.client:
+            return {"status": "error", "message": "Not authenticated"}
+            
+        try:
+            repo = self.client.get_repo(repo_name)
+            return {
+                "status": "success",
+                "name": repo.full_name,
+                "default_branch": repo.default_branch,
+                "description": repo.description,
+                "url": repo.html_url
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def get_file_contents(self, repo_name: str, file_path: str, ref: str = "main") -> Optional[str]:
+        """
+        Get file contents from repository.
+        
+        Args:
+            repo_name: "owner/repo"
+            file_path: Path to file in repo
+            ref: Branch or commit SHA
+            
+        Returns:
+            File contents as string, or None if error
+        """
+        if not self.client:
+            return None
+            
+        try:
+            repo = self.client.get_repo(repo_name)
+            contents = repo.get_contents(file_path, ref=ref)
+            if contents.encoding == "base64":
+                import base64
+                return base64.b64decode(contents.content).decode("utf-8")
+            return contents.decoded_content.decode("utf-8")
+        except Exception as e:
+            print(f"Error fetching file {file_path}: {e}")
+            return None
+    
+    def search_code(self, repo_name: str, query: str, language: Optional[str] = None) -> list[Dict[str, Any]]:
+        """
+        Search for code in repository.
+        
+        Args:
+            repo_name: "owner/repo"
+            query: Search query
+            language: Optional language filter (e.g., "python", "javascript")
+            
+        Returns:
+            List of matching files with snippets
+        """
+        if not self.client:
+            return []
+            
+        try:
+            repo = self.client.get_repo(repo_name)
+            search_query = f"{query} repo:{repo_name}"
+            if language:
+                search_query += f" language:{language}"
+            
+            results = self.client.search_code(search_query)
+            matches = []
+            for content_file in results[:10]:  # Limit to 10 results
+                matches.append({
+                    "path": content_file.path,
+                    "name": content_file.name,
+                    "url": content_file.html_url,
+                    "repository": content_file.repository.full_name
+                })
+            return matches
+        except Exception as e:
+            print(f"Error searching code: {e}")
+            return []
+    
+    def get_repo_structure(self, repo_name: str, path: str = "", ref: str = "main", max_depth: int = 2) -> list[str]:
+        """
+        Get repository file structure.
+        
+        Args:
+            repo_name: "owner/repo"
+            path: Starting path (empty for root)
+            ref: Branch or commit SHA
+            max_depth: Maximum depth to traverse
+            
+        Returns:
+            List of file paths
+        """
+        if not self.client or max_depth <= 0:
+            return []
+            
+        try:
+            repo = self.client.get_repo(repo_name)
+            contents = repo.get_contents(path, ref=ref)
+            files = []
+            
+            if isinstance(contents, list):
+                for item in contents:
+                    if item.type == "file":
+                        files.append(item.path)
+                    elif item.type == "dir":
+                        # Recursively get subdirectory contents
+                        files.extend(self.get_repo_structure(repo_name, item.path, ref, max_depth - 1))
+            else:
+                if contents.type == "file":
+                    files.append(contents.path)
+            
+            return files
+        except Exception as e:
+            print(f"Error getting repo structure: {e}")
+            return []
+
     def create_pr(self, repo_name: str, title: str, body: str, head_branch: str, base_branch: str = "main", changes: Dict[str, str] = None) -> Dict[str, Any]:
         """
         Create a Pull Request with changes.
@@ -68,23 +191,32 @@ class GithubIntegration:
             
             # Get base branch SHA
             sb = repo.get_branch(base_branch)
+            base_sha = sb.commit.sha
             
             # Create new branch
             try:
-                repo.create_git_ref(ref=f"refs/heads/{head_branch}", sha=sb.commit.sha)
-            except GithubException:
-                # Branch might already exist
-                pass
+                repo.create_git_ref(ref=f"refs/heads/{head_branch}", sha=base_sha)
+            except GithubException as e:
+                # Branch might already exist, try to delete and recreate
+                if "already exists" in str(e).lower():
+                    try:
+                        ref = repo.get_git_ref(f"heads/{head_branch}")
+                        ref.delete()
+                        repo.create_git_ref(ref=f"refs/heads/{head_branch}", sha=base_sha)
+                    except:
+                        return {"status": "error", "message": f"Could not create branch: {e}"}
+                else:
+                    return {"status": "error", "message": str(e)}
                 
             # Commit changes
             if changes:
                 for file_path, content in changes.items():
                     try:
                         contents = repo.get_contents(file_path, ref=head_branch)
-                        repo.update_file(contents.path, f"Update {file_path}", content, contents.sha, branch=head_branch)
+                        repo.update_file(contents.path, f"Fix: {file_path}", content, contents.sha, branch=head_branch)
                     except GithubException:
                         # File doesn't exist, create it
-                        repo.create_file(file_path, f"Create {file_path}", content, branch=head_branch)
+                        repo.create_file(file_path, f"Create: {file_path}", content, branch=head_branch)
             
             # Create PR
             pr = repo.create_pull(title=title, body=body, head=head_branch, base=base_branch)

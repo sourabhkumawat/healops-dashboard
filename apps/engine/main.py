@@ -662,6 +662,22 @@ async def analyze_incident_async(incident_id: int):
         if analysis.get("action_taken"):
             incident.action_taken = analysis["action_taken"]
         
+        # Store PR information in action_result if PR was created
+        if analysis.get("pr_url"):
+            incident.action_result = {
+                "pr_url": analysis.get("pr_url"),
+                "pr_number": analysis.get("pr_number"),
+                "pr_files_changed": analysis.get("pr_files_changed", []),
+                "status": "pr_created"
+            }
+            print(f"✅ PR created for incident {incident_id}: {analysis.get('pr_url')}")
+        elif analysis.get("pr_error"):
+            # Store PR error if creation failed
+            incident.action_result = {
+                "status": "pr_failed",
+                "error": analysis.get("pr_error")
+            }
+        
         # Ensure we always set something to stop infinite loading
         if not incident.root_cause:
             incident.root_cause = "Analysis failed - no results returned. Please check logs."
