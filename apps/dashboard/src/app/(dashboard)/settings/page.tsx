@@ -651,20 +651,35 @@ export default function SettingsPage() {
                                                         integration.status
                                                     )}
                                                     {isGitHub && (
-                                                        <Button
-                                                            size="sm"
-                                                            variant="outline"
-                                                            onClick={() =>
-                                                                handleToggleIntegration(
-                                                                    integration.id
-                                                                )
-                                                            }
-                                                            className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
-                                                        >
-                                                            {isExpanded
-                                                                ? 'Hide'
-                                                                : 'Configure'}
-                                                        </Button>
+                                                        <>
+                                                            <Button
+                                                                size="sm"
+                                                                variant="outline"
+                                                                onClick={() =>
+                                                                    handleToggleIntegration(
+                                                                        integration.id
+                                                                    )
+                                                                }
+                                                                className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                                                            >
+                                                                {isExpanded
+                                                                    ? 'Hide'
+                                                                    : 'Configure'}
+                                                            </Button>
+                                                            <Button
+                                                                size="sm"
+                                                                variant="outline"
+                                                                onClick={() => {
+                                                                    // Force reconnection by redirecting to reconnect endpoint
+                                                                    // This will mark integration as disconnected and redirect to GitHub OAuth
+                                                                    window.location.href = `${API_BASE}/integrations/github/reconnect?integration_id=${integration.id}`;
+                                                                }}
+                                                                className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                                                            >
+                                                                <Cloud className="h-4 w-4 mr-2" />
+                                                                Reconnect
+                                                            </Button>
+                                                        </>
                                                     )}
                                                     <Button
                                                         size="icon"

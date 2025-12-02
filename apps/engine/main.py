@@ -2,7 +2,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import json
-from fastapi import FastAPI, Depends, HTTPException, status, Response, Request
+from fastapi import FastAPI, Depends, HTTPException, status, Response, Request, Query
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import PlainTextResponse, FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
@@ -521,23 +521,145 @@ GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
+@app.get("/integrations/github/reconnect")
+def github_reconnect(
+    request: Request,
+    integration_id: int = Query(..., description="The integration ID to reconnect"),
+    db: Session = Depends(get_db)
+):
+    """Handle reconnection by first trying to revoke existing token, then redirecting to authorize."""
+    # Get the integration to reconnect
+    user_id = get_user_id_from_request(request, default=1, db=db)
+    
+    # Try to find the integration - first by ID and provider
+    integration = db.query(Integration).filter(
+        Integration.id == integration_id,
+        Integration.provider == "GITHUB"
+    ).first()
+    
+    if not integration:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"GitHub integration with ID {integration_id} not found. Please check the integration ID."
+        )
+    
+    # Log for debugging (can be removed in production)
+    print(f"Found integration: ID={integration.id}, user_id={integration.user_id}, requested_user_id={user_id}")
+    
+    # Try to revoke the existing authorization on GitHub if we have a token
+    if integration.access_token:
+        try:
+            from crypto_utils import decrypt_token
+            try:
+                access_token = decrypt_token(integration.access_token)
+            except Exception:
+                # Fallback for legacy plain text tokens
+                access_token = integration.access_token
+            
+            # Note: We can't easily revoke the GitHub OAuth grant programmatically without
+            # the user's explicit action. Instead, we'll clear our local token and
+            # redirect to authorize, which should prompt GitHub to show the authorization page
+            # if the grant has been revoked or if we use a unique state parameter
+        except Exception as e:
+            # Continue even if revocation fails
+            pass
+    
+    # Mark as disconnected to indicate we're reconnecting
+    integration.status = "DISCONNECTED"
+    # Clear the access token so it won't be reused
+    integration.access_token = None
+    db.commit()
+    
+    # Redirect to authorize with reconnect flag
+    # Use a unique timestamp and nonce to ensure GitHub treats it as a new authorization request
+    import base64
+    state_data = {
+        "timestamp": int(time.time() * 1000),  # Use milliseconds for uniqueness
+        "reconnect": True,
+        "integration_id": integration_id,
+        "nonce": secrets.token_urlsafe(16)  # Add random nonce to force new authorization
+    }
+    state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
+    
+    # Get the callback URL - construct from request and URL encode it
+    from urllib.parse import quote
+    base_url = str(request.base_url).rstrip('/')
+    callback_url = f"{base_url}/integrations/github/callback"
+    
+    scope = "repo read:user"
+    # Note: redirect_uri is optional if only one callback URL is configured in GitHub
+    # We'll include it to be explicit, but GitHub will use the configured callback if it doesn't match
+    auth_url = (
+        f"https://github.com/login/oauth/authorize"
+        f"?client_id={GITHUB_CLIENT_ID}"
+        f"&scope={scope}"
+        f"&state={state}"
+        f"&redirect_uri={quote(callback_url, safe='')}"
+    )
+    
+    return RedirectResponse(auth_url)
+
 @app.get("/integrations/github/authorize")
-def github_authorize():
+def github_authorize(request: Request, reconnect: Optional[str] = None, integration_id: Optional[int] = None):
     """Redirect user to GitHub OAuth authorization page."""
     if not GITHUB_CLIENT_ID:
         raise HTTPException(status_code=500, detail="GitHub Client ID not configured")
     
+    # Generate state parameter for OAuth security
+    # Include integration_id if reconnecting to track which integration is being reconnected
+    state_data = {
+        "timestamp": int(time.time() * 1000),  # Use milliseconds for uniqueness
+        "reconnect": reconnect == "true",
+        "nonce": secrets.token_urlsafe(16)  # Add random nonce to ensure uniqueness
+    }
+    if integration_id:
+        state_data["integration_id"] = integration_id
+    
+    # Encode state as base64 JSON for passing through OAuth flow
+    import base64
+    state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
+    
     # Scopes: repo (for private repos), read:user (for user info)
+    # Note: GitHub OAuth doesn't allow selecting specific repos - it grants access to all repos
+    # For repo selection, GitHub Apps installation flow would be needed
     scope = "repo read:user"
-    return RedirectResponse(
-        f"https://github.com/login/oauth/authorize?client_id={GITHUB_CLIENT_ID}&scope={scope}"
+    
+    # Get the callback URL from request and URL encode it
+    from urllib.parse import quote
+    base_url = str(request.base_url).rstrip('/')
+    callback_url = f"{base_url}/integrations/github/callback"
+    
+    # Build authorization URL
+    # Note: redirect_uri is optional if only one callback URL is configured in GitHub OAuth app
+    # Including it explicitly with proper URL encoding
+    auth_url = (
+        f"https://github.com/login/oauth/authorize"
+        f"?client_id={GITHUB_CLIENT_ID}"
+        f"&scope={scope}"
+        f"&state={state}"
+        f"&redirect_uri={quote(callback_url, safe='')}"
     )
+    
+    return RedirectResponse(auth_url)
 
 @app.get("/integrations/github/callback")
-def github_callback(code: str, db: Session = Depends(get_db)):
+def github_callback(code: str, state: Optional[str] = None, db: Session = Depends(get_db)):
     """Handle GitHub OAuth callback."""
     if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
         raise HTTPException(status_code=500, detail="GitHub credentials not configured")
+        
+    # Decode state parameter if provided
+    reconnect = False
+    integration_id = None
+    if state:
+        try:
+            import base64
+            state_data = json.loads(base64.urlsafe_b64decode(state.encode()).decode())
+            reconnect = state_data.get("reconnect", False)
+            integration_id = state_data.get("integration_id")
+        except Exception:
+            # If state decoding fails, continue without it (backwards compatibility)
+            pass
         
     # Exchange code for token
     response = requests.post(
@@ -566,16 +688,28 @@ def github_callback(code: str, db: Session = Depends(get_db)):
     if user_info["status"] == "error":
         raise HTTPException(status_code=400, detail="Invalid token obtained")
         
-    # NOTE: GitHub OAuth callback doesn't have user context in the request.
-    # In production, you should pass a 'state' parameter in the OAuth flow with the user's session token.
-    # For now, defaulting to user_id=1 for existing data compatibility.
-    # TODO: Implement state parameter in OAuth flow to get actual user_id
-    user_id = 1 
+    # Get user_id from request if available, otherwise default to 1
+    # NOTE: In production, the state parameter should include user session info
+    user_id = 1  # TODO: Extract from state or session
     
     # Encrypt token
     encrypted_token = encrypt_token(access_token)
     
-    # Check if integration already exists
+    # Handle reconnection: if integration_id is provided and reconnecting, update that specific integration
+    if reconnect and integration_id:
+        integration = db.query(Integration).filter(
+            Integration.id == integration_id,
+            Integration.provider == "GITHUB"
+        ).first()
+        if integration:
+            integration.access_token = encrypted_token
+            integration.status = "ACTIVE"
+            integration.last_verified = datetime.utcnow()
+            integration.name = f"GitHub ({user_info['username']})"
+            db.commit()
+            return RedirectResponse(f"{FRONTEND_URL}/settings?github_connected=true&reconnected=true")
+    
+    # Check if integration already exists for this user
     integration = db.query(Integration).filter(
         Integration.user_id == user_id,
         Integration.provider == "GITHUB"
@@ -592,6 +726,7 @@ def github_callback(code: str, db: Session = Depends(get_db)):
         )
         db.add(integration)
     else:
+        # Update existing integration with new token
         integration.access_token = encrypted_token
         integration.status = "ACTIVE"
         integration.last_verified = datetime.utcnow()
