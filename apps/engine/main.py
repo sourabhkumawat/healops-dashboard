@@ -85,7 +85,14 @@ app = FastAPI(title="Self-Healing SaaS Engine")
 @app.on_event("startup")
 async def startup_event():
     """Initialize ConnectionManager with event loop on startup"""
-    manager.initialize(asyncio.get_event_loop())
+    try:
+        loop = asyncio.get_event_loop()
+        manager.initialize(loop)
+        print("✓ ConnectionManager initialized with Redis pub/sub")
+    except Exception as e:
+        print(f"⚠ Error initializing ConnectionManager: {e}")
+        import traceback
+        traceback.print_exc()
 
 # Add Middleware
 # Add Middleware
@@ -163,8 +170,18 @@ from fastapi import WebSocket, WebSocketDisconnect, BackgroundTasks
 
 # Redis Configuration
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 REDIS_LOG_CHANNEL = "healops:logs"
+
+# Initialize Redis client with error handling
+try:
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=5)
+    # Test connection
+    redis_client.ping()
+    print(f"✓ Redis client connected: {REDIS_URL}")
+except Exception as e:
+    print(f"⚠ Warning: Redis connection failed: {e}")
+    print("  Logs will still work but may not be distributed via pub/sub")
+    redis_client = None
 
 # WebSocket Connection Manager with Redis Pub/Sub
 class ConnectionManager:
@@ -188,7 +205,9 @@ class ConnectionManager:
         """Start Redis subscriber in a background thread"""
         def redis_listener():
             try:
-                subscriber = redis.from_url(REDIS_URL, decode_responses=True)
+                subscriber = redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=5)
+                # Test connection
+                subscriber.ping()
                 pubsub = subscriber.pubsub()
                 pubsub.subscribe(REDIS_LOG_CHANNEL)
                 
@@ -209,13 +228,20 @@ class ConnectionManager:
                                 )
                         except Exception as e:
                             print(f"Error processing Redis message: {e}")
+            except (redis.ConnectionError, redis.TimeoutError, ConnectionError) as e:
+                print(f"⚠ Redis connection error in subscriber: {e}")
+                print("  WebSocket will still work but won't receive Redis pub/sub messages")
             except Exception as e:
                 print(f"Error in Redis subscriber thread: {e}")
                 import traceback
                 traceback.print_exc()
         
-        self.subscriber_thread = threading.Thread(target=redis_listener, daemon=True)
-        self.subscriber_thread.start()
+        # Only start subscriber if Redis is available
+        if redis_client:
+            self.subscriber_thread = threading.Thread(target=redis_listener, daemon=True)
+            self.subscriber_thread.start()
+        else:
+            print("⚠ Redis subscriber not started (Redis unavailable)")
 
     async def _process_messages(self):
         """Process messages from queue and broadcast to WebSockets"""
@@ -253,11 +279,15 @@ class ConnectionManager:
 
     async def broadcast(self, message: dict):
         """Publish message to Redis channel (for pub/sub)"""
-        try:
-            redis_client.publish(REDIS_LOG_CHANNEL, json.dumps(message))
-        except Exception as e:
-            print(f"Error publishing to Redis: {e}")
-            # Fallback: broadcast directly to WebSockets if Redis fails
+        if redis_client:
+            try:
+                redis_client.publish(REDIS_LOG_CHANNEL, json.dumps(message))
+            except Exception as e:
+                print(f"Error publishing to Redis: {e}")
+                # Fallback: broadcast directly to WebSockets if Redis fails
+                await self._broadcast_to_websockets(message)
+        else:
+            # If Redis is not available, broadcast directly to WebSockets
             await self._broadcast_to_websockets(message)
 
 manager = ConnectionManager()

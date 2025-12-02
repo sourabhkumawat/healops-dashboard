@@ -113,16 +113,6 @@ export function LiveLogs({ initialLogs = [] }: LiveLogsProps) {
         ws.onclose = () => {
             console.log('Disconnected from Live Logs WebSocket');
             setConnectionStatus('disconnected');
-            // Attempt to reconnect after 3 seconds
-            setTimeout(() => {
-                if (
-                    !wsRef.current ||
-                    wsRef.current.readyState === WebSocket.CLOSED
-                ) {
-                    setConnectionStatus('connecting');
-                    // Reconnection will happen on next render
-                }
-            }, 3000);
         };
 
         return () => {
