@@ -520,6 +520,7 @@ class ServiceMappingsUpdateRequest(BaseModel):
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+GITHUB_CALLBACK_URL = "https://engine.healops.ai/integrations/github/callback"
 
 @app.get("/integrations/github/reconnect")
 def github_reconnect(
@@ -581,14 +582,21 @@ def github_reconnect(
     }
     state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
     
-    # Get the callback URL - construct from request and URL encode it
+    # Get the callback URL - use environment variable if set, otherwise construct from request
     from urllib.parse import quote
-    base_url = str(request.base_url).rstrip('/')
-    callback_url = f"{base_url}/integrations/github/callback"
+    if GITHUB_CALLBACK_URL:
+        callback_url = GITHUB_CALLBACK_URL
+    else:
+        # Construct from request, forcing HTTPS for production
+        base_url = str(request.base_url).rstrip('/')
+        if 'localhost' not in base_url and base_url.startswith('http://'):
+            # Force HTTPS for production
+            base_url = base_url.replace('http://', 'https://')
+        callback_url = f"{base_url}/integrations/github/callback"
     
     scope = "repo read:user"
-    # Note: redirect_uri is optional if only one callback URL is configured in GitHub
-    # We'll include it to be explicit, but GitHub will use the configured callback if it doesn't match
+    # Build authorization URL
+    # Note: redirect_uri must match exactly what's configured in GitHub OAuth App settings
     auth_url = (
         f"https://github.com/login/oauth/authorize"
         f"?client_id={GITHUB_CLIENT_ID}"
@@ -624,14 +632,20 @@ def github_authorize(request: Request, reconnect: Optional[str] = None, integrat
     # For repo selection, GitHub Apps installation flow would be needed
     scope = "repo read:user"
     
-    # Get the callback URL from request and URL encode it
+    # Get the callback URL - use environment variable if set, otherwise construct from request
     from urllib.parse import quote
-    base_url = str(request.base_url).rstrip('/')
-    callback_url = f"{base_url}/integrations/github/callback"
+    if GITHUB_CALLBACK_URL:
+        callback_url = GITHUB_CALLBACK_URL
+    else:
+        # Construct from request, forcing HTTPS for production
+        base_url = str(request.base_url).rstrip('/')
+        if 'localhost' not in base_url and base_url.startswith('http://'):
+            # Force HTTPS for production
+            base_url = base_url.replace('http://', 'https://')
+        callback_url = f"{base_url}/integrations/github/callback"
     
     # Build authorization URL
-    # Note: redirect_uri is optional if only one callback URL is configured in GitHub OAuth app
-    # Including it explicitly with proper URL encoding
+    # Note: redirect_uri must match exactly what's configured in GitHub OAuth App settings
     auth_url = (
         f"https://github.com/login/oauth/authorize"
         f"?client_id={GITHUB_CLIENT_ID}"
