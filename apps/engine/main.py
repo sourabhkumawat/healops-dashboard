@@ -190,55 +190,97 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.post("/ingest/logs")
 async def ingest_log(log: LogIngestRequest, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    # API Key is already validated by middleware
-    api_key = request.state.api_key
-    
-    # Determine integration_id
-    integration_id = api_key.integration_id
-    if not integration_id and log.integration_id:
-        integration = db.query(Integration).filter(
-            Integration.id == log.integration_id,
-            Integration.user_id == api_key.user_id
-        ).first()
-        if integration:
-            integration_id = integration.id
-    
-    # Prepare log data
-    log_data = {
-        "service_name": log.service_name,
-        "severity": log.severity,
-        "message": log.message,
-        "source": log.source,
-        "timestamp": log.timestamp or datetime.utcnow().isoformat(),
-        "metadata": log.metadata
-    }
-    
-    # 1. Broadcast to WebSockets (ALL LOGS)
-    await manager.broadcast(log_data)
-    
-    # 2. Persistence & Incident Logic (ERRORS ONLY)
-    if log.severity.upper() in ["ERROR", "CRITICAL"]:
-        db_log = LogEntry(
-            service_name=log.service_name,
-            level=log.severity,
-            severity=log.severity,
-            message=log.message,
-            source=log.source,
-            integration_id=integration_id,
-            user_id=api_key.user_id,  # Store user_id from API key
-            metadata_json=log.metadata
-        )
-        db.add(db_log)
-        db.commit()
-        db.refresh(db_log)
+    """
+    Ingest logs from clients. All logs are broadcast to WebSockets.
+    Only ERROR and CRITICAL logs are persisted to the database.
+    """
+    try:
+        # API Key is already validated by middleware
+        api_key = request.state.api_key
         
-        # Trigger incident check
-        from tasks import process_log_entry
-        background_tasks.add_task(process_log_entry, db_log.id)
+        # Determine integration_id
+        integration_id = api_key.integration_id
+        if not integration_id and log.integration_id:
+            integration = db.query(Integration).filter(
+                Integration.id == log.integration_id,
+                Integration.user_id == api_key.user_id
+            ).first()
+            if integration:
+                integration_id = integration.id
         
-        return {"status": "ingested", "id": db_log.id, "persisted": True}
-    
-    return {"status": "broadcasted", "persisted": False}
+        # Prepare log data
+        log_data = {
+            "service_name": log.service_name,
+            "severity": log.severity,
+            "message": log.message,
+            "source": log.source,
+            "timestamp": log.timestamp or datetime.utcnow().isoformat(),
+            "metadata": log.metadata
+        }
+        
+        # 1. Broadcast to WebSockets (ALL LOGS)
+        # Don't let WebSocket failures prevent persistence
+        try:
+            await manager.broadcast(log_data)
+        except Exception as ws_error:
+            print(f"Warning: Failed to broadcast log to WebSockets: {ws_error}")
+            # Continue execution even if broadcast fails
+        
+        # 2. Persistence & Incident Logic (ERRORS ONLY)
+        severity_upper = log.severity.upper() if log.severity else ""
+        should_persist = severity_upper in ["ERROR", "CRITICAL"]
+        
+        if should_persist:
+            try:
+                db_log = LogEntry(
+                    service_name=log.service_name,
+                    level=log.severity,
+                    severity=log.severity,
+                    message=log.message,
+                    source=log.source,
+                    integration_id=integration_id,
+                    user_id=api_key.user_id,  # Store user_id from API key
+                    metadata_json=log.metadata
+                )
+                db.add(db_log)
+                db.commit()
+                db.refresh(db_log)
+                
+                # Log successful persistence for debugging
+                print(f"✓ Persisted {severity_upper} log: id={db_log.id}, service={log.service_name}, message={log.message[:50]}")
+                
+                # Trigger incident check
+                try:
+                    from tasks import process_log_entry
+                    background_tasks.add_task(process_log_entry, db_log.id)
+                except Exception as task_error:
+                    print(f"Warning: Failed to queue incident check task: {task_error}")
+                    # Don't fail the request if task queuing fails
+                
+                return {"status": "ingested", "id": db_log.id, "persisted": True, "severity": log.severity}
+            except Exception as db_error:
+                # Rollback on error
+                db.rollback()
+                print(f"✗ Failed to persist log to database: {db_error}")
+                print(f"  Log details: service={log.service_name}, severity={log.severity}, message={log.message[:50]}")
+                # Return error response but don't raise exception (log was received)
+                return {
+                    "status": "broadcasted",
+                    "persisted": False,
+                    "error": "Failed to persist log to database",
+                    "severity": log.severity
+                }
+        else:
+            # Log received but not persisted (INFO/WARNING)
+            print(f"Received {severity_upper} log (not persisted): service={log.service_name}, message={log.message[:50]}")
+            return {"status": "broadcasted", "persisted": False, "severity": log.severity}
+            
+    except Exception as e:
+        # Catch any unexpected errors
+        print(f"✗ Unexpected error in ingest_log: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 # ============================================================================
 # OpenTelemetry Error Ingestion
