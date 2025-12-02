@@ -18,20 +18,20 @@ function getLogLevelStyle(
 
     switch (logLevel) {
         case 'CRITICAL':
-            return 'bg-red-950 text-red-400 border border-red-800';
+            return 'bg-red-500/20 text-red-400 border border-red-500/30';
         case 'ERROR':
-            return 'bg-red-950 text-red-500 border border-red-900';
+            return 'bg-red-500/15 text-red-400 border border-red-500/25';
         case 'WARNING':
         case 'WARN':
-            return 'bg-yellow-950 text-yellow-500 border border-yellow-900';
+            return 'bg-yellow-500/15 text-yellow-400 border border-yellow-500/25';
         case 'INFO':
-            return 'bg-blue-950 text-blue-500 border border-blue-900';
+            return 'bg-blue-500/15 text-blue-400 border border-blue-500/25';
         case 'DEBUG':
-            return 'bg-purple-950 text-purple-400 border border-purple-900';
+            return 'bg-purple-500/15 text-purple-400 border border-purple-500/25';
         case 'TRACE':
-            return 'bg-gray-950 text-gray-400 border border-gray-800';
+            return 'bg-gray-500/10 text-gray-400 border border-gray-500/20';
         default:
-            return 'bg-zinc-950 text-zinc-400 border border-zinc-800';
+            return 'bg-zinc-500/10 text-zinc-400 border border-zinc-500/20';
     }
 }
 
@@ -130,138 +130,207 @@ export function LiveLogs({ initialLogs = [] }: LiveLogsProps) {
 
     return (
         <Card className="col-span-4 bg-zinc-950 border-zinc-800">
-            <CardHeader className="pb-2 flex flex-row items-center justify-between">
-                <CardTitle className="text-sm font-mono text-zinc-400 flex items-center gap-2">
+            <CardHeader className="pb-3 flex flex-row items-center justify-between border-b border-zinc-800">
+                <div className="flex items-center gap-3">
                     <div
-                        className={`w-2 h-2 rounded-full ${
+                        className={`w-2.5 h-2.5 rounded-full ${
                             connectionStatus === 'connected'
-                                ? 'bg-green-500 animate-pulse'
+                                ? 'bg-green-500 animate-pulse shadow-lg shadow-green-500/50'
                                 : connectionStatus === 'connecting'
                                 ? 'bg-yellow-500 animate-pulse'
                                 : 'bg-red-500'
                         }`}
                     ></div>
-                    LIVE_SYSTEM_LOGS
-                    <span className="text-[10px] text-zinc-600 ml-2">
-                        ({logs.length} logs)
+                    <CardTitle className="text-sm font-semibold text-zinc-200">
+                        Live System Logs
+                    </CardTitle>
+                    <span className="text-xs text-zinc-500 font-normal">
+                        {logs.length} {logs.length === 1 ? 'log' : 'logs'}
                     </span>
-                </CardTitle>
-                <div className="flex gap-2 text-xs flex-wrap">
-                    <span className="flex items-center">
-                        <div className="w-2 h-2 rounded-full bg-red-600 mr-1"></div>
-                        CRITICAL
+                </div>
+                <div className="flex gap-3 text-xs flex-wrap">
+                    <span className="flex items-center gap-1.5 text-zinc-400">
+                        <div className="w-2 h-2 rounded-full bg-red-600"></div>
+                        <span className="text-[10px]">CRITICAL</span>
                     </span>
-                    <span className="flex items-center">
-                        <div className="w-2 h-2 rounded-full bg-red-500 mr-1"></div>
-                        ERROR
+                    <span className="flex items-center gap-1.5 text-zinc-400">
+                        <div className="w-2 h-2 rounded-full bg-red-500"></div>
+                        <span className="text-[10px]">ERROR</span>
                     </span>
-                    <span className="flex items-center">
-                        <div className="w-2 h-2 rounded-full bg-yellow-500 mr-1"></div>
-                        WARN
+                    <span className="flex items-center gap-1.5 text-zinc-400">
+                        <div className="w-2 h-2 rounded-full bg-yellow-500"></div>
+                        <span className="text-[10px]">WARN</span>
                     </span>
-                    <span className="flex items-center">
-                        <div className="w-2 h-2 rounded-full bg-blue-500 mr-1"></div>
-                        INFO
+                    <span className="flex items-center gap-1.5 text-zinc-400">
+                        <div className="w-2 h-2 rounded-full bg-blue-500"></div>
+                        <span className="text-[10px]">INFO</span>
                     </span>
-                    <span className="flex items-center">
-                        <div className="w-2 h-2 rounded-full bg-purple-500 mr-1"></div>
-                        DEBUG
+                    <span className="flex items-center gap-1.5 text-zinc-400">
+                        <div className="w-2 h-2 rounded-full bg-purple-500"></div>
+                        <span className="text-[10px]">DEBUG</span>
                     </span>
                 </div>
             </CardHeader>
             <CardContent>
                 <div
-                    className="h-[400px] overflow-y-auto font-mono text-xs p-2 bg-black rounded-md border border-zinc-900"
+                    className="h-[400px] overflow-y-auto font-mono text-xs bg-black rounded-md border border-zinc-900"
                     ref={scrollRef}
                 >
                     {logs.map((log) => (
                         <div
                             key={log.id}
-                            className="mb-2 p-1 hover:bg-zinc-900 rounded transition-colors group"
+                            className="border-b border-zinc-900/50 hover:bg-zinc-900/30 transition-colors group"
                         >
-                            <div className="flex items-start">
+                            <div className="flex items-start gap-3 px-3 py-2.5">
+                                {/* Log Level Indicator Bar */}
                                 <div
-                                    className={`w-1 h-full rounded mr-2 ${getLogLevelIndicatorColor(
+                                    className={`w-1 h-full min-h-[20px] rounded-full shrink-0 ${getLogLevelIndicatorColor(
                                         log.severity,
                                         log.level
                                     )}`}
                                 ></div>
-                                <span className="text-zinc-600 min-w-[100px] select-none">
-                                    {log.timestamp
-                                        ? (() => {
-                                              const date = new Date(
-                                                  log.timestamp
-                                              );
-                                              const timeStr =
-                                                  date.toLocaleTimeString([], {
-                                                      hour12: false,
-                                                      hour: '2-digit',
-                                                      minute: '2-digit',
-                                                      second: '2-digit'
-                                                  });
-                                              const ms = date
-                                                  .getMilliseconds()
-                                                  .toString()
-                                                  .padStart(3, '0');
-                                              return `${timeStr}.${ms}`;
-                                          })()
-                                        : '--:--:--'}
-                                </span>
 
-                                <span
-                                    className={`mx-2 px-1.5 rounded text-[10px] font-bold min-w-[60px] text-center ${getLogLevelStyle(
-                                        log.severity,
-                                        log.level
-                                    )}`}
-                                >
-                                    {log.severity || log.level || 'INFO'}
-                                </span>
+                                {/* Main Content */}
+                                <div className="flex-1 min-w-0">
+                                    {/* First Line: Timestamp, Level, Service, Source */}
+                                    <div className="flex items-center gap-2.5 flex-wrap mb-1.5">
+                                        {/* Timestamp */}
+                                        <span className="text-zinc-400 font-medium select-none shrink-0">
+                                            {log.timestamp
+                                                ? (() => {
+                                                      const date = new Date(
+                                                          log.timestamp
+                                                      );
+                                                      const timeStr =
+                                                          date.toLocaleTimeString(
+                                                              [],
+                                                              {
+                                                                  hour12: false,
+                                                                  hour: '2-digit',
+                                                                  minute: '2-digit',
+                                                                  second: '2-digit'
+                                                              }
+                                                          );
+                                                      const ms = date
+                                                          .getMilliseconds()
+                                                          .toString()
+                                                          .padStart(3, '0');
+                                                      return `${timeStr}.${ms}`;
+                                                  })()
+                                                : '--:--:--'}
+                                        </span>
 
-                                <span
-                                    className="text-zinc-400 mr-2 min-w-[100px] truncate"
-                                    title={log.service_name}
-                                >
-                                    {log.service_name}
-                                </span>
+                                        {/* Log Level Badge */}
+                                        <span
+                                            className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide shrink-0 ${getLogLevelStyle(
+                                                log.severity,
+                                                log.level
+                                            )}`}
+                                        >
+                                            {log.severity ||
+                                                log.level ||
+                                                'INFO'}
+                                        </span>
 
-                                <span className="text-zinc-500 mr-2 text-[10px] uppercase border border-zinc-800 px-1 rounded">
-                                    {log.source || 'UNKNOWN'}
-                                </span>
+                                        {/* Service Name */}
+                                        {log.service_name && (
+                                            <span
+                                                className="text-zinc-300 font-medium truncate max-w-[150px]"
+                                                title={log.service_name}
+                                            >
+                                                {log.service_name}
+                                            </span>
+                                        )}
 
-                                <div className="flex-1 break-all">
-                                    <span className="text-zinc-300">
-                                        {log.message.split('\n')[0]}
-                                    </span>
+                                        {/* Source Badge */}
+                                        {log.source && (
+                                            <span className="text-zinc-500 text-[10px] uppercase border border-zinc-700/50 px-1.5 py-0.5 rounded bg-zinc-900/50 shrink-0">
+                                                {log.source}
+                                            </span>
+                                        )}
+                                    </div>
+
+                                    {/* Message */}
+                                    <div className="text-zinc-200 leading-relaxed break-words">
+                                        {log.message
+                                            .split('\n')
+                                            .map((line, lineIndex) => (
+                                                <div
+                                                    key={lineIndex}
+                                                    className={
+                                                        lineIndex > 0
+                                                            ? 'mt-1 pl-4 border-l-2 border-zinc-800/50'
+                                                            : ''
+                                                    }
+                                                >
+                                                    {line || (
+                                                        <span className="text-zinc-500 italic">
+                                                            (empty line)
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            ))}
+                                    </div>
+
+                                    {/* Metadata (on hover) */}
                                     {log.metadata && (
-                                        <div className="hidden group-hover:block mt-1 pl-2 border-l-2 border-zinc-800 text-zinc-500 text-[10px]">
+                                        <div className="hidden group-hover:block mt-2 pt-2 border-t border-zinc-800/50 space-y-1 text-zinc-500 text-[10px]">
                                             {log.metadata.traceId && (
-                                                <div>
-                                                    Trace ID:{' '}
-                                                    {log.metadata.traceId}
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-zinc-600">
+                                                        Trace:
+                                                    </span>
+                                                    <span className="font-mono text-zinc-400">
+                                                        {log.metadata.traceId}
+                                                    </span>
                                                 </div>
                                             )}
                                             {log.metadata.spanId && (
-                                                <div>
-                                                    Span ID:{' '}
-                                                    {log.metadata.spanId}
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-zinc-600">
+                                                        Span:
+                                                    </span>
+                                                    <span className="font-mono text-zinc-400">
+                                                        {log.metadata.spanId}
+                                                    </span>
                                                 </div>
                                             )}
-                                            {log.metadata.attributes && (
-                                                <div className="mt-0.5">
-                                                    {Object.entries(
-                                                        log.metadata.attributes
-                                                    )
-                                                        .slice(0, 3)
-                                                        .map(([k, v]) => (
-                                                            <span
-                                                                key={k}
-                                                                className="mr-2"
-                                                            >
-                                                                {k}: {String(v)}
-                                                            </span>
-                                                        ))}
-                                                </div>
-                                            )}
+                                            {log.metadata.attributes &&
+                                                Object.keys(
+                                                    log.metadata.attributes
+                                                ).length > 0 && (
+                                                    <div className="flex flex-wrap gap-x-3 gap-y-1">
+                                                        {Object.entries(
+                                                            log.metadata
+                                                                .attributes
+                                                        )
+                                                            .slice(0, 5)
+                                                            .map(([k, v]) => (
+                                                                <span
+                                                                    key={k}
+                                                                    className="flex items-center gap-1"
+                                                                >
+                                                                    <span className="text-zinc-600">
+                                                                        {k}:
+                                                                    </span>
+                                                                    <span className="text-zinc-400 font-mono">
+                                                                        {String(
+                                                                            v
+                                                                        ).slice(
+                                                                            0,
+                                                                            50
+                                                                        )}
+                                                                        {String(
+                                                                            v
+                                                                        )
+                                                                            .length >
+                                                                            50 &&
+                                                                            '...'}
+                                                                    </span>
+                                                                </span>
+                                                            ))}
+                                                    </div>
+                                                )}
                                         </div>
                                     )}
                                 </div>
@@ -269,11 +338,15 @@ export function LiveLogs({ initialLogs = [] }: LiveLogsProps) {
                         </div>
                     ))}
                     {logs.length === 0 && (
-                        <div className="flex flex-col items-center justify-center h-full text-zinc-600">
-                            <p>No logs received yet</p>
-                            <p className="text-[10px] mt-1">
-                                Waiting for incoming telemetry...
-                            </p>
+                        <div className="flex flex-col items-center justify-center h-full text-zinc-500">
+                            <div className="text-center">
+                                <p className="text-sm mb-1">
+                                    No logs received yet
+                                </p>
+                                <p className="text-xs text-zinc-600">
+                                    Waiting for incoming telemetry...
+                                </p>
+                            </div>
                         </div>
                     )}
                 </div>
