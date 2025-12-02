@@ -40,6 +40,9 @@ class Incident(Base):
     # Store the raw log or event that triggered this
     trigger_event = Column(JSON)
     
+    # Store metadata_json from the log for easy access
+    metadata_json = Column(JSON, nullable=True)
+    
     # AI Analysis
     root_cause = Column(String, nullable=True)
     reasoning_trace = Column(JSON, nullable=True)

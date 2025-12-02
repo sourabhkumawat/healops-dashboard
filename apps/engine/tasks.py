@@ -64,6 +64,18 @@ async def process_log_entry(log_id: int):
                     current_logs.append(log.id)
                     existing_incident.log_ids = current_logs
                 
+                # Update metadata_json if log has it and incident doesn't, or merge it
+                if log.metadata_json:
+                    if existing_incident.metadata_json:
+                        # Merge metadata, keeping existing but updating with new values
+                        merged_metadata = existing_incident.metadata_json.copy() if isinstance(existing_incident.metadata_json, dict) else {}
+                        if isinstance(log.metadata_json, dict):
+                            merged_metadata.update(log.metadata_json)
+                        existing_incident.metadata_json = merged_metadata
+                    else:
+                        # Copy metadata_json from log
+                        existing_incident.metadata_json = log.metadata_json
+                
                 # Escalate severity if needed
                 if log.severity == "CRITICAL" and existing_incident.severity != "CRITICAL":
                     existing_incident.severity = "CRITICAL"
@@ -87,6 +99,7 @@ async def process_log_entry(log_id: int):
                         "message": log.message,
                         "level": log.severity
                     })),
+                    metadata_json=log.metadata_json,  # Copy all metadata_json information
                     status="OPEN"
                 )
                 db.add(incident)

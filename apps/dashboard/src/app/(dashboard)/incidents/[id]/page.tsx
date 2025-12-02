@@ -301,6 +301,212 @@ export default function IncidentDetailsPage() {
                             </ScrollArea>
                         </CardContent>
                     </Card>
+
+                    {/* Trace and Stack Information */}
+                    <Card>
+                        <CardHeader>
+                            <CardTitle>Trace & Stack Information</CardTitle>
+                            <CardDescription>
+                                Complete trace and stack details from logs
+                            </CardDescription>
+                        </CardHeader>
+                        <CardContent>
+                            <ScrollArea className="h-[500px] w-full rounded-md border p-4">
+                                <div className="space-y-4">
+                                    {/* Incident Metadata */}
+                                    {incident.metadata_json != null ? (
+                                        <div className="space-y-2">
+                                            <h4 className="text-sm font-semibold text-zinc-300">
+                                                Incident Metadata
+                                            </h4>
+                                            <div className="rounded-lg bg-zinc-900/50 p-3 border border-zinc-800">
+                                                <pre className="text-xs font-mono text-zinc-300 whitespace-pre-wrap break-all overflow-x-auto">
+                                                    {JSON.stringify(
+                                                        incident.metadata_json as Record<
+                                                            string,
+                                                            any
+                                                        >,
+                                                        null,
+                                                        2
+                                                    )}
+                                                </pre>
+                                            </div>
+                                        </div>
+                                    ) : null}
+
+                                    {/* Log Metadata with Trace and Stack */}
+                                    {logs.map((log) => {
+                                        if (!log.metadata_json) return null;
+
+                                        const metadata =
+                                            log.metadata_json as Record<
+                                                string,
+                                                any
+                                            >;
+                                        const hasTraceInfo =
+                                            metadata.traceId ||
+                                            metadata.spanId ||
+                                            metadata.parentSpanId;
+                                        const hasStack =
+                                            metadata.stack ||
+                                            metadata.stackTrace ||
+                                            metadata.error?.stack;
+
+                                        if (!hasTraceInfo && !hasStack) {
+                                            // Show all metadata if no specific trace/stack
+                                            return (
+                                                <div
+                                                    key={log.id}
+                                                    className="space-y-2"
+                                                >
+                                                    <h4 className="text-sm font-semibold text-zinc-300">
+                                                        Log #{log.id} Metadata
+                                                    </h4>
+                                                    <div className="rounded-lg bg-zinc-900/50 p-3 border border-zinc-800">
+                                                        <pre className="text-xs font-mono text-zinc-300 whitespace-pre-wrap break-all overflow-x-auto">
+                                                            {JSON.stringify(
+                                                                metadata,
+                                                                null,
+                                                                2
+                                                            )}
+                                                        </pre>
+                                                    </div>
+                                                </div>
+                                            );
+                                        }
+
+                                        return (
+                                            <div
+                                                key={log.id}
+                                                className="space-y-3 border-b pb-4 last:border-0"
+                                            >
+                                                <h4 className="text-sm font-semibold text-zinc-300">
+                                                    Log #{log.id} -{' '}
+                                                    {new Date(
+                                                        log.timestamp
+                                                    ).toLocaleString()}
+                                                </h4>
+
+                                                {/* Trace Information */}
+                                                {hasTraceInfo && (
+                                                    <div className="space-y-2">
+                                                        <h5 className="text-xs font-semibold text-blue-400">
+                                                            Trace Information
+                                                        </h5>
+                                                        <div className="rounded-lg bg-blue-900/20 p-3 border border-blue-900/50">
+                                                            <div className="space-y-1 text-xs font-mono">
+                                                                {metadata.traceId && (
+                                                                    <div className="text-blue-300">
+                                                                        <span className="text-blue-500">
+                                                                            Trace
+                                                                            ID:
+                                                                        </span>{' '}
+                                                                        {
+                                                                            metadata.traceId
+                                                                        }
+                                                                    </div>
+                                                                )}
+                                                                {metadata.spanId && (
+                                                                    <div className="text-blue-300">
+                                                                        <span className="text-blue-500">
+                                                                            Span
+                                                                            ID:
+                                                                        </span>{' '}
+                                                                        {
+                                                                            metadata.spanId
+                                                                        }
+                                                                    </div>
+                                                                )}
+                                                                {metadata.parentSpanId && (
+                                                                    <div className="text-blue-300">
+                                                                        <span className="text-blue-500">
+                                                                            Parent
+                                                                            Span
+                                                                            ID:
+                                                                        </span>{' '}
+                                                                        {
+                                                                            metadata.parentSpanId
+                                                                        }
+                                                                    </div>
+                                                                )}
+                                                                {metadata.spanName && (
+                                                                    <div className="text-blue-300">
+                                                                        <span className="text-blue-500">
+                                                                            Span
+                                                                            Name:
+                                                                        </span>{' '}
+                                                                        {
+                                                                            metadata.spanName
+                                                                        }
+                                                                    </div>
+                                                                )}
+                                                                {metadata.duration !==
+                                                                    undefined && (
+                                                                    <div className="text-blue-300">
+                                                                        <span className="text-blue-500">
+                                                                            Duration:
+                                                                        </span>{' '}
+                                                                        {
+                                                                            metadata.duration
+                                                                        }{' '}
+                                                                        ms
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* Stack Trace */}
+                                                {hasStack && (
+                                                    <div className="space-y-2">
+                                                        <h5 className="text-xs font-semibold text-red-400">
+                                                            Stack Trace
+                                                        </h5>
+                                                        <div className="rounded-lg bg-red-900/20 p-3 border border-red-900/50">
+                                                            <pre className="text-xs font-mono text-red-300 whitespace-pre-wrap break-all overflow-x-auto">
+                                                                {metadata.stack ||
+                                                                    metadata.stackTrace ||
+                                                                    metadata
+                                                                        .error
+                                                                        ?.stack ||
+                                                                    'No stack trace available'}
+                                                            </pre>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* Additional Metadata */}
+                                                {Object.keys(metadata).length >
+                                                    0 && (
+                                                    <div className="space-y-2">
+                                                        <h5 className="text-xs font-semibold text-zinc-400">
+                                                            Additional Metadata
+                                                        </h5>
+                                                        <div className="rounded-lg bg-zinc-900/50 p-3 border border-zinc-800">
+                                                            <pre className="text-xs font-mono text-zinc-300 whitespace-pre-wrap break-all overflow-x-auto">
+                                                                {JSON.stringify(
+                                                                    metadata,
+                                                                    null,
+                                                                    2
+                                                                )}
+                                                            </pre>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+
+                                    {logs.length === 0 && (
+                                        <div className="text-sm text-muted-foreground text-center py-8">
+                                            No logs available for this incident
+                                        </div>
+                                    )}
+                                </div>
+                            </ScrollArea>
+                        </CardContent>
+                    </Card>
                 </div>
 
                 <div className="col-span-3 space-y-4">
