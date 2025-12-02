@@ -2,12 +2,15 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { MainNav } from '@/components/main-nav';
 import { UserNav } from '@/components/user-nav';
+import { getCurrentUser } from '@/actions/auth';
 
-export default function DashboardLayout({
+export default async function DashboardLayout({
     children
 }: Readonly<{
     children: React.ReactNode;
 }>) {
+    const user = await getCurrentUser();
+
     return (
         <div className="flex-col md:flex">
             <div className="border-b">
@@ -27,7 +30,7 @@ export default function DashboardLayout({
                     </Link>
                     <MainNav className="mx-6" />
                     <div className="ml-auto flex items-center space-x-4">
-                        <UserNav />
+                        <UserNav user={user} />
                     </div>
                 </div>
             </div>

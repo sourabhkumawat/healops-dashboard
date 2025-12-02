@@ -88,3 +88,31 @@ export async function registerAction(prevState: any, formData: FormData) {
         return { message: 'An unexpected error occurred' };
     }
 }
+
+export interface CurrentUser {
+    id: number;
+    email: string;
+    role: string;
+    created_at: string | null;
+}
+
+export async function getCurrentUser(): Promise<CurrentUser | null> {
+    try {
+        const { fetchWithAuth } = await import('@/lib/api-client');
+        const response = await fetchWithAuth(`${API_BASE}/auth/me`);
+
+        if (!response.ok) {
+            if (response.status === 401) {
+                // User is not authenticated
+                return null;
+            }
+            console.error('Failed to fetch current user:', response.status);
+            return null;
+        }
+
+        return await response.json();
+    } catch (error) {
+        console.error('Error fetching current user:', error);
+        return null;
+    }
+}

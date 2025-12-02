@@ -11,13 +11,27 @@ export default async function DashboardPage() {
 
     // Fallback values if stats are not available
     const systemStatus = stats?.system_status || 'OPERATIONAL';
-    const systemStatusColor = stats?.system_status_color || 'text-green-500';
     const activeIncidents = stats?.active_incidents || 0;
     const totalIncidents = stats?.total_incidents || 0;
     const resolvedIncidents = stats?.resolved_incidents || 0;
     const totalServices = stats?.total_services || 0;
     const unhealthyServices = stats?.unhealthy_services || 0;
     const errorLogsCount = stats?.error_logs_count || 0;
+
+    // Map system status to color classes (ensures Tailwind detects them during build)
+    const getSystemStatusColor = (status: string) => {
+        switch (status) {
+            case 'CRITICAL':
+                return 'text-red-500';
+            case 'DEGRADED':
+                return 'text-yellow-500';
+            case 'OPERATIONAL':
+            default:
+                return 'text-green-500';
+        }
+    };
+
+    const systemStatusColor = getSystemStatusColor(systemStatus);
 
     return (
         <div className="flex-1 space-y-4">

@@ -166,6 +166,38 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
         headers={"Authorization": f"Bearer {access_token}"}
     )
 
+def get_current_user(request: Request, db: Session = Depends(get_db)):
+    """Get current user from JWT token"""
+    from fastapi import HTTPException, status
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise credentials_exception
+    
+    token = auth_header.replace("Bearer ", "").strip()
+    email = verify_token(token, credentials_exception)
+    
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        raise credentials_exception
+    
+    return user
+
+@app.get("/auth/me")
+def get_me(current_user: User = Depends(get_current_user)):
+    """Get current user information"""
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "role": current_user.role,
+        "created_at": current_user.created_at.isoformat() if current_user.created_at else None
+    }
+
 from fastapi import WebSocket, WebSocketDisconnect, BackgroundTasks
 
 # Redis Configuration
