@@ -22,6 +22,9 @@ import time
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import requests
+import redis
+import asyncio
+import threading
 
 def get_user_id_from_request(request: Request, default: int = 1, db: Session = None) -> int:
     """
@@ -78,6 +81,11 @@ def get_user_id_from_request(request: Request, default: int = 1, db: Session = N
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Self-Healing SaaS Engine")
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize ConnectionManager with event loop on startup"""
+    manager.initialize(asyncio.get_event_loop())
 
 # Add Middleware
 # Add Middleware
@@ -153,25 +161,104 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 from fastapi import WebSocket, WebSocketDisconnect, BackgroundTasks
 
-# WebSocket Connection Manager
+# Redis Configuration
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+REDIS_LOG_CHANNEL = "healops:logs"
+
+# WebSocket Connection Manager with Redis Pub/Sub
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        self.message_queue = None
+        self.loop = None
+        self.redis_subscriber = None
+        self.redis_pubsub = None
+        self.subscriber_thread = None
 
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
+    def initialize(self, loop):
+        """Initialize with FastAPI's event loop"""
+        self.loop = loop
+        self.message_queue = asyncio.Queue()
+        self._start_redis_subscriber()
+        # Start message processor as background task
+        asyncio.create_task(self._process_messages())
 
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+    def _start_redis_subscriber(self):
+        """Start Redis subscriber in a background thread"""
+        def redis_listener():
+            try:
+                subscriber = redis.from_url(REDIS_URL, decode_responses=True)
+                pubsub = subscriber.pubsub()
+                pubsub.subscribe(REDIS_LOG_CHANNEL)
+                
+                self.redis_subscriber = subscriber
+                self.redis_pubsub = pubsub
+                
+                print(f"✓ Redis subscriber started on channel: {REDIS_LOG_CHANNEL}")
+                
+                for message in pubsub.listen():
+                    if message['type'] == 'message':
+                        try:
+                            log_data = json.loads(message['data'])
+                            # Put message in queue for async processing
+                            if self.loop and self.message_queue:
+                                asyncio.run_coroutine_threadsafe(
+                                    self.message_queue.put(log_data),
+                                    self.loop
+                                )
+                        except Exception as e:
+                            print(f"Error processing Redis message: {e}")
+            except Exception as e:
+                print(f"Error in Redis subscriber thread: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        self.subscriber_thread = threading.Thread(target=redis_listener, daemon=True)
+        self.subscriber_thread.start()
 
-    async def broadcast(self, message: dict):
+    async def _process_messages(self):
+        """Process messages from queue and broadcast to WebSockets"""
+        while True:
+            try:
+                message = await self.message_queue.get()
+                await self._broadcast_to_websockets(message)
+            except Exception as e:
+                print(f"Error processing message from queue: {e}")
+                await asyncio.sleep(0.1)  # Prevent tight loop on error
+
+    async def _broadcast_to_websockets(self, message: dict):
+        """Broadcast message to all active WebSocket connections"""
+        disconnected = []
         for connection in self.active_connections:
             try:
                 await connection.send_json(message)
             except Exception:
-                # Handle disconnection gracefully
-                pass
+                disconnected.append(connection)
+        
+        # Remove disconnected connections
+        for conn in disconnected:
+            if conn in self.active_connections:
+                self.active_connections.remove(conn)
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        print(f"WebSocket connected. Total connections: {len(self.active_connections)}")
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+        print(f"WebSocket disconnected. Total connections: {len(self.active_connections)}")
+
+    async def broadcast(self, message: dict):
+        """Publish message to Redis channel (for pub/sub)"""
+        try:
+            redis_client.publish(REDIS_LOG_CHANNEL, json.dumps(message))
+        except Exception as e:
+            print(f"Error publishing to Redis: {e}")
+            # Fallback: broadcast directly to WebSockets if Redis fails
+            await self._broadcast_to_websockets(message)
 
 manager = ConnectionManager()
 
