@@ -51,7 +51,7 @@ export function UserNav({ user }: UserNavProps) {
                 >
                     <Avatar className="h-8 w-8">
                         <AvatarImage src="/avatars/01.png" alt={displayName} />
-                        <AvatarFallback className="bg-green-600 text-white">
+                        <AvatarFallback className="bg-[#A0F1DA] text-black">
                             {initials}
                         </AvatarFallback>
                     </Avatar>
