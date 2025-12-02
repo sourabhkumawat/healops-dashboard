@@ -25,9 +25,19 @@ export interface Incident {
     metadata_json?: unknown;
 }
 
-export function IncidentTable({ incidents }: { incidents: Incident[] }) {
+export function IncidentTable({
+    incidents,
+    fullHeight = false
+}: {
+    incidents: Incident[];
+    fullHeight?: boolean;
+}) {
     return (
-        <div className="h-[400px] border rounded-md overflow-hidden flex flex-col">
+        <div
+            className={`${
+                fullHeight ? 'h-full' : 'h-[400px]'
+            } border rounded-md overflow-hidden flex flex-col`}
+        >
             <div className="overflow-y-auto overflow-x-auto flex-1">
                 <Table>
                     <TableCaption className="sr-only">

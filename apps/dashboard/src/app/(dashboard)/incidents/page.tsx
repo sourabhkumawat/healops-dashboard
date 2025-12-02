@@ -29,17 +29,17 @@ export default function IncidentsPage() {
     }, []);
 
     return (
-        <div className="flex-1 space-y-4">
+        <div className="flex-1 flex flex-col space-y-4 h-full">
             <div className="flex items-center justify-between space-y-2">
                 <h2 className="text-3xl font-bold tracking-tight">Incidents</h2>
             </div>
-            <div className="hidden h-full flex-1 flex-col space-y-8 md:flex">
+            <div className="hidden flex-1 flex-col md:flex min-h-0">
                 {loading && incidents.length === 0 ? (
-                    <div className="flex h-[400px] items-center justify-center">
+                    <div className="flex h-full items-center justify-center">
                         <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
                     </div>
                 ) : (
-                    <IncidentTable incidents={incidents} />
+                    <IncidentTable incidents={incidents} fullHeight={true} />
                 )}
             </div>
         </div>
