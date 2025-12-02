@@ -2,10 +2,22 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { IncidentTable } from '@/components/incident-table';
 import { LiveLogs } from '@/components/live-logs';
 import { getRecentIncidents } from '@/actions/incidents';
-import { Activity, Cpu, HardDrive, Server } from 'lucide-react';
+import { getSystemStats } from '@/actions/stats';
+import { Activity, HardDrive, Server, AlertTriangle } from 'lucide-react';
 
 export default async function DashboardPage() {
     const recentIncidents = await getRecentIncidents(10);
+    const stats = await getSystemStats();
+
+    // Fallback values if stats are not available
+    const systemStatus = stats?.system_status || 'OPERATIONAL';
+    const systemStatusColor = stats?.system_status_color || 'text-green-500';
+    const activeIncidents = stats?.active_incidents || 0;
+    const totalIncidents = stats?.total_incidents || 0;
+    const resolvedIncidents = stats?.resolved_incidents || 0;
+    const totalServices = stats?.total_services || 0;
+    const unhealthyServices = stats?.unhealthy_services || 0;
+    const errorLogsCount = stats?.error_logs_count || 0;
 
     return (
         <div className="flex-1 space-y-4">
@@ -22,42 +34,60 @@ export default async function DashboardPage() {
                         <CardTitle className="text-sm font-medium">
                             System Status
                         </CardTitle>
-                        <Activity className="h-4 w-4 text-green-500" />
+                        <Activity className={`h-4 w-4 ${systemStatusColor}`} />
                     </CardHeader>
                     <CardContent>
-                        <div className="text-2xl font-bold text-green-500">
-                            OPERATIONAL
+                        <div
+                            className={`text-2xl font-bold ${systemStatusColor}`}
+                        >
+                            {systemStatus}
                         </div>
                         <p className="text-xs text-muted-foreground">
-                            All systems normal
+                            {systemStatus === 'OPERATIONAL'
+                                ? 'All systems normal'
+                                : systemStatus === 'CRITICAL'
+                                ? `${activeIncidents} active incident${
+                                      activeIncidents !== 1 ? 's' : ''
+                                  }`
+                                : `${activeIncidents} active incident${
+                                      activeIncidents !== 1 ? 's' : ''
+                                  }`}
                         </p>
                     </CardContent>
                 </Card>
                 <Card>
                     <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
                         <CardTitle className="text-sm font-medium">
-                            CPU Usage (Avg)
+                            Active Incidents
                         </CardTitle>
-                        <Cpu className="h-4 w-4 text-muted-foreground" />
+                        <AlertTriangle className="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
-                        <div className="text-2xl font-bold">42%</div>
+                        <div className="text-2xl font-bold">
+                            {activeIncidents}
+                        </div>
                         <p className="text-xs text-muted-foreground">
-                            +2% from last hour
+                            {totalIncidents > 0
+                                ? `${resolvedIncidents} resolved of ${totalIncidents} total`
+                                : 'No incidents recorded'}
                         </p>
                     </CardContent>
                 </Card>
                 <Card>
                     <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
                         <CardTitle className="text-sm font-medium">
-                            Memory Usage
+                            Error Logs
                         </CardTitle>
                         <HardDrive className="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
-                        <div className="text-2xl font-bold">64%</div>
+                        <div className="text-2xl font-bold">
+                            {errorLogsCount}
+                        </div>
                         <p className="text-xs text-muted-foreground">
-                            12GB / 18GB Used
+                            {errorLogsCount > 0
+                                ? 'Errors and critical logs tracked'
+                                : 'No error logs recorded'}
                         </p>
                     </CardContent>
                 </Card>
@@ -69,9 +99,15 @@ export default async function DashboardPage() {
                         <Server className="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
-                        <div className="text-2xl font-bold">128</div>
+                        <div className="text-2xl font-bold">
+                            {totalServices}
+                        </div>
                         <p className="text-xs text-muted-foreground">
-                            12 Unhealthy
+                            {unhealthyServices > 0
+                                ? `${unhealthyServices} Unhealthy`
+                                : totalServices > 0
+                                ? 'All services healthy'
+                                : 'No services registered'}
                         </p>
                     </CardContent>
                 </Card>
