@@ -167,13 +167,24 @@ export class HealOpsLogger {
                 error?.message ||
                 'Unknown error';
             const statusCode = error?.response?.status;
-            console.error(`HealOps Logger failed to send ${severity} log:`, {
-                message: errorMessage,
-                statusCode,
-                url,
-                serviceName: this.config.serviceName,
-                severity
-            });
+
+            // Always log errors in browser, or if HEALOPS_DEBUG is set in Node.js
+            const isBrowser = typeof window !== 'undefined';
+            const shouldLog = isBrowser || process.env.HEALOPS_DEBUG;
+
+            if (shouldLog) {
+                console.error(
+                    `HealOps Logger failed to send ${severity} log:`,
+                    {
+                        message: errorMessage,
+                        statusCode,
+                        url,
+                        serviceName: this.config.serviceName,
+                        severity,
+                        error: error
+                    }
+                );
+            }
 
             // Re-throw to be caught by the caller's catch handler
             // This ensures the promise rejection is properly handled

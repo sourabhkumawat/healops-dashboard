@@ -7,6 +7,10 @@ import hashlib
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # Skip API key validation for OPTIONS requests (CORS preflight)
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        
         # Only enforce for /ingest/logs
         if request.url.path.startswith("/ingest/logs"):
             # Support both X-HealOps-Key header and Authorization Bearer token

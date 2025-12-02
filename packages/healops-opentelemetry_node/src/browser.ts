@@ -4,118 +4,233 @@ import { HealOpsLogger, type HealOpsLoggerConfig } from './HealOpsLogger';
  * Console interceptor that automatically sends console logs to HealOps
  */
 export class ConsoleInterceptor {
-  private logger: HealOpsLogger;
-  private originalConsole: {
-    log: typeof console.log;
-    warn: typeof console.warn;
-    error: typeof console.error;
-    info: typeof console.info;
-  };
-
-  constructor(logger: HealOpsLogger) {
-    this.logger = logger;
-    
-    // Store original console methods
-    this.originalConsole = {
-      log: console.log.bind(console),
-      warn: console.warn.bind(console),
-      error: console.error.bind(console),
-      info: console.info.bind(console),
-    };
-  }
-
-  /**
-   * Start intercepting console methods
-   */
-  start(): void {
-    // Intercept console.log
-    console.log = (...args: any[]) => {
-      this.originalConsole.log(...args);
-      this.logger.info(this.formatMessage(args));
+    private logger: HealOpsLogger;
+    private originalConsole: {
+        log: typeof console.log;
+        warn: typeof console.warn;
+        error: typeof console.error;
+        info: typeof console.info;
     };
 
-    // Intercept console.info
-    console.info = (...args: any[]) => {
-      this.originalConsole.info(...args);
-      this.logger.info(this.formatMessage(args));
-    };
+    constructor(logger: HealOpsLogger) {
+        this.logger = logger;
 
-    // Intercept console.warn
-    console.warn = (...args: any[]) => {
-      this.originalConsole.warn(...args);
-      this.logger.warn(this.formatMessage(args));
-    };
+        // Store original console methods
+        this.originalConsole = {
+            log: console.log.bind(console),
+            warn: console.warn.bind(console),
+            error: console.error.bind(console),
+            info: console.info.bind(console)
+        };
+    }
 
-    // Intercept console.error
-    console.error = (...args: any[]) => {
-      this.originalConsole.error(...args);
-      this.logger.error(this.formatMessage(args), this.extractErrorMetadata(args));
-    };
-  }
+    /**
+     * Start intercepting console methods
+     */
+    start(): void {
+        // Intercept console.log
+        console.log = (...args: any[]) => {
+            this.originalConsole.log(...args);
+            this.logger.info(this.formatMessage(args));
+        };
 
-  /**
-   * Stop intercepting and restore original console methods
-   */
-  stop(): void {
-    console.log = this.originalConsole.log;
-    console.warn = this.originalConsole.warn;
-    console.error = this.originalConsole.error;
-    console.info = this.originalConsole.info;
-  }
+        // Intercept console.info
+        console.info = (...args: any[]) => {
+            this.originalConsole.info(...args);
+            this.logger.info(this.formatMessage(args));
+        };
 
-  /**
-   * Format console arguments into a single message string
-   */
-  private formatMessage(args: any[]): string {
-    return args
-      .map(arg => {
-        if (typeof arg === 'object') {
-          try {
-            return JSON.stringify(arg);
-          } catch {
-            return String(arg);
-          }
-        }
-        return String(arg);
-      })
-      .join(' ');
-  }
+        // Intercept console.warn
+        console.warn = (...args: any[]) => {
+            this.originalConsole.warn(...args);
+            this.logger.warn(this.formatMessage(args));
+        };
 
-  /**
-   * Extract error metadata from console.error arguments
-   */
-  private extractErrorMetadata(args: any[]): Record<string, any> {
-    const metadata: Record<string, any> = {};
-    
-    args.forEach((arg, index) => {
-      if (arg instanceof Error) {
-        metadata.errorName = arg.name;
-        metadata.errorMessage = arg.message;
-        metadata.errorStack = arg.stack;
-      } else if (typeof arg === 'object' && arg !== null) {
-        metadata[`arg${index}`] = arg;
-      }
-    });
-    
-    return metadata;
-  }
+        // Intercept console.error
+        console.error = (...args: any[]) => {
+            this.originalConsole.error(...args);
+            this.logger.error(
+                this.formatMessage(args),
+                this.extractErrorMetadata(args)
+            );
+        };
+    }
+
+    /**
+     * Stop intercepting and restore original console methods
+     */
+    stop(): void {
+        console.log = this.originalConsole.log;
+        console.warn = this.originalConsole.warn;
+        console.error = this.originalConsole.error;
+        console.info = this.originalConsole.info;
+    }
+
+    /**
+     * Format console arguments into a single message string
+     */
+    private formatMessage(args: any[]): string {
+        return args
+            .map((arg) => {
+                if (typeof arg === 'object') {
+                    try {
+                        return JSON.stringify(arg);
+                    } catch {
+                        return String(arg);
+                    }
+                }
+                return String(arg);
+            })
+            .join(' ');
+    }
+
+    /**
+     * Extract error metadata from console.error arguments
+     */
+    private extractErrorMetadata(args: any[]): Record<string, any> {
+        const metadata: Record<string, any> = {};
+
+        args.forEach((arg, index) => {
+            if (arg instanceof Error) {
+                metadata.errorName = arg.name;
+                metadata.errorMessage = arg.message;
+                metadata.errorStack = arg.stack;
+            } else if (typeof arg === 'object' && arg !== null) {
+                metadata[`arg${index}`] = arg;
+            }
+        });
+
+        return metadata;
+    }
 }
 
 /**
- * Initialize HealOps logger with automatic console interception
+ * Initialize HealOps logger with automatic console interception and global error handlers
  */
-export function initHealOpsLogger(config: HealOpsLoggerConfig, interceptConsole = true): HealOpsLogger {
-  const logger = new HealOpsLogger(config);
-  
-  if (interceptConsole) {
-    const interceptor = new ConsoleInterceptor(logger);
-    interceptor.start();
-    
-    // Store interceptor on logger for potential cleanup
-    (logger as any)._interceptor = interceptor;
-  }
-  
-  return logger;
+export function initHealOpsLogger(
+    config: HealOpsLoggerConfig,
+    interceptConsole = true
+): HealOpsLogger {
+    const logger = new HealOpsLogger(config);
+
+    if (interceptConsole) {
+        const interceptor = new ConsoleInterceptor(logger);
+        interceptor.start();
+
+        // Store interceptor on logger for potential cleanup
+        (logger as any)._interceptor = interceptor;
+    }
+
+    // Set up global error handlers to catch unhandled errors
+    let errorHandlersSetup = false;
+    if (typeof window !== 'undefined') {
+        // Catch unhandled JavaScript errors
+        window.addEventListener('error', (event) => {
+            logger.error(`Unhandled Error: ${event.message}`, {
+                errorName: event.error?.name,
+                errorMessage: event.error?.message,
+                errorStack: event.error?.stack,
+                filename: event.filename,
+                lineno: event.lineno,
+                colno: event.colno,
+                type: 'unhandled_error'
+            });
+        });
+
+        // Catch unhandled promise rejections
+        window.addEventListener('unhandledrejection', (event) => {
+            const reason = event.reason;
+            const errorMessage =
+                reason instanceof Error ? reason.message : String(reason);
+
+            logger.error(`Unhandled Promise Rejection: ${errorMessage}`, {
+                errorName: reason?.name,
+                errorMessage:
+                    reason instanceof Error ? reason.message : String(reason),
+                errorStack: reason instanceof Error ? reason.stack : undefined,
+                type: 'unhandled_promise_rejection',
+                reason: reason
+            });
+        });
+
+        // Catch fetch/network errors by intercepting fetch
+        const originalFetch = window.fetch;
+        window.fetch = async (...args) => {
+            // Extract URL and method from fetch arguments
+            const getUrl = (input: RequestInfo | URL): string => {
+                if (typeof input === 'string') return input;
+                if (input instanceof URL) return input.toString();
+                if (input instanceof Request) return input.url;
+                return String(input);
+            };
+
+            const getMethod = (input: RequestInfo | URL): string => {
+                if (typeof input === 'string') return 'GET';
+                if (input instanceof URL) return 'GET';
+                if (input instanceof Request) return input.method || 'GET';
+                return 'GET';
+            };
+
+            const url = getUrl(args[0]);
+            const method = getMethod(args[0]);
+
+            try {
+                const response = await originalFetch(...args);
+
+                // Log failed HTTP requests (4xx, 5xx)
+                if (!response.ok && response.status >= 400) {
+                    logger.error(
+                        `HTTP Error: ${response.status} ${response.statusText}`,
+                        {
+                            url,
+                            status: response.status,
+                            statusText: response.statusText,
+                            method,
+                            type: 'http_error'
+                        }
+                    );
+                }
+
+                return response;
+            } catch (error) {
+                // Log network errors (connection failures, timeouts, etc.)
+                logger.error(
+                    `Network Error: ${
+                        error instanceof Error ? error.message : String(error)
+                    }`,
+                    {
+                        url,
+                        errorName:
+                            error instanceof Error
+                                ? error.name
+                                : 'NetworkError',
+                        errorMessage:
+                            error instanceof Error
+                                ? error.message
+                                : String(error),
+                        errorStack:
+                            error instanceof Error ? error.stack : undefined,
+                        type: 'network_error'
+                    }
+                );
+                throw error;
+            }
+        };
+
+        // Store original fetch for cleanup
+        (logger as any)._originalFetch = originalFetch;
+        errorHandlersSetup = true;
+    }
+
+    // Log successful initialization
+    console.log('✓ HealOps client-side error tracking initialized', {
+        serviceName: config.serviceName,
+        endpoint: config.endpoint || 'https://engine.healops.ai',
+        interceptConsole,
+        errorHandlersSetup: typeof window !== 'undefined'
+    });
+
+    return logger;
 }
 
 // Re-export from HealOpsLogger
