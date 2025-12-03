@@ -45,6 +45,117 @@ def get_repo_name_from_integration(integration: Integration, service_name: Optio
     return None
 
 
+def extract_paths_from_stacktrace(text: str) -> list[str]:
+    """Extract file paths from a stack trace string."""
+    paths = []
+    
+    # Python stack trace pattern: File "/path/to/file.py", line 123
+    python_pattern = r'File "([^"]+)", line \d+'
+    paths.extend(re.findall(python_pattern, text))
+    
+    # Node.js/JS stack trace pattern: at FunctionName (/path/to/file.js:123:45)
+    # or at /path/to/file.js:123:45
+    js_pattern = r'at (?:.*? \()?([^:)]+(?:\.js|\.ts|\.jsx|\.tsx)):\d+:\d+\)?'
+    paths.extend(re.findall(js_pattern, text))
+    
+    return paths
+
+
+def normalize_path(path: str) -> str:
+    """Normalize path to be relative to repo root."""
+    # Remove protocol
+    if "://" in path:
+        path = "/" + "/".join(path.split("/")[3:])
+        
+    # Remove query params
+    if "?" in path:
+        path = path.split("?")[0]
+        
+    # Remove webpack prefixes
+    if path.startswith("webpack://"):
+        path = path.replace("webpack://", "")
+        # Remove leading dot-segments often found in webpack map
+        path = path.replace("./", "")
+        
+    # Handle standard Docker paths
+    if path.startswith("/usr/src/app/"):
+        path = path.replace("/usr/src/app/", "")
+    elif path.startswith("/app/"):
+        path = path.replace("/app/", "")
+        
+    # Try to make it relative if it's absolute
+    # Prioritize specific project directories
+    if "/apps/" in path:
+        path = "apps/" + path.split("/apps/", 1)[1]
+    elif "/packages/" in path:
+        path = "packages/" + path.split("/packages/", 1)[1]
+    elif "/src/" in path and not path.startswith("src/"):
+        path = "src/" + path.split("/src/", 1)[1]
+    
+    # Handle common web app directories if not caught above
+    for common_dir in ["/app/", "/pages/", "/components/", "/lib/", "/utils/", "/public/", "/api/"]:
+        if common_dir in path:
+            # e.g. /Users/foo/project/app/page.tsx -> app/page.tsx
+            path = common_dir.lstrip("/") + path.split(common_dir, 1)[1]
+            break
+        
+    return path.lstrip("/")
+
+
+def extract_file_paths_from_log(log: LogEntry) -> list[str]:
+    """
+    Extract potential file paths from log message and metadata.
+    """
+    paths = []
+    metadata = log.metadata_json or {}
+    
+    if not isinstance(metadata, dict):
+        metadata = {}
+        
+    # 1. Check explicit fields
+    if metadata.get("filePath"):
+        paths.append(metadata["filePath"])
+    if metadata.get("file_path"):
+        paths.append(metadata["file_path"])
+        
+    # 2. Check OTel attributes
+    attributes = metadata.get("attributes", {})
+    if attributes.get("code.filepath"):
+        paths.append(attributes["code.filepath"])
+    if attributes.get("code.file_path"):
+        paths.append(attributes["code.file_path"])
+        
+    # 3. Check OTel events (exceptions)
+    events = metadata.get("events", [])
+    for event in events:
+        if event.get("name") == "exception":
+            evt_attrs = event.get("attributes", {})
+            stacktrace = evt_attrs.get("exception.stacktrace", "")
+            if stacktrace:
+                paths.extend(extract_paths_from_stacktrace(stacktrace))
+                
+    # 4. Check stack trace in metadata or message
+    if metadata.get("stack"):
+        paths.extend(extract_paths_from_stacktrace(metadata["stack"]))
+    if metadata.get("traceback"):
+        paths.extend(extract_paths_from_stacktrace(metadata["traceback"]))
+        
+    # Also check message for stack trace-like patterns if it's long
+    if log.message and len(log.message) > 100 and ("File \"" in log.message or "at " in log.message):
+        paths.extend(extract_paths_from_stacktrace(log.message))
+        
+    # Filter and Normalize
+    valid_paths = []
+    for p in paths:
+        # Filter out node_modules and .next (build artifacts)
+        if "/node_modules/" in p or "/.next/" in p:
+            continue
+            
+        valid_paths.append(normalize_path(p))
+        
+    return valid_paths
+
+
 def analyze_repository_and_create_pr(
     incident: Incident,
     logs: list[LogEntry],
@@ -88,24 +199,11 @@ def analyze_repository_and_create_pr(
         # Extract file paths from log metadata (filePath or file_path)
         file_paths_from_logs = []
         for log in logs:
-            if log.metadata_json and isinstance(log.metadata_json, dict):
-                # Check for filePath (Node.js logger) or file_path (Python logger)
-                file_path = log.metadata_json.get("filePath") or log.metadata_json.get("file_path")
-                if file_path:
-                    # Normalize the path - remove protocol, domain, query params
-                    # Handle browser paths like "http://localhost:3000/src/App.tsx" or "/src/App.tsx"
-                    normalized_path = file_path
-                    if "://" in normalized_path:
-                        # Remove protocol and domain
-                        normalized_path = "/" + "/".join(normalized_path.split("/")[3:])
-                    if "?" in normalized_path:
-                        # Remove query parameters
-                        normalized_path = normalized_path.split("?")[0]
-                    # Remove leading slash if present (GitHub paths are relative to repo root)
-                    normalized_path = normalized_path.lstrip("/")
-                    # Skip if path looks like a URL or is empty
-                    if normalized_path and not normalized_path.startswith("http"):
-                        file_paths_from_logs.append(normalized_path)
+            extracted_paths = extract_file_paths_from_log(log)
+            for path in extracted_paths:
+                # Skip if path looks like a URL or is empty
+                if path and not path.startswith("http"):
+                    file_paths_from_logs.append(path)
         
         # Remove duplicates while preserving order
         seen = set()
@@ -152,21 +250,31 @@ def analyze_repository_and_create_pr(
                     words = re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', msg)
                     search_queries.extend(words[:5])  # Limit keywords
             
-            # Search for Python files related to the service
+            # Determine language based on service name
+            language = "python"  # Default
+            if service_name:
+                lower_name = service_name.lower()
+                if "next" in lower_name or "react" in lower_name or "node" in lower_name or "ts" in lower_name:
+                    language = "typescript"
+                elif "go" in lower_name:
+                    language = "go"
+                elif "java" in lower_name:
+                    language = "java"
+            
+            # Search for files related to the service
             for query in set(search_queries[:3]):  # Limit queries
-                matches = github_integration.search_code(repo_name, query, language="python")
+                matches = github_integration.search_code(repo_name, query, language=language)
                 relevant_files.extend(matches)
             
             # Also get main service files if service_name is available
             if service_name:
-                # Try common file patterns
-                common_patterns = [
-                    f"{service_name}.py",
-                    f"main.py",
-                    f"app.py",
-                    f"service.py",
-                    f"handler.py"
-                ]
+                # Try common file patterns based on language
+                common_patterns = []
+                if language == "python":
+                    common_patterns = [f"{service_name}.py", "main.py", "app.py"]
+                elif language == "typescript":
+                    common_patterns = ["package.json", "tsconfig.json", "app/page.tsx", "pages/index.tsx"]
+                
                 repo_files = github_integration.get_repo_structure(repo_name, ref=default_branch, max_depth=3)
                 for pattern in common_patterns:
                     matching_files = [f for f in repo_files if pattern.lower() in f.lower()]
@@ -200,10 +308,10 @@ def analyze_repository_and_create_pr(
         ])
         
         if not files_context:
-            return {
-                "status": "skipped",
-                "message": "No relevant code files found to analyze"
-            }
+            # If no files found, but we have a strong signal from logs, we might still want to proceed
+            # especially if it's a "missing file" error.
+            print("⚠️  No relevant code files found. Proceeding with empty context to allow file creation.")
+            files_context = "No existing code files found. The error might be due to a missing file."
         
         # Create enhanced prompt for code analysis and fix generation
         code_analysis_prompt = f"""You are an expert software engineer analyzing an incident and generating code fixes.
@@ -222,11 +330,13 @@ Based on the root cause analysis and the code above, please:
 2. Generate fixed versions of the affected files
 3. Provide a clear explanation of the changes
 
-Respond in JSON format:
+IMPORTANT: Respond with ONLY valid JSON. Do not use backticks or template literals inside JSON strings. Escape all special characters properly.
+
+Respond in this exact JSON format:
 {{
     "analysis": "Brief analysis of the code issues",
     "changes": {{
-        "file_path_1": "complete fixed file content",
+        "file_path_1": "complete fixed file content (use \\n for newlines, escape quotes)",
         "file_path_2": "complete fixed file content"
     }},
     "explanation": "Explanation of what was fixed and why"
@@ -270,20 +380,56 @@ Only include files that need changes. Provide the COMPLETE file content for each
         result = response.json()
         content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
         
-        # Parse JSON response
+        # Parse JSON response with multiple strategies
         content = content.strip()
+        
+        # Remove markdown code blocks
         if content.startswith("```json"):
             content = content[7:]
-        if content.startswith("```"):
+        elif content.startswith("```"):
             content = content[3:]
         if content.endswith("```"):
             content = content[:-3]
         content = content.strip()
         
+        # Try to extract JSON if it's embedded in text
+        if not content.startswith("{"):
+            # Look for the first { and last }
+            start_idx = content.find("{")
+            end_idx = content.rfind("}")
+            if start_idx != -1 and end_idx != -1:
+                content = content[start_idx:end_idx+1]
+        
+        # Preprocess: Convert backtick-delimited strings to proper JSON
+        # This handles cases where AI uses `...` instead of "..." for multiline strings
+        def fix_backtick_strings(text):
+            """Replace backtick strings with properly escaped JSON strings."""
+            import re
+            # Find patterns like: "key": `value with newlines`
+            pattern = r':\s*`([^`]*)`'
+            
+            def escape_content(match):
+                content = match.group(1)
+                # Escape backslashes first
+                content = content.replace('\\', '\\\\')
+                # Escape quotes
+                content = content.replace('"', '\\"')
+                # Convert newlines to \n
+                content = content.replace('\n', '\\n')
+                content = content.replace('\r', '\\r')
+                content = content.replace('\t', '\\t')
+                return f': "{content}"'
+            
+            return re.sub(pattern, escape_content, text, flags=re.DOTALL)
+        
+        content = fix_backtick_strings(content)
+        
         try:
             code_analysis = json.loads(content)
             changes = code_analysis.get("changes", {})
             explanation = code_analysis.get("explanation", "Code fixes applied")
+            
+            print(f"📝 AI returned {len(changes)} file change(s): {list(changes.keys())}")
             
             if not changes:
                 return {
@@ -501,8 +647,18 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                 try:
                     integration = db.query(Integration).filter(Integration.id == incident.integration_id).first()
                     if integration and integration.provider == "GITHUB":
-                        # Get repo name using service-to-repo mapping
-                        repo_name = get_repo_name_from_integration(integration, service_name=incident.service_name)
+                        # Use repo_name from incident if available (assigned during creation),
+                        # otherwise fall back to looking it up from integration config
+                        repo_name = None
+                        if hasattr(incident, 'repo_name') and incident.repo_name:
+                            repo_name = incident.repo_name
+                            print(f"📌 Using repo_name from incident: {repo_name}")
+                        else:
+                            # Fallback: Get repo name using service-to-repo mapping
+                            repo_name = get_repo_name_from_integration(integration, service_name=incident.service_name)
+                            if repo_name:
+                                print(f"🔍 Found repo_name from integration config: {repo_name}")
+                        
                         if repo_name:
                             print(f"🔍 Analyzing repository {repo_name} for incident {incident.id} (service: {incident.service_name})")
                             github_integration = GithubIntegration(integration_id=integration.id)
@@ -525,7 +681,7 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                                 print(f"⚠️  PR creation failed: {pr_result.get('message')}")
                                 result["pr_error"] = pr_result.get("message")
                         else:
-                            print(f"⚠️  No repository name found in integration {integration.id}")
+                            print(f"⚠️  No repository name found for incident {incident.id} (integration {integration.id})")
                 except Exception as e:
                     import traceback
                     print(f"⚠️  Error during GitHub analysis: {e}")

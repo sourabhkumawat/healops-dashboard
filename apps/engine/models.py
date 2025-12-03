@@ -33,6 +33,7 @@ class Incident(Base):
     last_seen_at = Column(DateTime(timezone=True), server_default=func.now())
     integration_id = Column(Integer, ForeignKey("integrations.id"), nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # User who owns this incident
+    repo_name = Column(String, nullable=True)  # Repository name in format "owner/repo" for PR creation
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

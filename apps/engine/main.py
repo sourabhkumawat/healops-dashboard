@@ -6,6 +6,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, Response, Request, 
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import PlainTextResponse, FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import func
 from database import engine, Base, get_db, SessionLocal
 from models import Incident, LogEntry, User, Integration, ApiKey, IntegrationStatus
@@ -25,6 +26,64 @@ import requests
 import redis
 import asyncio
 import threading
+
+def backfill_integration_to_incidents(db: Session, integration_id: int, user_id: int, config: dict):
+    """
+    Backfill integration_id and repo_name to existing incidents for a user.
+    
+    Args:
+        db: Database session
+        integration_id: ID of the integration to assign
+        user_id: User ID to filter incidents
+        config: Integration config containing service_mappings
+    """
+    # Get the integration object
+    integration = db.query(Integration).filter(Integration.id == integration_id).first()
+    if not integration:
+        print(f"⚠️  Integration {integration_id} not found for backfill")
+        return
+    
+    # Get service mappings
+    service_mappings = {}
+    if config and isinstance(config, dict):
+        service_mappings = config.get("service_mappings", {})
+    
+    # Find incidents without integration_id for this user
+    incidents = db.query(Incident).filter(
+        Incident.user_id == user_id,
+        Incident.integration_id == None
+    ).all()
+    
+    updated_count = 0
+    for incident in incidents:
+        should_update = False
+        
+        # If service mappings exist, only assign if service matches
+        if service_mappings:
+            if incident.service_name in service_mappings:
+                incident.integration_id = integration_id
+                should_update = True
+        else:
+            # No service mappings, assign to all incidents
+            incident.integration_id = integration_id
+            should_update = True
+        
+        # If we're updating the integration, also get repo_name
+        if should_update:
+            # Get repo_name from integration config based on service_name
+            from ai_analysis import get_repo_name_from_integration
+            if not incident.repo_name:
+                repo_name = get_repo_name_from_integration(integration, incident.service_name)
+                if repo_name:
+                    incident.repo_name = repo_name
+            
+            updated_count += 1
+    
+    if updated_count > 0:
+        db.commit()
+        print(f"✅ Backfilled integration {integration_id} to {updated_count} incident(s)")
+
+
 
 def get_user_id_from_request(request: Request, default: int = 1, db: Session = None) -> int:
     """
@@ -940,6 +999,9 @@ def github_callback(code: str, state: Optional[str] = None, db: Session = Depend
         
     db.commit()
     
+    # Backfill integration_id to existing incidents for this user
+    backfill_integration_to_incidents(db, integration.id, user_id, integration.config)
+    
     return RedirectResponse(f"{FRONTEND_URL}/settings?github_connected=true")
 
 
@@ -982,6 +1044,10 @@ def github_connect(config: GithubConfig, request: Request, db: Session = Depends
         integration.name = f"GitHub ({verification.get('username', 'User')})"
     
     db.commit()
+    db.refresh(integration)
+    
+    # Backfill integration_id and repo_name to existing incidents for this user
+    backfill_integration_to_incidents(db, integration.id, user_id, integration.config)
     
     return {
         "status": "connected",
@@ -1077,6 +1143,9 @@ def add_service_mapping(integration_id: int, mapping: ServiceMappingRequest, req
     integration.config["service_mappings"][mapping.service_name] = mapping.repo_name
     integration.updated_at = datetime.utcnow()
     
+    # Flag the config column as modified so SQLAlchemy detects the change
+    flag_modified(integration, "config")
+    
     db.commit()
     db.refresh(integration)
     
@@ -1116,6 +1185,9 @@ def update_service_mappings(integration_id: int, update: ServiceMappingsUpdateRe
     
     integration.updated_at = datetime.utcnow()
     
+    # Flag the config column as modified so SQLAlchemy detects the change
+    flag_modified(integration, "config")
+    
     db.commit()
     db.refresh(integration)
     
@@ -1149,6 +1221,9 @@ def remove_service_mapping(integration_id: int, service_name: str, request: Requ
     # Remove the mapping
     del integration.config["service_mappings"][service_name]
     integration.updated_at = datetime.utcnow()
+    
+    # Flag the config column as modified so SQLAlchemy detects the change
+    flag_modified(integration, "config")
     
     db.commit()
     

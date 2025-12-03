@@ -119,13 +119,20 @@ class GithubIntegration:
             
             results = self.client.search_code(search_query)
             matches = []
-            for content_file in results[:10]:  # Limit to 10 results
-                matches.append({
-                    "path": content_file.path,
-                    "name": content_file.name,
-                    "url": content_file.html_url,
-                    "repository": content_file.repository.full_name
-                })
+            
+            # Handle pagination and empty results
+            try:
+                result_list = list(results[:10])  # Limit to 10 results
+                for content_file in result_list:
+                    matches.append({
+                        "path": content_file.path,
+                        "name": content_file.name,
+                        "url": content_file.html_url,
+                        "repository": content_file.repository.full_name
+                    })
+            except Exception as e:
+                print(f"Error iterating search results: {e}")
+                
             return matches
         except Exception as e:
             print(f"Error searching code: {e}")

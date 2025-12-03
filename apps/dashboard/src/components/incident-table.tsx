@@ -22,6 +22,13 @@ export interface Incident {
     last_seen_at: string;
     root_cause: string | null;
     action_taken: string | null;
+    action_result?: {
+        pr_url?: string;
+        pr_number?: number;
+        pr_files_changed?: string[];
+        status?: string;
+        error?: string;
+    };
     metadata_json?: unknown;
 }
 

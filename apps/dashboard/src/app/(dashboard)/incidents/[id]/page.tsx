@@ -12,7 +12,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Loader2, ArrowLeft, CheckCircle2 } from 'lucide-react';
+import { Loader2, ArrowLeft, CheckCircle2, GitPullRequest, ExternalLink, AlertTriangle } from 'lucide-react';
 import { Incident } from '@/components/incident-table';
 import {
     getIncident,
@@ -608,6 +608,72 @@ export default function IncidentDetailsPage() {
                                     <p className="text-sm text-zinc-300">
                                         {incident.action_taken}
                                     </p>
+                                </div>
+                            )}
+
+                            {/* Auto-Fix / PR Section */}
+                            {incident.action_result && (
+                                <div className={`rounded-lg p-4 border ${
+                                    incident.action_result.status === 'pr_failed' 
+                                        ? 'bg-red-900/20 border-red-900/50' 
+                                        : 'bg-blue-900/20 border-blue-900/50'
+                                }`}>
+                                    <div className="flex items-center mb-3">
+                                        {incident.action_result.status === 'pr_failed' ? (
+                                            <AlertTriangle className="h-4 w-4 text-red-400 mr-2" />
+                                        ) : (
+                                            <GitPullRequest className="h-4 w-4 text-blue-400 mr-2" />
+                                        )}
+                                        <h4 className={`font-semibold ${
+                                            incident.action_result.status === 'pr_failed' 
+                                                ? 'text-red-400' 
+                                                : 'text-blue-400'
+                                        }`}>
+                                            {incident.action_result.status === 'pr_failed' 
+                                                ? 'Auto-Fix Failed' 
+                                                : 'Auto-Fix Applied'}
+                                        </h4>
+                                    </div>
+                                    
+                                    {incident.action_result.status === 'pr_failed' ? (
+                                        <p className="text-sm text-red-300">
+                                            {incident.action_result.error || 'Failed to create PR'}
+                                        </p>
+                                    ) : (
+                                        <div className="space-y-3">
+                                            <p className="text-sm text-zinc-300">
+                                                A Pull Request has been automatically created with fixes for this incident.
+                                            </p>
+                                            
+                                            {incident.action_result.pr_files_changed && incident.action_result.pr_files_changed.length > 0 && (
+                                                <div className="space-y-1">
+                                                    <p className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
+                                                        Files Changed
+                                                    </p>
+                                                    <div className="rounded bg-black/40 p-2 space-y-1">
+                                                        {incident.action_result.pr_files_changed.map((file, i) => (
+                                                            <div key={i} className="text-xs font-mono text-zinc-300 flex items-center">
+                                                                <span className="w-1.5 h-1.5 rounded-full bg-blue-500 mr-2"></span>
+                                                                {file}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                            
+                                            {incident.action_result.pr_url && (
+                                                <Button 
+                                                    size="sm" 
+                                                    className="w-full mt-2 bg-blue-600 hover:bg-blue-700 text-white"
+                                                    onClick={() => window.open(incident.action_result?.pr_url, '_blank')}
+                                                >
+                                                    <GitPullRequest className="mr-2 h-4 w-4" />
+                                                    Review PR #{incident.action_result.pr_number}
+                                                    <ExternalLink className="ml-2 h-3 w-3 opacity-70" />
+                                                </Button>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </CardContent>
