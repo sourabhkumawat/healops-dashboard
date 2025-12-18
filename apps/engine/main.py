@@ -254,8 +254,66 @@ def get_me(current_user: User = Depends(get_current_user)):
         "id": current_user.id,
         "email": current_user.email,
         "role": current_user.role,
+        "name": current_user.name,
+        "organization_name": current_user.organization_name,
         "created_at": current_user.created_at.isoformat() if current_user.created_at else None
     }
+
+class UserUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    organization_name: Optional[str] = None
+
+@app.put("/auth/me")
+def update_me(update: UserUpdateRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Update current user information"""
+    if update.name is not None:
+        current_user.name = update.name
+    if update.organization_name is not None:
+        current_user.organization_name = update.organization_name
+    
+    db.commit()
+    db.refresh(current_user)
+    
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "role": current_user.role,
+        "name": current_user.name,
+        "organization_name": current_user.organization_name,
+        "created_at": current_user.created_at.isoformat() if current_user.created_at else None
+    }
+
+class TestEmailRequest(BaseModel):
+    recipient_email: str
+
+@app.post("/auth/test-email")
+def test_email_endpoint(request_data: TestEmailRequest, current_user: User = Depends(get_current_user)):
+    """Test email functionality by sending a test email"""
+    from email_service import send_test_email
+    
+    try:
+        success = send_test_email(
+            recipient_email=request_data.recipient_email,
+            subject="🧪 HealOps SMTP Test - Email Service Verification"
+        )
+        
+        if success:
+            return {
+                "status": "success",
+                "message": f"Test email sent successfully to {request_data.recipient_email}",
+                "recipient": request_data.recipient_email
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Failed to send test email. Please check SMTP configuration.",
+                "recipient": request_data.recipient_email
+            }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error sending test email: {str(e)}"
+        )
 
 from fastapi import WebSocket, WebSocketDisconnect, BackgroundTasks
 

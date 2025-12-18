@@ -66,6 +66,11 @@ type ApiKey = {
 };
 
 import { API_BASE } from '@/lib/config';
+import {
+    getCurrentUser,
+    updateUserProfile,
+    type CurrentUser
+} from '@/actions/auth';
 
 export default function SettingsPage() {
     const [integrations, setIntegrations] = useState<Integration[]>([]);
@@ -94,6 +99,16 @@ export default function SettingsPage() {
     const [loadingRepos, setLoadingRepos] = useState<Record<number, boolean>>(
         {}
     );
+
+    // User profile state
+    const [user, setUser] = useState<CurrentUser | null>(null);
+    const [userName, setUserName] = useState('');
+    const [organizationName, setOrganizationName] = useState('');
+    const [savingProfile, setSavingProfile] = useState(false);
+    const [profileMessage, setProfileMessage] = useState<{
+        type: 'success' | 'error';
+        text: string;
+    } | null>(null);
 
     const providers = [
         {
@@ -168,6 +183,46 @@ export default function SettingsPage() {
             // Show success (could add a toast here if available, or just rely on the list updating)
         }
     }, []);
+
+    // Fetch user data
+    useEffect(() => {
+        const fetchUser = async () => {
+            const currentUser = await getCurrentUser();
+            if (currentUser) {
+                setUser(currentUser);
+                setUserName(currentUser.name || '');
+                setOrganizationName(currentUser.organization_name || '');
+            }
+        };
+        fetchUser();
+    }, []);
+
+    const handleSaveProfile = async () => {
+        setSavingProfile(true);
+        setProfileMessage(null);
+
+        const result = await updateUserProfile({
+            name: userName,
+            organization_name: organizationName
+        });
+
+        if (result.success && result.user) {
+            setUser(result.user);
+            setProfileMessage({
+                type: 'success',
+                text: 'Profile updated successfully!'
+            });
+            // Clear message after 3 seconds
+            setTimeout(() => setProfileMessage(null), 3000);
+        } else {
+            setProfileMessage({
+                type: 'error',
+                text: result.message || 'Failed to update profile'
+            });
+        }
+
+        setSavingProfile(false);
+    };
 
     const copyToClipboard = (text: string) => {
         navigator.clipboard.writeText(text);
@@ -354,13 +409,36 @@ export default function SettingsPage() {
                             </CardDescription>
                         </CardHeader>
                         <CardContent className="space-y-4">
+                            {profileMessage && (
+                                <Alert
+                                    className={
+                                        profileMessage.type === 'success'
+                                            ? 'bg-green-900/20 border-green-700'
+                                            : 'bg-red-900/20 border-red-700'
+                                    }
+                                >
+                                    <AlertDescription
+                                        className={
+                                            profileMessage.type === 'success'
+                                                ? 'text-green-300'
+                                                : 'text-red-300'
+                                        }
+                                    >
+                                        {profileMessage.text}
+                                    </AlertDescription>
+                                </Alert>
+                            )}
                             <div className="grid gap-2">
                                 <Label htmlFor="name" className="text-zinc-100">
                                     Display Name
                                 </Label>
                                 <Input
                                     id="name"
-                                    defaultValue="Admin User"
+                                    value={userName}
+                                    onChange={(e) =>
+                                        setUserName(e.target.value)
+                                    }
+                                    placeholder="Enter your display name"
                                     className="bg-zinc-800 border-zinc-700 text-zinc-100"
                                 />
                             </div>
@@ -373,26 +451,11 @@ export default function SettingsPage() {
                                 </Label>
                                 <Input
                                     id="email"
-                                    defaultValue="admin@healops.ai"
-                                    className="bg-zinc-800 border-zinc-700 text-zinc-100"
+                                    value={user?.email || ''}
+                                    disabled
+                                    className="bg-zinc-800 border-zinc-700 text-zinc-100 opacity-50 cursor-not-allowed"
                                 />
                             </div>
-                            <Button className="bg-green-600 hover:bg-green-700">
-                                Save Changes
-                            </Button>
-                        </CardContent>
-                    </Card>
-
-                    <Card className="border-zinc-800 bg-zinc-900">
-                        <CardHeader>
-                            <CardTitle className="text-zinc-100">
-                                Organization
-                            </CardTitle>
-                            <CardDescription className="text-zinc-400">
-                                Manage your organization details
-                            </CardDescription>
-                        </CardHeader>
-                        <CardContent className="space-y-4">
                             <div className="grid gap-2">
                                 <Label
                                     htmlFor="org-name"
@@ -402,15 +465,27 @@ export default function SettingsPage() {
                                 </Label>
                                 <Input
                                     id="org-name"
-                                    defaultValue="HealOps Demo"
+                                    value={organizationName}
+                                    onChange={(e) =>
+                                        setOrganizationName(e.target.value)
+                                    }
+                                    placeholder="Enter your organization name"
                                     className="bg-zinc-800 border-zinc-700 text-zinc-100"
                                 />
                             </div>
                             <Button
-                                variant="outline"
-                                className="border-zinc-700 text-zinc-100 hover:bg-zinc-800"
+                                onClick={handleSaveProfile}
+                                disabled={savingProfile}
+                                className="bg-green-600 hover:bg-green-700"
                             >
-                                Update Organization
+                                {savingProfile ? (
+                                    <>
+                                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                        Saving...
+                                    </>
+                                ) : (
+                                    'Save Changes'
+                                )}
                             </Button>
                         </CardContent>
                     </Card>

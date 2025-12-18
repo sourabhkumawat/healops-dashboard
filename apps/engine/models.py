@@ -85,6 +85,8 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     role = Column(String, default="admin")
+    name = Column(String, nullable=True)  # User display name
+    organization_name = Column(String, nullable=True)  # Organization name
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class IntegrationProvider(str, enum.Enum):

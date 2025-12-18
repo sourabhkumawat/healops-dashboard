@@ -93,6 +93,8 @@ export interface CurrentUser {
     id: number;
     email: string;
     role: string;
+    name: string | null;
+    organization_name: string | null;
     created_at: string | null;
 }
 
@@ -114,5 +116,34 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
     } catch (error) {
         console.error('Error fetching current user:', error);
         return null;
+    }
+}
+
+export async function updateUserProfile(data: {
+    name?: string;
+    organization_name?: string;
+}): Promise<{ success: boolean; message?: string; user?: CurrentUser }> {
+    try {
+        const { fetchWithAuth } = await import('@/lib/api-client');
+        const response = await fetchWithAuth(`${API_BASE}/auth/me`, {
+            method: 'PUT',
+            body: JSON.stringify(data)
+        });
+
+        if (!response.ok) {
+            const error = await response
+                .json()
+                .catch(() => ({ detail: 'Failed to update profile' }));
+            return {
+                success: false,
+                message: error.detail || 'Failed to update profile'
+            };
+        }
+
+        const user = await response.json();
+        return { success: true, user };
+    } catch (error) {
+        console.error('Error updating user profile:', error);
+        return { success: false, message: 'An unexpected error occurred' };
     }
 }

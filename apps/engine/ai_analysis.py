@@ -472,10 +472,54 @@ Only include files that need changes. Provide the COMPLETE file content for each
             )
             
             if pr_result.get("status") == "success":
+                pr_url = pr_result.get("pr_url")
+                pr_number = pr_result.get("pr_number")
+                
+                # Send email notification
+                try:
+                    from email_service import send_pr_creation_email
+                    from models import User
+                    
+                    # Get user email from incident
+                    user_email = None
+                    if incident.user_id:
+                        user = db.query(User).filter(User.id == incident.user_id).first()
+                        if user and user.email:
+                            user_email = user.email
+                    
+                    if user_email:
+                        # Prepare incident data for email
+                        incident_data = {
+                            "id": incident.id,
+                            "title": incident.title,
+                            "service_name": incident.service_name,
+                            "severity": incident.severity,
+                            "status": incident.status,
+                            "created_at": incident.created_at.isoformat() if incident.created_at else None,
+                            "root_cause": root_cause,
+                            "action_taken": action_taken,
+                            "pr_files_changed": list(changes.keys())
+                        }
+                        
+                        # Send email in background (don't block PR creation)
+                        send_pr_creation_email(
+                            recipient_email=user_email,
+                            incident=incident_data,
+                            pr_url=pr_url,
+                            pr_number=pr_number
+                        )
+                    else:
+                        print(f"⚠️  No user email found for incident {incident.id}, skipping email notification")
+                except Exception as e:
+                    print(f"⚠️  Failed to send email notification: {e}")
+                    # Don't fail PR creation if email fails
+                    import traceback
+                    traceback.print_exc()
+                
                 return {
                     "status": "success",
-                    "pr_url": pr_result.get("pr_url"),
-                    "pr_number": pr_result.get("pr_number"),
+                    "pr_url": pr_url,
+                    "pr_number": pr_number,
                     "files_changed": list(changes.keys()),
                     "explanation": explanation
                 }
