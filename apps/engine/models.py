@@ -1,4 +1,5 @@
 from sqlalchemy import Column, Integer, String, DateTime, JSON, ForeignKey, Enum, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 import enum
 from database import Base
@@ -60,7 +61,7 @@ class LogEntry(Base):
     level = Column(String)
     message = Column(String)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
-    metadata_json = Column(JSON, nullable=True)
+    metadata_json = Column(JSONB, nullable=True)  # JSONB for better performance and GIN indexing
     
     # New fields for Phase 11
     source = Column(String, index=True, nullable=True)
@@ -145,4 +146,29 @@ class ApiKey(Base):
     is_active = Column(Integer, default=1)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     expires_at = Column(DateTime(timezone=True), nullable=True)
+
+class EmailLog(Base):
+    __tablename__ = "email_logs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    email_type = Column(String, index=True)  # "pr_creation", "incident_resolved", "test"
+    recipient_email = Column(String, index=True)
+    status = Column(String, index=True)  # "success", "failed", "skipped"
+    
+    # Related entities
+    incident_id = Column(Integer, ForeignKey("incidents.id"), nullable=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    
+    # Email details
+    subject = Column(String, nullable=True)
+    message_id = Column(String, nullable=True)  # Brevo message ID if successful
+    
+    # Error information
+    error_message = Column(Text, nullable=True)
+    error_details = Column(JSON, nullable=True)  # Store full error details as JSON
+    
+    # Metadata
+    metadata = Column(JSON, nullable=True)  # Additional context (pr_url, pr_number, etc.)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 

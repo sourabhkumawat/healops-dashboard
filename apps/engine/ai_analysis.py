@@ -495,6 +495,7 @@ Only include files that need changes. Provide the COMPLETE file content for each
                             "service_name": incident.service_name,
                             "severity": incident.severity,
                             "status": incident.status,
+                            "user_id": incident.user_id,
                             "created_at": incident.created_at.isoformat() if incident.created_at else None,
                             "root_cause": root_cause,
                             "action_taken": action_taken,
@@ -506,7 +507,8 @@ Only include files that need changes. Provide the COMPLETE file content for each
                             recipient_email=user_email,
                             incident=incident_data,
                             pr_url=pr_url,
-                            pr_number=pr_number
+                            pr_number=pr_number,
+                            db_session=db
                         )
                     else:
                         print(f"⚠️  No user email found for incident {incident.id}, skipping email notification")

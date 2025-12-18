@@ -16,7 +16,8 @@ from models import (
     IntegrationStatus, 
     User, 
     Integration, 
-    ApiKey
+    ApiKey,
+    EmailLog
 )
 
 def create_tables():
@@ -53,7 +54,7 @@ def verify_tables():
     print("\n🔍 Verifying tables...")
     inspector = inspect(engine)
     
-    expected_tables = ['incidents', 'logs', 'integration_status', 'users', 'integrations', 'api_keys']
+    expected_tables = ['incidents', 'logs', 'integration_status', 'users', 'integrations', 'api_keys', 'email_logs']
     existing_tables = inspector.get_table_names()
     
     print(f"\n📊 Existing tables: {existing_tables}")

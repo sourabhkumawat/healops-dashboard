@@ -1662,6 +1662,9 @@ def update_incident(incident_id: int, update_data: dict, request: Request, db: S
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     
+    # Store old status to detect changes
+    old_status = incident.status
+    
     if "status" in update_data:
         incident.status = update_data["status"]
     if "severity" in update_data:
@@ -1669,4 +1672,63 @@ def update_incident(incident_id: int, update_data: dict, request: Request, db: S
         
     db.commit()
     db.refresh(incident)
+    
+    # Send email notification if incident was just resolved
+    # Check both old_status and new status to ensure we only send email on actual transition to RESOLVED
+    status_changed_to_resolved = (
+        "status" in update_data 
+        and update_data["status"] == "RESOLVED" 
+        and old_status != "RESOLVED"
+    )
+    
+    if status_changed_to_resolved:
+        try:
+            from email_service import send_incident_resolved_email
+            from models import User
+            
+            # Get user email from incident
+            user_email = None
+            if incident.user_id:
+                user = db.query(User).filter(User.id == incident.user_id).first()
+                if user and user.email:
+                    user_email = user.email
+            
+            if user_email:
+                # Prepare incident data for email
+                # Use updated_at as resolved_at, fallback to current time if not set
+                resolved_at = incident.updated_at
+                if resolved_at is None:
+                    resolved_at = datetime.now()
+                
+                incident_data = {
+                    "id": incident.id,
+                    "title": incident.title or "Untitled Incident",
+                    "service_name": incident.service_name or "Unknown Service",
+                    "severity": incident.severity or "MEDIUM",
+                    "status": incident.status,
+                    "user_id": incident.user_id,
+                    "created_at": incident.created_at.isoformat() if incident.created_at else None,
+                    "resolved_at": resolved_at.isoformat() if hasattr(resolved_at, 'isoformat') else str(resolved_at),
+                    "root_cause": incident.root_cause or "No root cause analysis available",
+                    "action_taken": incident.action_taken or "No action details available"
+                }
+                
+                # Send email notification (non-blocking)
+                try:
+                    send_incident_resolved_email(
+                        recipient_email=user_email,
+                        incident=incident_data,
+                        db_session=db
+                    )
+                except Exception as e:
+                    # Log error but don't fail the request
+                    print(f"⚠️  Failed to send incident resolved email notification: {e}")
+            else:
+                print(f"⚠️  No user email found for incident {incident.id}, skipping email notification")
+        except Exception as e:
+            # Log error but don't fail the request
+            print(f"⚠️  Error preparing incident resolved email notification: {e}")
+            import traceback
+            traceback.print_exc()
+    
     return incident
