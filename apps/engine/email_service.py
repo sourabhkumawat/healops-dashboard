@@ -111,7 +111,7 @@ def log_email_to_database(
             message_id=message_id[:255] if message_id else None,  # Limit message_id length
             error_message=truncated_error,
             error_details=serialized_error_details,
-            metadata=serialized_metadata
+            email_metadata=serialized_metadata
         )
         
         # Always use a separate session for logging to avoid transaction conflicts

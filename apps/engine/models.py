@@ -168,7 +168,7 @@ class EmailLog(Base):
     error_details = Column(JSON, nullable=True)  # Store full error details as JSON
     
     # Metadata
-    metadata = Column(JSON, nullable=True)  # Additional context (pr_url, pr_number, etc.)
+    email_metadata = Column(JSON, nullable=True)  # Additional context (pr_url, pr_number, etc.)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
