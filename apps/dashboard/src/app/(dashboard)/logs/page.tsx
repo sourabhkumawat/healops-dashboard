@@ -864,7 +864,7 @@ export default function LogsPage() {
                 {/* Log Detail Panel */}
                 {selectedLog && (
                     <div className={cn(
-                        "w-[480px] border-l border-zinc-800 bg-zinc-950 flex flex-col h-full flex-shrink-0 overflow-x-auto",
+                        "w-[480px] border-l border-zinc-800 bg-zinc-950 flex flex-col h-full flex-shrink-0",
                         isClosing ? "animate-slide-out-right" : "animate-slide-in-right"
                     )}>
                     {/* Header */}
@@ -942,7 +942,7 @@ export default function LogsPage() {
                         </div>
 
                         <ScrollArea className="flex-1">
-                            <div className="p-3 min-w-0">
+                            <div className="p-3">
                                 {/* Parsed Properties Tab */}
                                 <TabsContent value="parsed" className="mt-0 space-y-3">
                                     <div>
@@ -976,7 +976,7 @@ export default function LogsPage() {
                                                 className="pl-8 bg-zinc-900 border-zinc-800 text-zinc-100 text-xs h-7"
                                             />
                                         </div>
-                                        <div className="space-y-0.5 font-mono text-xs overflow-x-auto">
+                                        <div className="space-y-0.5 font-mono text-xs">
                                             {Object.entries(getParsedProperties(selectedLog))
                                                 .filter(([key, value]) => {
                                                     if (!propertySearch) return true;
@@ -985,9 +985,9 @@ export default function LogsPage() {
                                                            String(value).toLowerCase().includes(search);
                                                 })
                                                 .map(([key, value]) => (
-                                                    <div key={key} className="flex items-start gap-2 py-1 border-b border-zinc-800/50 min-w-max">
+                                                    <div key={key} className="flex items-start gap-2 py-1 border-b border-zinc-800/50">
                                                         <span className="text-zinc-500 flex-shrink-0 w-32 text-[10px]">{key}:</span>
-                                                        <span className="text-zinc-300 break-all text-[10px] whitespace-pre-wrap">
+                                                        <span className="text-zinc-300 break-words text-[10px] whitespace-pre-wrap flex-1">
                                                             {typeof value === 'object' 
                                                                 ? JSON.stringify(value, null, 2)
                                                                 : String(value)
@@ -1015,7 +1015,7 @@ export default function LogsPage() {
 
                                 {/* Original Line Tab */}
                                 <TabsContent value="original" className="mt-0">
-                                    <pre className="text-[10px] font-mono text-zinc-300 bg-zinc-900 p-3 rounded border border-zinc-800 overflow-x-auto whitespace-pre-wrap break-words">
+                                    <pre className="text-[10px] font-mono text-zinc-300 bg-zinc-900 p-3 rounded border border-zinc-800 whitespace-pre-wrap break-words overflow-wrap-anywhere">
                                         {JSON.stringify({
                                             level: selectedLog.level || selectedLog.severity,
                                             message: selectedLog.message,
