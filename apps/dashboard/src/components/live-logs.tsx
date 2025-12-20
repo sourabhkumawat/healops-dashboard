@@ -106,7 +106,31 @@ export function LiveLogs({ initialLogs = [] }: LiveLogsProps) {
         };
 
         ws.onerror = (error) => {
-            console.error('WebSocket error:', error);
+            const wsUrl = getWebSocketUrl();
+            const readyState = ws.readyState;
+            const readyStateMap: Record<number, string> = {
+                0: 'CONNECTING',
+                1: 'OPEN',
+                2: 'CLOSING',
+                3: 'CLOSED'
+            };
+            
+            // WebSocket error events don't contain much info, so we log what we can
+            const errorInfo: Record<string, any> = {
+                url: wsUrl,
+                readyState: readyStateMap[readyState] || readyState,
+                timestamp: new Date().toISOString()
+            };
+            
+            // Try to extract any available error information
+            if (error.type) {
+                errorInfo.type = error.type;
+            }
+            if (error.target) {
+                errorInfo.target = 'WebSocket';
+            }
+            
+            console.error('WebSocket connection error:', errorInfo);
             setConnectionStatus('disconnected');
         };
 

@@ -34,6 +34,15 @@ export function MainNav({
         Incidents
       </Link>
       <Link
+        href="/logs"
+        className={cn(
+          "text-sm font-medium transition-colors hover:text-primary",
+          pathname?.startsWith("/logs") ? "text-primary" : "text-muted-foreground"
+        )}
+      >
+        Logs
+      </Link>
+      <Link
         href="/settings"
         className={cn(
           "text-sm font-medium transition-colors hover:text-primary",
