@@ -78,18 +78,14 @@ export async function getLogs(filters: LogFilters = {}): Promise<LogEntry[]> {
     }
 }
 
+// Re-export getServices from integrations.ts but adapt the return type
+import { getServices as getServicesFromIntegrations } from './integrations';
+
 export async function getServices(): Promise<string[]> {
-    try {
-        const logs = await getLogs({ limit: 1000 });
-        const services = new Set<string>();
-        logs.forEach(log => {
-            if (log.service_name) {
-                services.add(log.service_name);
-            }
-        });
-        return Array.from(services).sort();
-    } catch (error) {
-        console.error('Error fetching services:', error);
-        return [];
+    const data = await getServicesFromIntegrations();
+    // Handle the return format from integrations.ts: { services: string[] }
+    if (data && typeof data === 'object' && 'services' in data) {
+        return Array.isArray(data.services) ? data.services : [];
     }
+    return [];
 }

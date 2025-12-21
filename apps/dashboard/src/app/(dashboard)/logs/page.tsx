@@ -71,9 +71,13 @@ export default function LogsPage() {
     
     const wsRef = useRef<WebSocket | null>(null);
     const chartContainerRef = useRef<HTMLDivElement>(null);
+    const fetchingLogsRef = useRef(false);
+    const fetchingServicesRef = useRef(false);
 
     // Fetch logs
     const fetchLogs = async () => {
+        if (fetchingLogsRef.current) return; // Prevent duplicate calls
+        fetchingLogsRef.current = true;
         setLoading(true);
         try {
             const filters: LogFilters = {
@@ -92,16 +96,21 @@ export default function LogsPage() {
             console.error('Failed to fetch logs:', error);
         } finally {
             setLoading(false);
+            fetchingLogsRef.current = false;
         }
     };
 
     // Fetch services
     const fetchServices = async () => {
+        if (fetchingServicesRef.current) return; // Prevent duplicate calls
+        fetchingServicesRef.current = true;
         try {
             const data = await getServices();
             setServices(data);
         } catch (error) {
             console.error('Failed to fetch services:', error);
+        } finally {
+            fetchingServicesRef.current = false;
         }
     };
 

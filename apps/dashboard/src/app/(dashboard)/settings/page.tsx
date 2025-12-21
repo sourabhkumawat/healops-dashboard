@@ -149,45 +149,61 @@ export default function SettingsPage() {
         setLoading(false);
     };
 
+    const fetchingApiKeysRef = useRef(false);
+    const fetchingIntegrationsRef = useRef(false);
+    const fetchingServicesRef = useRef(false);
+    const fetchingReposRef = useRef<Record<number, boolean>>({});
+    const fetchingConfigRef = useRef<Record<number, boolean>>({});
+    const fetchingUserRef = useRef(false);
+
     const fetchApiKeys = async () => {
+        if (fetchingApiKeysRef.current) return; // Prevent duplicate calls
+        fetchingApiKeysRef.current = true;
         try {
             const keys = await listApiKeys();
             setApiKeys(keys);
         } catch (error) {
             console.error('Failed to fetch API keys:', error);
+        } finally {
+            fetchingApiKeysRef.current = false;
         }
     };
 
     const fetchIntegrations = async () => {
+        if (fetchingIntegrationsRef.current) return; // Prevent duplicate calls
+        fetchingIntegrationsRef.current = true;
         try {
             const data = await listIntegrations();
             setIntegrations(data.integrations || []);
         } catch (error) {
             console.error('Failed to fetch integrations:', error);
+        } finally {
+            fetchingIntegrationsRef.current = false;
         }
     };
 
     useEffect(() => {
-        // Fetch data on mount
+        // Check for success param first
+        const params = new URLSearchParams(window.location.search);
+        const githubConnected = params.get('github_connected') === 'true';
+        
+        if (githubConnected) {
+            // Clear param
+            window.history.replaceState({}, '', window.location.pathname);
+        }
+
+        // Fetch data on mount (only fetch once)
         const loadData = async () => {
             await Promise.all([fetchApiKeys(), fetchIntegrations()]);
         };
         loadData();
-
-        // Check for success param
-        const params = new URLSearchParams(window.location.search);
-        if (params.get('github_connected') === 'true') {
-            // Clear param
-            window.history.replaceState({}, '', window.location.pathname);
-            // Refresh integrations
-            fetchIntegrations();
-            // Show success (could add a toast here if available, or just rely on the list updating)
-        }
     }, []);
 
     // Fetch user data
     useEffect(() => {
         const fetchUser = async () => {
+            if (fetchingUserRef.current) return; // Prevent duplicate calls
+            fetchingUserRef.current = true;
             setLoadingUser(true);
             try {
                 const currentUser = await getCurrentUser();
@@ -198,6 +214,7 @@ export default function SettingsPage() {
                 }
             } finally {
                 setLoadingUser(false);
+                fetchingUserRef.current = false;
             }
         };
         fetchUser();
@@ -235,12 +252,18 @@ export default function SettingsPage() {
     };
 
     const fetchIntegrationConfig = async (integrationId: number) => {
-        const config = await getIntegrationConfig(integrationId);
-        if (!config.error) {
-            setIntegrationConfigs((prev) => ({
-                ...prev,
-                [integrationId]: config
-            }));
+        if (fetchingConfigRef.current[integrationId]) return; // Prevent duplicate calls
+        fetchingConfigRef.current[integrationId] = true;
+        try {
+            const config = await getIntegrationConfig(integrationId);
+            if (!config.error) {
+                setIntegrationConfigs((prev) => ({
+                    ...prev,
+                    [integrationId]: config
+                }));
+            }
+        } finally {
+            fetchingConfigRef.current[integrationId] = false;
         }
     };
 
@@ -253,6 +276,8 @@ export default function SettingsPage() {
                 await fetchIntegrationConfig(integrationId);
             }
             // Fetch services first (always fetch to get latest)
+            if (fetchingServicesRef.current) return; // Prevent duplicate calls
+            fetchingServicesRef.current = true;
             setLoadingServices(true);
             try {
                 const servicesData = await getServices();
@@ -278,9 +303,12 @@ export default function SettingsPage() {
                 setAvailableServices([]);
             } finally {
                 setLoadingServices(false);
+                fetchingServicesRef.current = false;
             }
 
             // Fetch repositories for this integration
+            if (fetchingReposRef.current[integrationId]) return; // Prevent duplicate calls
+            fetchingReposRef.current[integrationId] = true;
             setLoadingRepos((prev) => ({ ...prev, [integrationId]: true }));
             try {
                 const reposData = await getRepositories(integrationId);
@@ -320,6 +348,7 @@ export default function SettingsPage() {
                     ...prev,
                     [integrationId]: false
                 }));
+                fetchingReposRef.current[integrationId] = false;
             }
         }
     };

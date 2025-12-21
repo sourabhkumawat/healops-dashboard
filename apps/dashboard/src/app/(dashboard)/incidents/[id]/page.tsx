@@ -48,6 +48,7 @@ export default function IncidentDetailsPage() {
     const [resolving, setResolving] = useState(false);
     const [analyzing, setAnalyzing] = useState(false);
     const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+    const fetchingIncidentRef = useRef(false);
 
     const triggerAnalysis = async () => {
         try {
@@ -56,6 +57,8 @@ export default function IncidentDetailsPage() {
             // Start polling after triggering analysis
             if (!pollIntervalRef.current) {
                 pollIntervalRef.current = setInterval(async () => {
+                    if (fetchingIncidentRef.current) return; // Prevent duplicate calls
+                    fetchingIncidentRef.current = true;
                     try {
                         const result = await getIncident(Number(params.id));
                         if (result) {
@@ -73,6 +76,8 @@ export default function IncidentDetailsPage() {
                             'Failed to fetch incident during polling:',
                             error
                         );
+                    } finally {
+                        fetchingIncidentRef.current = false;
                     }
                 }, 3000);
             }
@@ -87,6 +92,8 @@ export default function IncidentDetailsPage() {
         const MAX_POLL_ATTEMPTS = 40; // 2 minutes max (40 * 3 seconds)
 
         const fetchIncident = async (): Promise<boolean> => {
+            if (fetchingIncidentRef.current) return false; // Prevent duplicate calls
+            fetchingIncidentRef.current = true;
             try {
                 const result = await getIncident(Number(params.id));
                 if (result) {
@@ -113,6 +120,8 @@ export default function IncidentDetailsPage() {
             } catch (error) {
                 console.error('Failed to fetch incident:', error);
                 setLoading(false);
+            } finally {
+                fetchingIncidentRef.current = false;
             }
             return false;
         };
@@ -123,6 +132,8 @@ export default function IncidentDetailsPage() {
             if (shouldPoll && !pollIntervalRef.current) {
                 console.log('Starting polling for AI analysis...');
                 pollIntervalRef.current = setInterval(async () => {
+                    if (fetchingIncidentRef.current) return; // Prevent duplicate calls
+                    fetchingIncidentRef.current = true;
                     pollCount++;
 
                     // Stop polling after max attempts
@@ -135,22 +146,29 @@ export default function IncidentDetailsPage() {
                             pollIntervalRef.current = null;
                         }
                         setAnalyzing(false);
+                        fetchingIncidentRef.current = false;
                         return;
                     }
 
-                    const result = await getIncident(Number(params.id));
-                    if (result) {
-                        setData(result);
+                    try {
+                        const result = await getIncident(Number(params.id));
+                        if (result) {
+                            setData(result);
 
-                        if (result.incident?.root_cause) {
-                            // Analysis complete!
-                            console.log('AI analysis completed!');
-                            if (pollIntervalRef.current) {
-                                clearInterval(pollIntervalRef.current);
-                                pollIntervalRef.current = null;
+                            if (result.incident?.root_cause) {
+                                // Analysis complete!
+                                console.log('AI analysis completed!');
+                                if (pollIntervalRef.current) {
+                                    clearInterval(pollIntervalRef.current);
+                                    pollIntervalRef.current = null;
+                                }
+                                setAnalyzing(false);
                             }
-                            setAnalyzing(false);
                         }
+                    } catch (error) {
+                        console.error('Failed to fetch incident:', error);
+                    } finally {
+                        fetchingIncidentRef.current = false;
                     }
                 }, 3000);
             }

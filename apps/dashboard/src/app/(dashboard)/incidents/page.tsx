@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { IncidentTable, Incident } from '@/components/incident-table';
 import { Loader2 } from 'lucide-react';
 import { getIncidents } from '@/actions/incidents';
@@ -8,9 +8,12 @@ import { getIncidents } from '@/actions/incidents';
 export default function IncidentsPage() {
     const [incidents, setIncidents] = useState<Incident[]>([]);
     const [loading, setLoading] = useState(true);
+    const fetchingRef = useRef(false);
 
     useEffect(() => {
         const fetchIncidents = async () => {
+            if (fetchingRef.current) return; // Prevent duplicate calls
+            fetchingRef.current = true;
             try {
                 const data = await getIncidents();
                 setIncidents(data);
@@ -18,6 +21,7 @@ export default function IncidentsPage() {
                 console.error('Failed to fetch incidents:', error);
             } finally {
                 setLoading(false);
+                fetchingRef.current = false;
             }
         };
 
