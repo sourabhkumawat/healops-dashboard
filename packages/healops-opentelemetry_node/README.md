@@ -11,6 +11,8 @@ The official HealOps OpenTelemetry SDK for Node.js and Browser. Automatically ca
 - 🔄 **Auto-instrumentation**: Automatically instruments Express, HTTP, and other Node.js libraries
 - 🌐 **Browser Compatible**: Works in all modern browsers with automatic error catching
 - ⚡ **Efficient Batching**: Batches and sends logs efficiently
+- ✨ **Universal Init**: One-line setup that works everywhere with auto-detection
+- 🎛️ **Console Interception**: Automatically captures all console.log, console.error, etc.
 
 ## Installation
 
@@ -19,6 +21,65 @@ npm install @sourabhkumawat0105/healops-opentelemetry
 ```
 
 ## Quick Start
+
+### 🆕 Universal Setup (Recommended - New in v0.6.0)
+
+**One line of code - works everywhere!** Automatically detects your environment and framework.
+
+```javascript
+// CommonJS (Node.js, Fastify, Express, NestJS)
+const { init } = require('@sourabhkumawat0105/healops-opentelemetry');
+
+const healops = init({
+  apiKey: process.env.HEALOPS_API_KEY,
+  serviceName: 'my-app'
+});
+
+// That's it! Now captures:
+// ✅ All console.log, console.error, console.warn
+// ✅ Unhandled errors and promise rejections
+// ✅ HTTP requests, database queries (via OpenTelemetry)
+// ✅ Everything HyperDX captures and more!
+```
+
+```typescript
+// ES Modules / TypeScript
+import { init } from '@sourabhkumawat0105/healops-opentelemetry';
+
+const healops = init({
+  apiKey: process.env.HEALOPS_API_KEY!,
+  serviceName: 'my-app'
+});
+```
+
+**Advanced Options:**
+
+```javascript
+const healops = init({
+  apiKey: process.env.HEALOPS_API_KEY,
+  serviceName: 'my-app',
+  endpoint: 'https://engine.healops.ai',  // Optional: Custom endpoint
+  captureConsole: true,   // Default: true - Capture console.log/error/warn
+  captureErrors: true,    // Default: true - Capture unhandled errors
+  captureTraces: true,    // Default: true - Capture HTTP/DB traces (Node.js only)
+  debug: false            // Default: false - Enable debug logging
+});
+
+// You can still use the logger manually
+healops.info('User logged in', { userId: '123' });
+healops.error('Payment failed', { orderId: '456' });
+```
+
+### Environment Variables
+
+```env
+# .env file
+HEALOPS_API_KEY=your-api-key-here
+```
+
+---
+
+## Legacy Setup (Still Supported)
 
 ### Node.js (Backend)
 
@@ -183,7 +244,72 @@ const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<App />);
 ```
 
-### Express.js
+### Fastify (New Universal Init)
+
+**One line setup - automatically captures everything!**
+
+```javascript
+// main.ts or index.js
+const { init } = require('@sourabhkumawat0105/healops-opentelemetry');
+const Fastify = require('fastify');
+
+// 🆕 Initialize HealOps FIRST (before creating Fastify instance)
+const healops = init({
+  apiKey: process.env.HEALOPS_API_KEY,
+  serviceName: 'my-fastify-app'
+});
+
+// Now create your Fastify app
+const fastify = Fastify({ logger: true });
+
+// All logs are automatically captured!
+fastify.get('/api/users', async (request, reply) => {
+  console.log('Fetching users'); // ✅ Captured automatically
+
+  try {
+    // Your code here
+    return { users: [] };
+  } catch (error) {
+    console.error('Failed to fetch users:', error); // ✅ Captured automatically
+    throw error;
+  }
+});
+
+fastify.listen({ port: 3000 });
+```
+
+### Express.js (New Universal Init)
+
+**One line setup:**
+
+```javascript
+const { init } = require('@sourabhkumawat0105/healops-opentelemetry');
+const express = require('express');
+
+// 🆕 Initialize HealOps FIRST
+const healops = init({
+  apiKey: process.env.HEALOPS_API_KEY,
+  serviceName: 'my-express-app'
+});
+
+const app = express();
+
+// All logs and errors are automatically captured!
+app.get('/api/users', async (req, res) => {
+  console.log('Fetching users'); // ✅ Captured
+
+  try {
+    res.json({ users: [] });
+  } catch (error) {
+    console.error('Failed to fetch users:', error); // ✅ Captured
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.listen(3000);
+```
+
+### Express.js (Legacy Setup)
 
 **1. Initialize in your main server file:**
 
@@ -211,7 +337,7 @@ app.get('/api/users', async (req, res) => {
     // Your code here
     res.json({ users: [] });
   } catch (error) {
-    logger.error('Failed to fetch users', { 
+    logger.error('Failed to fetch users', {
       error: error.message,
       route: '/api/users'
     });
