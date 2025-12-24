@@ -1,6 +1,6 @@
 {
   "name": "@sourabhkumawat0105/healops-opentelemetry",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "HealOps OpenTelemetry SDK for Node.js and Browser with automatic file path detection",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

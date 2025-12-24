@@ -5,6 +5,10 @@ export interface HealOpsLoggerConfig {
     serviceName: string;
     endpoint?: string;
     source?: string;
+    // Batching configuration
+    enableBatching?: boolean;       // Default: true
+    batchSize?: number;             // Default: 50
+    batchIntervalMs?: number;       // Default: 1000ms
 }
 
 export interface LogPayload {
@@ -20,9 +24,86 @@ export class HealOpsLogger {
     private config: HealOpsLoggerConfig;
     private endpoint: string;
 
+    // Batching properties
+    private logQueue: LogPayload[] = [];
+    private batchTimeout: NodeJS.Timeout | null = null;
+    private readonly BATCH_SIZE: number;
+    private readonly BATCH_INTERVAL_MS: number;
+    private readonly BATCHING_ENABLED: boolean;
+    private isFlushing: boolean = false;
+    private isDestroyed: boolean = false;
+
+    // Shutdown handlers (stored for cleanup)
+    private shutdownHandlers: {
+        beforeExit?: () => void;
+        sigint?: () => void;
+        sigterm?: () => void;
+    } = {};
+
     constructor(config: HealOpsLoggerConfig) {
         this.config = config;
         this.endpoint = config.endpoint || 'https://engine.healops.ai';
+
+        // Validate batching configuration
+        this.BATCHING_ENABLED = config.enableBatching !== false; // Default: true
+        this.BATCH_SIZE = Math.max(1, Math.min(config.batchSize || 50, 1000)); // Clamp between 1-1000
+        this.BATCH_INTERVAL_MS = Math.max(100, Math.min(config.batchIntervalMs || 1000, 60000)); // Clamp between 100ms-60s
+
+        // Setup graceful shutdown handlers (with cleanup tracking)
+        if (typeof process !== 'undefined' && process.on) {
+            this.shutdownHandlers.beforeExit = () => {
+                this.flushBatch().catch(err => {
+                    console.error('Failed to flush logs on shutdown:', err);
+                });
+            };
+
+            this.shutdownHandlers.sigint = () => {
+                this.destroy();
+                process.exit(0);
+            };
+
+            this.shutdownHandlers.sigterm = () => {
+                this.destroy();
+                process.exit(0);
+            };
+
+            process.on('beforeExit', this.shutdownHandlers.beforeExit);
+            process.on('SIGINT', this.shutdownHandlers.sigint);
+            process.on('SIGTERM', this.shutdownHandlers.sigterm);
+        }
+    }
+
+    /**
+     * Cleanup resources and remove event listeners
+     */
+    public destroy(): void {
+        if (this.isDestroyed) return;
+
+        this.isDestroyed = true;
+
+        // Flush remaining logs synchronously (best effort)
+        this.flushBatch().catch(() => {
+            // Silent fail during destruction
+        });
+
+        // Clear timeout
+        if (this.batchTimeout) {
+            clearTimeout(this.batchTimeout);
+            this.batchTimeout = null;
+        }
+
+        // Remove event listeners to prevent memory leaks
+        if (typeof process !== 'undefined' && process.removeListener) {
+            if (this.shutdownHandlers.beforeExit) {
+                process.removeListener('beforeExit', this.shutdownHandlers.beforeExit);
+            }
+            if (this.shutdownHandlers.sigint) {
+                process.removeListener('SIGINT', this.shutdownHandlers.sigint);
+            }
+            if (this.shutdownHandlers.sigterm) {
+                process.removeListener('SIGTERM', this.shutdownHandlers.sigterm);
+            }
+        }
     }
 
     /**
@@ -122,6 +203,11 @@ export class HealOpsLogger {
         message: string,
         metadata?: Record<string, any>
     ): Promise<void> {
+        // Don't send logs if logger is destroyed
+        if (this.isDestroyed) {
+            return;
+        }
+
         // Automatically capture caller info and merge with user metadata
         const callerInfo = this.getCallerInfo();
         const enrichedMetadata = {
@@ -138,10 +224,143 @@ export class HealOpsLogger {
             metadata: enrichedMetadata
         };
 
+        // If batching is disabled, send immediately
+        if (!this.BATCHING_ENABLED) {
+            await this.sendSingleLog(payload);
+            return;
+        }
+
+        // Add to batch queue (thread-safe in Node.js single-threaded model)
+        this.logQueue.push(payload);
+
+        // Flush immediately if batch size reached
+        if (this.logQueue.length >= this.BATCH_SIZE) {
+            // Don't await - let it flush in background
+            this.flushBatch().catch(err => {
+                if (process.env.HEALOPS_DEBUG) {
+                    console.error('Background flush failed:', err);
+                }
+            });
+        } else {
+            // Schedule batch flush if not already scheduled
+            this.scheduleBatchFlush();
+        }
+    }
+
+    /**
+     * Schedule a batch flush after the configured interval
+     */
+    private scheduleBatchFlush(): void {
+        if (this.batchTimeout) {
+            return; // Already scheduled
+        }
+
+        this.batchTimeout = setTimeout(() => {
+            this.flushBatch().catch(err => {
+                if (process.env.HEALOPS_DEBUG) {
+                    console.error('Failed to flush batch:', err);
+                }
+            });
+        }, this.BATCH_INTERVAL_MS);
+    }
+
+    /**
+     * Flush all queued logs to the backend
+     */
+    private async flushBatch(): Promise<void> {
+        // Clear the timeout
+        if (this.batchTimeout) {
+            clearTimeout(this.batchTimeout);
+            this.batchTimeout = null;
+        }
+
+        // Nothing to flush
+        if (this.logQueue.length === 0 || this.isFlushing) {
+            return;
+        }
+
+        // Mark as flushing to prevent concurrent flushes
+        this.isFlushing = true;
+
+        // Get current batch and clear queue
+        const batch = [...this.logQueue];
+        this.logQueue = [];
+
+        try {
+            // Try to send as batch first
+            await this.sendBatchLogs(batch);
+
+            if (process.env.HEALOPS_DEBUG) {
+                console.log(`✓ HealOps flushed ${batch.length} logs`);
+            }
+        } catch (error: any) {
+            // If batch endpoint fails, fall back to individual sends
+            if (process.env.HEALOPS_DEBUG) {
+                console.warn('Batch send failed, falling back to individual sends:', error.message);
+            }
+
+            // Try sending individually (without awaiting to avoid blocking)
+            for (const log of batch) {
+                this.sendSingleLog(log).catch(err => {
+                    // Silent fail - already logged in sendSingleLog
+                });
+            }
+        } finally {
+            this.isFlushing = false;
+        }
+    }
+
+    /**
+     * Send a batch of logs to the backend
+     */
+    private async sendBatchLogs(logs: LogPayload[]): Promise<void> {
+        const url = `${this.endpoint}/ingest/logs/batch`;
+
+        try {
+            const response = await axios.post(
+                url,
+                { logs },
+                {
+                    headers: {
+                        'X-HealOps-Key': this.config.apiKey,
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: 5000 // Longer timeout for batches
+                }
+            );
+
+            if (process.env.HEALOPS_DEBUG) {
+                console.log(
+                    `HealOps batch sent successfully: ${logs.length} logs`,
+                    response.status
+                );
+            }
+        } catch (error: any) {
+            const errorMessage =
+                error?.response?.data?.detail ||
+                error?.message ||
+                'Unknown error';
+
+            // Only log in debug mode for batch failures (will retry individually)
+            if (process.env.HEALOPS_DEBUG) {
+                console.error('HealOps batch send failed:', {
+                    message: errorMessage,
+                    statusCode: error?.response?.status,
+                    logCount: logs.length
+                });
+            }
+
+            throw error;
+        }
+    }
+
+    /**
+     * Send a single log to the backend (legacy/fallback method)
+     */
+    private async sendSingleLog(payload: LogPayload): Promise<void> {
         const url = `${this.endpoint}/ingest/logs`;
 
         try {
-            // Always attempt to send the log - this should never be conditional
             const response = await axios.post(url, payload, {
                 headers: {
                     'X-HealOps-Key': this.config.apiKey,
@@ -150,45 +369,47 @@ export class HealOpsLogger {
                 timeout: 3000
             });
 
-            // Optional: Log success for ERROR and CRITICAL logs if debug mode is enabled
             if (
                 process.env.HEALOPS_DEBUG &&
-                (severity === 'ERROR' || severity === 'CRITICAL')
+                (payload.severity === 'ERROR' || payload.severity === 'CRITICAL')
             ) {
                 console.log(
-                    `HealOps Logger successfully sent ${severity} log:`,
+                    `HealOps Logger successfully sent ${payload.severity} log:`,
                     response.status
                 );
             }
         } catch (error: any) {
-            // Always log failures to help with debugging - logs should always be sent
             const errorMessage =
                 error?.response?.data?.detail ||
                 error?.message ||
                 'Unknown error';
             const statusCode = error?.response?.status;
 
-            // Always log errors in browser, or if HEALOPS_DEBUG is set in Node.js
             const isBrowser = typeof window !== 'undefined';
             const shouldLog = isBrowser || process.env.HEALOPS_DEBUG;
 
             if (shouldLog) {
                 console.error(
-                    `HealOps Logger failed to send ${severity} log:`,
+                    `HealOps Logger failed to send ${payload.severity} log:`,
                     {
                         message: errorMessage,
                         statusCode,
                         url,
                         serviceName: this.config.serviceName,
-                        severity,
+                        severity: payload.severity,
                         error: error
                     }
                 );
             }
 
-            // Re-throw to be caught by the caller's catch handler
-            // This ensures the promise rejection is properly handled
             throw error;
         }
+    }
+
+    /**
+     * Manually flush any queued logs (useful before process exit)
+     */
+    public async flush(): Promise<void> {
+        await this.flushBatch();
     }
 }
