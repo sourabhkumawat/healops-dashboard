@@ -26,6 +26,7 @@ import {
     triggerIncidentAnalysis,
     updateIncidentStatus
 } from '@/actions/incidents';
+import CodeDiffViewer from '@/components/CodeDiffViewer';
 
 interface LogEntry {
     id: number;
@@ -47,6 +48,12 @@ export default function IncidentDetailsPage() {
     const [loading, setLoading] = useState(true);
     const [resolving, setResolving] = useState(false);
     const [analyzing, setAnalyzing] = useState(false);
+    const [selectedFileDiff, setSelectedFileDiff] = useState<{
+        file: string;
+        oldCode: string;
+        newCode: string;
+    } | null>(null);
+
     const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const fetchingIncidentRef = useRef(false);
 
@@ -223,8 +230,16 @@ export default function IncidentDetailsPage() {
 
     const { incident, logs } = data;
 
+    // TODO: In a real implementation, 'action_result' or 'root_cause' would contain the diff data.
+    // For now we mock it or extract it if available.
+    // Assuming 'action_result' might contain a 'diffs' array in the future.
+
     return (
-        <div className="flex-1 space-y-4 p-8 pt-6">
+        <div className="flex h-[calc(100vh-65px)] overflow-hidden">
+             {/* Left Pane - Incident Details */}
+             <div className={`${selectedFileDiff ? 'w-1/2 border-r' : 'w-full'} flex flex-col h-full overflow-hidden`}>
+                <ScrollArea className="h-full">
+                    <div className="space-y-4 p-8 pt-6">
             <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-4">
                     <Button
@@ -702,7 +717,16 @@ export default function IncidentDetailsPage() {
                                                                 (file, i) => (
                                                                     <div
                                                                         key={i}
-                                                                        className="text-xs font-mono text-zinc-300 flex items-center"
+                                                                        className="text-xs font-mono text-zinc-300 flex items-center cursor-pointer hover:bg-white/5 p-1 rounded transition-colors"
+                                                                        onClick={() => {
+                                                                            // Mocking code content for demonstration
+                                                                            // In real app, this would come from the API
+                                                                            setSelectedFileDiff({
+                                                                                file: file,
+                                                                                oldCode: `// Original content of ${file}\nfunction example() {\n  return "error";\n}`,
+                                                                                newCode: `// Fixed content of ${file}\nfunction example() {\n  return "success";\n}`
+                                                                            });
+                                                                        }}
                                                                     >
                                                                         <span className="w-1.5 h-1.5 rounded-full bg-blue-500 mr-2"></span>
                                                                         {file}
@@ -743,6 +767,31 @@ export default function IncidentDetailsPage() {
                     </Card>
                 </div>
             </div>
+        </div>
+        </ScrollArea>
+        </div>
+        {/* Right Pane - Diff Viewer */}
+        {selectedFileDiff && (
+            <div className="w-1/2 flex flex-col border-l h-full overflow-hidden bg-background">
+                <div className="flex items-center justify-between p-4 border-b">
+                    <h3 className="font-semibold">{selectedFileDiff.file}</h3>
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setSelectedFileDiff(null)}
+                    >
+                        Close
+                    </Button>
+                </div>
+                <div className="flex-1 overflow-auto">
+                    <CodeDiffViewer
+                        oldCode={selectedFileDiff.oldCode}
+                        newCode={selectedFileDiff.newCode}
+                        language={selectedFileDiff.file.split('.').pop() || 'javascript'}
+                    />
+                </div>
+            </div>
+        )}
         </div>
     );
 }

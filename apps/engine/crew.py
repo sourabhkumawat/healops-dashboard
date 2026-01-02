@@ -3,7 +3,7 @@ from agents import create_agents
 from integrations.github_integration import GithubIntegration
 
 def run_diagnosis_crew(incident_context: dict):
-    log_parser, rca_analyst, safety_officer = create_agents()
+    log_parser, rca_analyst, coding_agent, safety_officer = create_agents()
 
     # Task 1: Parse the logs
     parse_task = Task(
@@ -19,16 +19,31 @@ def run_diagnosis_crew(incident_context: dict):
         expected_output="A definitive root cause analysis with confidence score and a dictionary of file paths and their corrected content."
     )
 
-    # Task 3: Recommend Action (and check safety)
+    # Task 3: Coding Agent Task (New)
+    coding_task = Task(
+        description="""
+        Using the Root Cause Analysis, create the actual code fix.
+        1. Consult Code Memory for similar past errors.
+        2. Generate the corrected code for the affected files.
+        3. If a similar fix exists in memory, reference it.
+        4. Output the full content of the corrected files.
+        """,
+        agent=coding_agent,
+        context=[rca_task],
+        expected_output="The full path of the files changed and their new content, along with a description of the fix."
+    )
+
+    # Task 4: Recommend Action (and check safety)
     safety_task = Task(
-        description="Review the proposed root cause and suggest a safe healing action. If the action is risky, flag it for human approval. If safe and involves code changes, confirm the file paths and content.",
+        description="Review the proposed root cause and suggested code fix. Validate that the code change is safe. If safe, confirm the action.",
         agent=safety_officer,
+        context=[rca_task, coding_task],
         expected_output="A recommended action (e.g., 'Create PR', 'Restart Container') with a safety assessment and verified code changes."
     )
 
     crew = Crew(
-        agents=[log_parser, rca_analyst, safety_officer],
-        tasks=[parse_task, rca_task, safety_task],
+        agents=[log_parser, rca_analyst, coding_agent, safety_officer],
+        tasks=[parse_task, rca_task, coding_task, safety_task],
         verbose=2
     )
 
