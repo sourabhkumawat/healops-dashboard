@@ -38,11 +38,22 @@ interface LogEntry {
     metadata_json: unknown;
 }
 
+interface ActionResult {
+    pr_url?: string;
+    pr_number?: number;
+    pr_files_changed?: string[];
+    changes?: Record<string, string>; // Filename -> New Content
+}
+
+interface IncidentWithAction extends Incident {
+    action_result?: ActionResult;
+}
+
 export default function IncidentDetailsPage() {
     const params = useParams();
     const router = useRouter();
     const [data, setData] = useState<{
-        incident: Incident;
+        incident: IncidentWithAction;
         logs: LogEntry[];
     } | null>(null);
     const [loading, setLoading] = useState(true);
@@ -408,9 +419,13 @@ export default function IncidentDetailsPage() {
 
                     <ScrollArea className="flex-1 p-4 bg-zinc-950/30">
                         <div className="space-y-4 pb-10">
-                            {incident.action_result?.pr_files_changed?.map((file, i) => (
-                                <FileDiffCard key={i} filename={file} />
-                            ))}
+                            {incident.action_result?.pr_files_changed?.map((file, i) => {
+                                // Get content for this file if available
+                                const newCode = incident.action_result?.changes?.[file] || `// No content available for ${file}`;
+                                return (
+                                    <FileDiffCard key={i} filename={file} newCode={newCode} />
+                                );
+                            })}
                         </div>
                     </ScrollArea>
                 </div>

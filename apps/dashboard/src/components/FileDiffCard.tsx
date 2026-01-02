@@ -7,14 +7,17 @@ import CodeDiffViewer from './CodeDiffViewer';
 
 interface FileDiffCardProps {
     filename: string;
+    newCode: string;
 }
 
-export default function FileDiffCard({ filename }: FileDiffCardProps) {
+export default function FileDiffCard({ filename, newCode }: FileDiffCardProps) {
     const [isExpanded, setIsExpanded] = useState(true);
 
-    // Mock data generation (preserving logic from page.tsx)
-    const oldCode = `// Original content of ${filename}\nfunction example() {\n  return "error";\n}`;
-    const newCode = `// Fixed content of ${filename}\nfunction example() {\n  return "success";\n}`;
+    // In a real app, we would fetch the original content via GitHub API
+    // For now, we simulate a diff by assuming the "old" version was empty or generic
+    // or we just show the new code on the right and "No original content available" on left.
+    // Ideally, the backend would return a patch string.
+    const oldCode = `// Original content not available for comparison\n// Displaying new content for ${filename}`;
     const language = filename.split('.').pop() || 'javascript';
 
     return (
