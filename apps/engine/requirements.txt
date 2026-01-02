@@ -20,4 +20,3 @@ passlib[bcrypt]
 bcrypt<=4.0.1
 PyGithub
 sib-api-v3-sdk
-redis
