@@ -43,6 +43,7 @@ interface ActionResult {
     pr_number?: number;
     pr_files_changed?: string[];
     changes?: Record<string, string>; // Filename -> New Content
+    original_contents?: Record<string, string>; // Filename -> Original Content
 }
 
 interface IncidentWithAction extends Incident {
@@ -422,8 +423,9 @@ export default function IncidentDetailsPage() {
                             {incident.action_result?.pr_files_changed?.map((file, i) => {
                                 // Get content for this file if available
                                 const newCode = incident.action_result?.changes?.[file] || `// No content available for ${file}`;
+                                const oldCode = incident.action_result?.original_contents?.[file];
                                 return (
-                                    <FileDiffCard key={i} filename={file} newCode={newCode} />
+                                    <FileDiffCard key={i} filename={file} newCode={newCode} oldCode={oldCode} />
                                 );
                             })}
                         </div>

@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import ReactDiffViewer, { DiffMethod } from 'react-diff-viewer-continued';
+import { DiffEditor } from '@monaco-editor/react';
 
 interface CodeDiffViewerProps {
   oldCode: string;
@@ -16,39 +16,52 @@ const CodeDiffViewer: React.FC<CodeDiffViewerProps> = ({
   language = 'javascript',
   splitView = true,
 }) => {
+
+  // Simple mapping for common extensions to Monaco languages
+  const getMonacoLanguage = (lang: string) => {
+    const map: Record<string, string> = {
+      'js': 'javascript',
+      'jsx': 'javascript',
+      'ts': 'typescript',
+      'tsx': 'typescript',
+      'py': 'python',
+      'rb': 'ruby',
+      'go': 'go',
+      'java': 'java',
+      'cpp': 'cpp',
+      'c': 'c',
+      'html': 'html',
+      'css': 'css',
+      'json': 'json',
+      'md': 'markdown',
+      'yml': 'yaml',
+      'yaml': 'yaml',
+      'sql': 'sql',
+      'sh': 'shell',
+      'bash': 'shell',
+    };
+    return map[lang.toLowerCase()] || lang;
+  };
+
+  const monacoLanguage = getMonacoLanguage(language);
+
   return (
-    <div className="h-full overflow-auto text-sm border rounded-md bg-[#2d2d2d]">
-      <ReactDiffViewer
-        oldValue={oldCode}
-        newValue={newCode}
-        splitView={splitView}
-        compareMethod={DiffMethod.WORDS}
-        useDarkTheme={true}
-        styles={{
-          variables: {
-            dark: {
-              diffViewerBackground: '#1e1e1e',
-              diffViewerTitleBackground: '#252526',
-              gutterBackground: '#1e1e1e',
-              gutterColor: '#858585',
-              addedBackground: '#203424',
-              addedColor: '#e2e2e2',
-              removedBackground: '#3e2021',
-              removedColor: '#e2e2e2',
-              wordAddedBackground: '#2ea043',
-              wordRemovedBackground: '#da3633',
-            },
-          },
-          lineNumber: {
-            color: '#858585',
-          },
-          contentText: {
-            color: '#d4d4d4',
-            fontFamily: 'Consolas, "Courier New", monospace',
-          },
+    <div className="h-[500px] w-full border rounded-md bg-[#1e1e1e] overflow-hidden">
+      <DiffEditor
+        height="100%"
+        original={oldCode}
+        modified={newCode}
+        language={monacoLanguage}
+        theme="vs-dark"
+        options={{
+          renderSideBySide: splitView,
+          readOnly: true,
+          minimap: { enabled: false },
+          scrollBeyondLastLine: false,
+          fontSize: 14,
+          wordWrap: 'on',
+          automaticLayout: true,
         }}
-        leftTitle="Original"
-        rightTitle="Modified"
       />
     </div>
   );

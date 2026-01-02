@@ -1068,12 +1068,25 @@ Only include files that need changes. Provide the COMPLETE file content for each
                     import traceback
                     traceback.print_exc()
                 
+                # Extract original content for the changed files
+                original_contents = {}
+                for file_path in changes.keys():
+                    if file_path in file_contents:
+                        original_contents[file_path] = file_contents[file_path]
+                    else:
+                        # If for some reason we don't have it in file_contents (e.g. new file created entirely by AI not in relevant_files)
+                        # Try to fetch it (will return None if it's a new file)
+                        content = github_integration.get_file_contents(repo_name, file_path, ref=default_branch)
+                        if content:
+                            original_contents[file_path] = content
+
                 return {
                     "status": "success",
                     "pr_url": pr_url,
                     "pr_number": pr_number,
                     "files_changed": list(changes.keys()),
                     "changes": changes, # Return full content for frontend diff viewer
+                    "original_contents": original_contents, # Return original content for diff
                     "explanation": explanation
                 }
             else:
@@ -1513,6 +1526,8 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                                 result["pr_url"] = pr_result.get("pr_url")
                                 result["pr_number"] = pr_result.get("pr_number")
                                 result["pr_files_changed"] = pr_result.get("files_changed", [])
+                                result["changes"] = pr_result.get("changes", {})
+                                result["original_contents"] = pr_result.get("original_contents", {})
                                 print(f"✅ Created PR #{pr_result.get('pr_number')} at {pr_result.get('pr_url')}")
                             elif pr_result.get("status") == "error":
                                 print(f"⚠️  PR creation failed: {pr_result.get('message')}")
