@@ -172,3 +172,5 @@ class EmailLog(Base):
     
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
+# Import new memory models so they are registered with Base
+from memory_models import AgentMemoryError, AgentMemoryFix, AgentRepoContext
