@@ -21,16 +21,33 @@ MODEL_CONFIG = {
         "temperature": 0.3
     },
     "complex_analysis": {
-        "model": "anthropic/claude-3-haiku",  # ~$0.25 per 1M input tokens
+        "model": "deepseek/deepseek-chat",  # ~$0.14 per 1M input tokens (DeepSeek V3)
         "max_tokens": 1000,
         "temperature": 0.3
     },
     "code_generation": {
-        "model": "anthropic/claude-3.5-sonnet",  # ~$3.00 per 1M input tokens (only for code fixes)
+        "model": "deepseek/deepseek-chat",  # ~$0.14 per 1M input tokens (DeepSeek V3 - SOTA Coding)
         "max_tokens": 8000,
         "temperature": 0.2
     }
 }
+
+# COST OPTIMIZATION: Reduced limits for incident analysis
+# Reserve ~5K tokens for system prompt and response, leaving ~20K for input
+MAX_INCIDENT_PROMPT_TOKENS = 20000  # Reduced from 25K to 20K (~$0.06 vs $0.075 with cheaper model)
+
+# Limit logs based on token count, not just count
+MAX_TOKENS_FOR_LOGS = 10000  # Reduced from 15K to 10K tokens for logs
+MAX_TOKENS_PER_LOG = 120  # Reduced from 150 to 120 tokens per log (~420 chars)
+
+# COST OPTIMIZATION: Reduced limits to save costs while maintaining quality
+# Reserve ~10K tokens for system prompt and response, leaving ~60K for input
+# For code files, limit each file to prevent overflow
+MAX_TOKENS_FOR_FILES = 60000  # Reduced from 80K to 60K (~$0.18 vs $0.24)
+MAX_TOKENS_PER_FILE = 8000  # Reduced from 10K to 8K per file (~28K chars)
+
+# Final safety check: truncate entire prompt if it exceeds 80K tokens (reduced for cost)
+MAX_TOTAL_PROMPT_TOKENS = 80000  # Reduced from 100K to 80K (~$0.24 vs $0.30)
 
 
 def estimate_tokens(text: str) -> int:
@@ -109,12 +126,8 @@ def should_use_expensive_model(incident: Incident, logs: list[LogEntry], root_ca
     """
     try:
         # Use expensive model if:
-        # 1. Code generation is needed (has integration and repo)
-        if incident and hasattr(incident, 'integration_id') and hasattr(incident, 'repo_name'):
-            if incident.integration_id and incident.repo_name:
-                return True
-        
-        # 2. Complex error patterns (stack traces, multiple errors)
+        # Use expensive model if:
+        # 1. Complex error patterns (stack traces, multiple errors)
         has_stack_trace = False
         error_count = 0
         for log in (logs or [])[:10]:
@@ -754,10 +767,7 @@ def analyze_repository_and_create_pr(
         
         # Prepare context for AI to analyze and generate fixes
         # COST OPTIMIZATION: Reduced limits to save costs while maintaining quality
-        # Reserve ~10K tokens for system prompt and response, leaving ~80K for input
-        # For code files, limit each file to prevent overflow
-        MAX_TOKENS_FOR_FILES = 80000  # Reduced from 120K to 80K (~$0.24 vs $0.36)
-        MAX_TOKENS_PER_FILE = 10000  # Reduced from 15K to 10K per file (~35K chars)
+        # Using module-level constants for limits
         
         files_context_parts = []
         total_file_tokens = 0
@@ -844,8 +854,7 @@ Only include files that need changes. Provide the COMPLETE file content for each
         prompt_tokens = estimate_tokens(base_prompt)
         print(f"📊 Code analysis prompt: ~{prompt_tokens} tokens (files: ~{total_file_tokens} tokens)")
         
-        # Final safety check: truncate entire prompt if it exceeds 100K tokens (reduced for cost)
-        MAX_TOTAL_PROMPT_TOKENS = 100000  # Reduced from 150K to 100K (~$0.30 vs $0.45)
+        # Final safety check: truncate entire prompt if it exceeds limit
         if prompt_tokens > MAX_TOTAL_PROMPT_TOKENS:
             print(f"⚠️  Prompt exceeds limit ({prompt_tokens} tokens), truncating to {MAX_TOTAL_PROMPT_TOKENS} tokens")
             # Truncate files_context to fit
@@ -1230,12 +1239,7 @@ def analyze_incident_with_openrouter(incident: Incident, logs: list[LogEntry], d
     
     # Prepare context from incident and logs (now using trace_logs for better context)
     # COST OPTIMIZATION: Reduced limits for incident analysis
-    # Reserve ~5K tokens for system prompt and response, leaving ~25K for input
-    MAX_INCIDENT_PROMPT_TOKENS = 25000  # Reduced from 50K to 25K (~$0.075 vs $0.15 with cheaper model)
-    
-    # Limit logs based on token count, not just count
-    MAX_TOKENS_FOR_LOGS = 15000  # Reduced from 30K to 15K tokens for logs
-    MAX_TOKENS_PER_LOG = 150  # Reduced from 200 to 150 tokens per log (~525 chars)
+    # Using module-level constants
     
     logs_for_context = []
     total_log_tokens = 0
@@ -1470,6 +1474,9 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
             model_name = model_config.get("model", "unknown") if isinstance(model_config, dict) else "unknown"
             if model_name == "google/gemini-flash-1.5":
                 estimated_cost = (input_tokens * 0.075 / 1_000_000) + (output_tokens * 0.30 / 1_000_000)
+            elif "deepseek" in model_name:
+                # Pricing based on OpenRouter screenshot for DeepSeek V3
+                estimated_cost = (input_tokens * 0.30 / 1_000_000) + (output_tokens * 1.20 / 1_000_000)
             elif model_name == "anthropic/claude-3-haiku":
                 estimated_cost = (input_tokens * 0.25 / 1_000_000) + (output_tokens * 1.25 / 1_000_000)
             else:  # Claude 3.5 Sonnet or default

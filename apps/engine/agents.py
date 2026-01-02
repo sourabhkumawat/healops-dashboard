@@ -1,5 +1,4 @@
-from crewai import Agent
-from langchain_community.llms import OpenAI
+from crewai import Agent, LLM
 import os
 from memory import CodeMemory
 from prompts import CODING_AGENT_PROMPT, RCA_AGENT_PROMPT
@@ -7,7 +6,27 @@ from prompts import CODING_AGENT_PROMPT, RCA_AGENT_PROMPT
 # Placeholder for LLM configuration
 # In a real scenario, we'd use Azure OpenAI or a local model via Ollama
 # For now, we'll assume OpenAI API key is present or we mock it
-llm = OpenAI(temperature=0)
+# Using OpenRouter as requested
+api_key = os.getenv("OPENCOUNCIL_API")
+base_url = "https://openrouter.ai/api/v1"
+
+# Cost-effective models via OpenRouter
+# Gemini Flash 1.5: Low cost, high context window (perfect for logs) - ~$0.075/M
+# DeepSeek V3: SOTA Coding capability, extremely low cost - ~$0.30/M Input, ~$1.20/M Output
+# NOTE: Prefixing with "openai/" forces CrewAI to use the OpenAI protocol (compatible with OpenRouter)
+# instead of trying to load native drivers for google/gemini which require GOOGLE_API_KEY.
+
+flash_llm = LLM(
+    model="openai/google/gemini-flash-1.5",
+    base_url=base_url,
+    api_key=api_key
+)
+
+coding_llm = LLM(
+    model="openai/deepseek/deepseek-chat",
+    base_url=base_url,
+    api_key=api_key
+)
 
 # Initialize memory
 code_memory = CodeMemory()
@@ -19,7 +38,7 @@ def create_agents():
         backstory='You are an expert in parsing logs from various systems (Kubernetes, Cloud Run, Postgres). You can spot stack traces and error codes instantly.',
         verbose=True,
         allow_delegation=False,
-        llm=llm
+        llm=flash_llm # Use Flash for log processing (high context, low cost)
     )
 
     rca_analyst = Agent(
@@ -28,7 +47,7 @@ def create_agents():
         backstory=RCA_AGENT_PROMPT,
         verbose=True,
         allow_delegation=True,
-        llm=llm
+        llm=coding_llm # Use DeepSeek for RCA (better reasoning)
     )
 
     coding_agent = Agent(
@@ -37,8 +56,8 @@ def create_agents():
         backstory=CODING_AGENT_PROMPT,
         verbose=True,
         allow_delegation=False,
-        llm=llm,
-        memory=True # Enable CrewAI built-in memory if available, but we mostly rely on our custom CodeMemory usage in tasks
+        llm=coding_llm, # Use DeepSeek for Coding (SOTA coding capability)
+        memory=True
     )
 
     safety_officer = Agent(
@@ -47,7 +66,7 @@ def create_agents():
         backstory='You are responsible for system stability. You reject any action that could cause data loss or downtime without approval.',
         verbose=True,
         allow_delegation=False,
-        llm=llm
+        llm=flash_llm # Use Flash for safety checks (fast, good instruction following)
     )
 
     return log_parser, rca_analyst, coding_agent, safety_officer
