@@ -1608,6 +1608,8 @@ async def analyze_incident_async(incident_id: int):
                 "pr_url": analysis.get("pr_url"),
                 "pr_number": analysis.get("pr_number"),
                 "pr_files_changed": analysis.get("pr_files_changed", []),
+                "changes": analysis.get("changes", {}),
+                "original_contents": analysis.get("original_contents", {}),
                 "status": "pr_created"
             }
             print(f"✅ PR created for incident {incident_id}: {analysis.get('pr_url')}")
