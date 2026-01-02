@@ -12,13 +12,17 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
     Loader2,
     ArrowLeft,
     CheckCircle2,
     GitPullRequest,
     ExternalLink,
-    AlertTriangle
+    AlertTriangle,
+    FileText,
+    Activity,
+    Code
 } from 'lucide-react';
 import { Incident } from '@/components/incident-table';
 import {
@@ -230,497 +234,126 @@ export default function IncidentDetailsPage() {
 
     const { incident, logs } = data;
 
-    // TODO: In a real implementation, 'action_result' or 'root_cause' would contain the diff data.
-    // For now we mock it or extract it if available.
-    // Assuming 'action_result' might contain a 'diffs' array in the future.
-
     return (
         <div className="flex h-[calc(100vh-65px)] overflow-hidden">
              {/* Left Pane - Incident Details */}
-             <div className={`${selectedFileDiff ? 'w-1/2 border-r' : 'w-full'} flex flex-col h-full overflow-hidden`}>
-                <ScrollArea className="h-full">
-                    <div className="space-y-4 p-8 pt-6">
-            <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-4">
-                    <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => router.push('/incidents')}
-                    >
-                        <ArrowLeft className="h-4 w-4" />
-                    </Button>
-                    <div>
-                        <h2 className="text-2xl font-bold tracking-tight">
-                            {incident.title}
-                        </h2>
-                        <div className="flex items-center space-x-2 mt-1">
-                            <Badge variant="outline">
-                                {incident.service_name}
+             <div className={`${selectedFileDiff ? 'w-1/2 border-r' : 'w-full'} flex flex-col h-full overflow-hidden bg-background`}>
+                <div className="border-b p-4">
+                    <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-4">
+                            <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => router.push('/incidents')}
+                            >
+                                <ArrowLeft className="h-4 w-4" />
+                            </Button>
+                            <div>
+                                <h2 className="text-xl font-bold tracking-tight">
+                                    {incident.title}
+                                </h2>
+                                <div className="flex items-center gap-2 mt-1">
+                                    <Badge variant="outline" className="text-xs">
+                                        {incident.service_name}
+                                    </Badge>
+                                    <span className="text-xs text-muted-foreground">
+                                        {new Date(incident.created_at).toLocaleString()}
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                             <Badge
+                                variant={
+                                    incident.severity === 'CRITICAL'
+                                        ? 'destructive'
+                                        : 'outline'
+                                }
+                                className="text-xs"
+                            >
+                                {incident.severity}
                             </Badge>
-                            <span className="text-sm text-muted-foreground">
-                                First seen{' '}
-                                {new Date(incident.created_at).toLocaleString()}
-                            </span>
+                            {incident.status !== 'RESOLVED' && (
+                                <Button size="sm" onClick={handleResolve} disabled={resolving}>
+                                    {resolving && (
+                                        <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                                    )}
+                                    Resolve
+                                </Button>
+                            )}
                         </div>
                     </div>
                 </div>
-                <div className="flex items-center space-x-2">
-                    <Badge
-                        variant={
-                            incident.severity === 'CRITICAL'
-                                ? 'destructive'
-                                : 'outline'
-                        }
-                        className="text-sm px-3 py-1"
-                    >
-                        {incident.severity}
-                    </Badge>
-                    <Badge
-                        variant={
-                            incident.status === 'RESOLVED'
-                                ? 'default'
-                                : 'secondary'
-                        }
-                        className="text-sm px-3 py-1"
-                    >
-                        {incident.status}
-                    </Badge>
-                    {incident.status !== 'RESOLVED' && (
-                        <Button onClick={handleResolve} disabled={resolving}>
-                            {resolving && (
-                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            )}
-                            Mark as Resolved
-                        </Button>
-                    )}
-                </div>
-            </div>
 
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-7">
-                <div className="col-span-4 space-y-4">
-                    <Card>
-                        <CardHeader>
-                            <CardTitle>Related Logs</CardTitle>
-                            <CardDescription>
-                                Recent logs associated with this incident
-                            </CardDescription>
-                        </CardHeader>
-                        <CardContent>
-                            <ScrollArea className="h-[400px] w-full rounded-md border p-4">
-                                <div className="space-y-4">
-                                    {logs.map((log) => (
-                                        <div
-                                            key={log.id}
-                                            className="flex flex-col space-y-1 border-b pb-2 last:border-0"
-                                        >
-                                            <div className="flex items-center justify-between">
-                                                <span
-                                                    className={`text-xs font-bold ${
-                                                        log.level === 'CRITICAL'
-                                                            ? 'text-red-500'
-                                                            : log.level ===
-                                                              'ERROR'
-                                                            ? 'text-red-400'
-                                                            : 'text-zinc-400'
-                                                    }`}
-                                                >
-                                                    {log.level}
-                                                </span>
-                                                <span className="text-xs text-muted-foreground font-mono">
-                                                    {new Date(
-                                                        log.timestamp
-                                                    ).toLocaleTimeString()}
-                                                </span>
+                <div className="flex-1 overflow-hidden p-4">
+                    <Tabs defaultValue="analysis" className="h-full flex flex-col">
+                        <TabsList className="grid w-full grid-cols-3 mb-4">
+                            <TabsTrigger value="analysis" className="flex items-center gap-2">
+                                <Activity className="h-4 w-4" />
+                                AI Analysis
+                            </TabsTrigger>
+                            <TabsTrigger value="logs" className="flex items-center gap-2">
+                                <FileText className="h-4 w-4" />
+                                Logs
+                            </TabsTrigger>
+                            <TabsTrigger value="metadata" className="flex items-center gap-2">
+                                <Code className="h-4 w-4" />
+                                Raw Data
+                            </TabsTrigger>
+                        </TabsList>
+
+                        <div className="flex-1 overflow-auto">
+                            <TabsContent value="analysis" className="space-y-4 m-0 h-full">
+                                <Card className="border-none shadow-none bg-transparent">
+                                    <CardContent className="p-0 space-y-4">
+                                        {/* AI Analysis Content - Prioritized */}
+                                        {incident.root_cause ? (
+                                            <div className="rounded-lg p-4 border bg-zinc-900/50 border-zinc-800">
+                                                <h3 className="text-sm font-semibold mb-2 text-zinc-100">Root Cause</h3>
+                                                <p className="text-sm text-zinc-300 whitespace-pre-wrap">
+                                                    {incident.root_cause}
+                                                </p>
                                             </div>
-                                            <p className="text-sm font-mono text-zinc-300 break-all">
-                                                {log.message}
-                                            </p>
-                                        </div>
-                                    ))}
-                                </div>
-                            </ScrollArea>
-                        </CardContent>
-                    </Card>
-
-                    {/* Trace and Stack Information */}
-                    <Card>
-                        <CardHeader>
-                            <CardTitle>Trace & Stack Information</CardTitle>
-                            <CardDescription>
-                                Complete trace and stack details from logs
-                            </CardDescription>
-                        </CardHeader>
-                        <CardContent>
-                            <ScrollArea className="h-[500px] w-full rounded-md border p-4">
-                                <div className="space-y-4">
-                                    {/* Incident Metadata */}
-                                    {incident.metadata_json != null ? (
-                                        <div className="space-y-2">
-                                            <h4 className="text-sm font-semibold text-zinc-300">
-                                                Incident Metadata
-                                            </h4>
-                                            <div className="rounded-lg bg-zinc-900/50 p-3 border border-zinc-800">
-                                                <pre className="text-xs font-mono text-zinc-300 whitespace-pre-wrap break-all overflow-x-auto">
-                                                    {JSON.stringify(
-                                                        incident.metadata_json as Record<
-                                                            string,
-                                                            any
-                                                        >,
-                                                        null,
-                                                        2
-                                                    )}
-                                                </pre>
-                                            </div>
-                                        </div>
-                                    ) : null}
-
-                                    {/* Log Metadata with Trace and Stack */}
-                                    {logs.map((log) => {
-                                        if (!log.metadata_json) return null;
-
-                                        const metadata =
-                                            log.metadata_json as Record<
-                                                string,
-                                                any
-                                            >;
-                                        const hasTraceInfo =
-                                            metadata.traceId ||
-                                            metadata.spanId ||
-                                            metadata.parentSpanId;
-                                        const hasStack =
-                                            metadata.stack ||
-                                            metadata.stackTrace ||
-                                            metadata.error?.stack;
-
-                                        if (!hasTraceInfo && !hasStack) {
-                                            // Show all metadata if no specific trace/stack
-                                            return (
-                                                <div
-                                                    key={log.id}
-                                                    className="space-y-2"
-                                                >
-                                                    <h4 className="text-sm font-semibold text-zinc-300">
-                                                        Log #{log.id} Metadata
-                                                    </h4>
-                                                    <div className="rounded-lg bg-zinc-900/50 p-3 border border-zinc-800">
-                                                        <pre className="text-xs font-mono text-zinc-300 whitespace-pre-wrap break-all overflow-x-auto">
-                                                            {JSON.stringify(
-                                                                metadata,
-                                                                null,
-                                                                2
-                                                            )}
-                                                        </pre>
-                                                    </div>
-                                                </div>
-                                            );
-                                        }
-
-                                        return (
-                                            <div
-                                                key={log.id}
-                                                className="space-y-3 border-b pb-4 last:border-0"
-                                            >
-                                                <h4 className="text-sm font-semibold text-zinc-300">
-                                                    Log #{log.id} -{' '}
-                                                    {new Date(
-                                                        log.timestamp
-                                                    ).toLocaleString()}
-                                                </h4>
-
-                                                {/* Trace Information */}
-                                                {hasTraceInfo && (
-                                                    <div className="space-y-2">
-                                                        <h5 className="text-xs font-semibold text-blue-400">
-                                                            Trace Information
-                                                        </h5>
-                                                        <div className="rounded-lg bg-blue-900/20 p-3 border border-blue-900/50">
-                                                            <div className="space-y-1 text-xs font-mono">
-                                                                {metadata.traceId && (
-                                                                    <div className="text-blue-300">
-                                                                        <span className="text-blue-500">
-                                                                            Trace
-                                                                            ID:
-                                                                        </span>{' '}
-                                                                        {
-                                                                            metadata.traceId
-                                                                        }
-                                                                    </div>
-                                                                )}
-                                                                {metadata.spanId && (
-                                                                    <div className="text-blue-300">
-                                                                        <span className="text-blue-500">
-                                                                            Span
-                                                                            ID:
-                                                                        </span>{' '}
-                                                                        {
-                                                                            metadata.spanId
-                                                                        }
-                                                                    </div>
-                                                                )}
-                                                                {metadata.parentSpanId && (
-                                                                    <div className="text-blue-300">
-                                                                        <span className="text-blue-500">
-                                                                            Parent
-                                                                            Span
-                                                                            ID:
-                                                                        </span>{' '}
-                                                                        {
-                                                                            metadata.parentSpanId
-                                                                        }
-                                                                    </div>
-                                                                )}
-                                                                {metadata.spanName && (
-                                                                    <div className="text-blue-300">
-                                                                        <span className="text-blue-500">
-                                                                            Span
-                                                                            Name:
-                                                                        </span>{' '}
-                                                                        {
-                                                                            metadata.spanName
-                                                                        }
-                                                                    </div>
-                                                                )}
-                                                                {metadata.duration !==
-                                                                    undefined && (
-                                                                    <div className="text-blue-300">
-                                                                        <span className="text-blue-500">
-                                                                            Duration:
-                                                                        </span>{' '}
-                                                                        {
-                                                                            metadata.duration
-                                                                        }{' '}
-                                                                        ms
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                )}
-
-                                                {/* Stack Trace */}
-                                                {hasStack && (
-                                                    <div className="space-y-2">
-                                                        <h5 className="text-xs font-semibold text-red-400">
-                                                            Stack Trace
-                                                        </h5>
-                                                        <div className="rounded-lg bg-red-900/20 p-3 border border-red-900/50">
-                                                            <pre className="text-xs font-mono text-red-300 whitespace-pre-wrap break-all overflow-x-auto">
-                                                                {metadata.stack ||
-                                                                    metadata.stackTrace ||
-                                                                    metadata
-                                                                        .error
-                                                                        ?.stack ||
-                                                                    'No stack trace available'}
-                                                            </pre>
-                                                        </div>
-                                                    </div>
-                                                )}
-
-                                                {/* Additional Metadata */}
-                                                {Object.keys(metadata).length >
-                                                    0 && (
-                                                    <div className="space-y-2">
-                                                        <h5 className="text-xs font-semibold text-zinc-400">
-                                                            Additional Metadata
-                                                        </h5>
-                                                        <div className="rounded-lg bg-zinc-900/50 p-3 border border-zinc-800">
-                                                            <pre className="text-xs font-mono text-zinc-300 whitespace-pre-wrap break-all overflow-x-auto">
-                                                                {JSON.stringify(
-                                                                    metadata,
-                                                                    null,
-                                                                    2
-                                                                )}
-                                                            </pre>
-                                                        </div>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        );
-                                    })}
-
-                                    {logs.length === 0 && (
-                                        <div className="text-sm text-muted-foreground text-center py-8">
-                                            No logs available for this incident
-                                        </div>
-                                    )}
-                                </div>
-                            </ScrollArea>
-                        </CardContent>
-                    </Card>
-                </div>
-
-                <div className="col-span-3 space-y-4">
-                    <Card>
-                        <CardHeader>
-                            <CardTitle>AI Analysis</CardTitle>
-                            <CardDescription>
-                                Automated root cause analysis
-                            </CardDescription>
-                        </CardHeader>
-                        <CardContent className="space-y-4">
-                            {incident.root_cause ? (
-                                <div
-                                    className={`rounded-lg p-4 border ${
-                                        incident.root_cause.includes(
-                                            'failed'
-                                        ) ||
-                                        incident.root_cause.includes('error') ||
-                                        incident.root_cause.includes(
-                                            'not configured'
-                                        ) ||
-                                        incident.root_cause.includes(
-                                            'insufficient'
-                                        ) ||
-                                        incident.root_cause.includes('credits')
-                                            ? 'bg-red-900/20 border-red-900/50'
-                                            : 'bg-zinc-900 border-zinc-800'
-                                    }`}
-                                >
-                                    <p
-                                        className={`text-sm whitespace-pre-wrap ${
-                                            incident.root_cause.includes(
-                                                'failed'
-                                            ) ||
-                                            incident.root_cause.includes(
-                                                'error'
-                                            ) ||
-                                            incident.root_cause.includes(
-                                                'not configured'
-                                            ) ||
-                                            incident.root_cause.includes(
-                                                'insufficient'
-                                            ) ||
-                                            incident.root_cause.includes(
-                                                'credits'
-                                            )
-                                                ? 'text-red-300'
-                                                : 'text-zinc-300'
-                                        }`}
-                                    >
-                                        {incident.root_cause}
-                                    </p>
-                                    {(incident.root_cause.includes('failed') ||
-                                        incident.root_cause.includes('error') ||
-                                        incident.root_cause.includes(
-                                            'not configured'
-                                        ) ||
-                                        incident.root_cause.includes(
-                                            'insufficient'
-                                        ) ||
-                                        incident.root_cause.includes(
-                                            'credits'
-                                        )) && (
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={triggerAnalysis}
-                                            className="mt-4"
-                                            disabled={analyzing}
-                                        >
-                                            {analyzing && (
-                                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                            )}
-                                            Retry Analysis
-                                        </Button>
-                                    )}
-                                </div>
-                            ) : (
-                                <div className="flex flex-col items-center justify-center p-8 text-muted-foreground">
-                                    <Loader2 className="mr-2 h-4 w-4 animate-spin mb-2" />
-                                    <p>Analyzing incident...</p>
-                                    <Button
-                                        variant="outline"
-                                        size="sm"
-                                        onClick={triggerAnalysis}
-                                        className="mt-4"
-                                        disabled={analyzing}
-                                    >
-                                        {analyzing && (
-                                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                        )}
-                                        Retry Analysis
-                                    </Button>
-                                </div>
-                            )}
-
-                            {incident.action_taken && (
-                                <div className="rounded-lg bg-green-900/20 p-4 border border-green-900/50">
-                                    <div className="flex items-center mb-2">
-                                        <CheckCircle2 className="h-4 w-4 text-green-500 mr-2" />
-                                        <h4 className="font-semibold text-green-500">
-                                            Action Taken
-                                        </h4>
-                                    </div>
-                                    <p className="text-sm text-zinc-300">
-                                        {incident.action_taken}
-                                    </p>
-                                </div>
-                            )}
-
-                            {/* Auto-Fix / PR Section */}
-                            {incident.action_result && (
-                                <div
-                                    className={`rounded-lg p-4 border ${
-                                        incident.action_result.status ===
-                                        'pr_failed'
-                                            ? 'bg-red-900/20 border-red-900/50'
-                                            : 'bg-blue-900/20 border-blue-900/50'
-                                    }`}
-                                >
-                                    <div className="flex items-center mb-3">
-                                        {incident.action_result.status ===
-                                        'pr_failed' ? (
-                                            <AlertTriangle className="h-4 w-4 text-red-400 mr-2" />
                                         ) : (
-                                            <GitPullRequest className="h-4 w-4 text-blue-400 mr-2" />
+                                            <div className="flex flex-col items-center justify-center p-8 text-muted-foreground border rounded-lg border-dashed">
+                                                <Loader2 className="mr-2 h-4 w-4 animate-spin mb-2" />
+                                                <p>Analyzing incident...</p>
+                                            </div>
                                         )}
-                                        <h4
-                                            className={`font-semibold ${
-                                                incident.action_result
-                                                    .status === 'pr_failed'
-                                                    ? 'text-red-400'
-                                                    : 'text-blue-400'
-                                            }`}
-                                        >
-                                            {incident.action_result.status ===
-                                            'pr_failed'
-                                                ? 'Auto-Fix Failed'
-                                                : 'Auto-Fix Applied'}
-                                        </h4>
-                                    </div>
 
-                                    {incident.action_result.status ===
-                                    'pr_failed' ? (
-                                        <p className="text-sm text-red-300">
-                                            {incident.action_result.error ||
-                                                'Failed to create PR'}
-                                        </p>
-                                    ) : (
-                                        <div className="space-y-3">
-                                            <p className="text-sm text-zinc-300">
-                                                A Pull Request has been
-                                                automatically created with fixes
-                                                for this incident.
-                                            </p>
+                                        {incident.action_taken && (
+                                            <div className="rounded-lg p-4 border bg-green-900/10 border-green-900/30">
+                                                <div className="flex items-center mb-2">
+                                                    <CheckCircle2 className="h-4 w-4 text-green-500 mr-2" />
+                                                    <h3 className="text-sm font-semibold text-green-500">Action Taken</h3>
+                                                </div>
+                                                <p className="text-sm text-zinc-300">
+                                                    {incident.action_taken}
+                                                </p>
+                                            </div>
+                                        )}
 
-                                            {incident.action_result
-                                                .pr_files_changed &&
-                                                incident.action_result
-                                                    .pr_files_changed.length >
-                                                    0 && (
-                                                    <div className="space-y-1">
-                                                        <p className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
-                                                            Files Changed
-                                                        </p>
-                                                        <div className="rounded bg-black/40 p-2 space-y-1">
-                                                            {incident.action_result.pr_files_changed.map(
-                                                                (file, i) => (
+                                        {incident.action_result && (
+                                            <div className="rounded-lg p-4 border bg-blue-900/10 border-blue-900/30">
+                                                 <div className="flex items-center mb-3">
+                                                    <GitPullRequest className="h-4 w-4 text-blue-400 mr-2" />
+                                                    <h3 className="text-sm font-semibold text-blue-400">
+                                                        Code Fix
+                                                    </h3>
+                                                </div>
+
+                                                <div className="space-y-3">
+                                                     {incident.action_result.pr_files_changed && incident.action_result.pr_files_changed.length > 0 && (
+                                                        <div className="space-y-2">
+                                                            <p className="text-xs font-medium text-zinc-400 uppercase tracking-wider">
+                                                                Changed Files
+                                                            </p>
+                                                            <div className="grid gap-1">
+                                                                {incident.action_result.pr_files_changed.map((file, i) => (
                                                                     <div
                                                                         key={i}
-                                                                        className="text-xs font-mono text-zinc-300 flex items-center cursor-pointer hover:bg-white/5 p-1 rounded transition-colors"
+                                                                        className={`text-xs font-mono p-2 rounded flex items-center justify-between cursor-pointer transition-colors border ${selectedFileDiff?.file === file ? 'bg-blue-500/20 border-blue-500/50 text-blue-200' : 'bg-zinc-900/50 border-zinc-800 text-zinc-300 hover:bg-zinc-800'}`}
                                                                         onClick={() => {
-                                                                            // Mocking code content for demonstration
-                                                                            // In real app, this would come from the API
                                                                             setSelectedFileDiff({
                                                                                 file: file,
                                                                                 oldCode: `// Original content of ${file}\nfunction example() {\n  return "error";\n}`,
@@ -728,70 +361,132 @@ export default function IncidentDetailsPage() {
                                                                             });
                                                                         }}
                                                                     >
-                                                                        <span className="w-1.5 h-1.5 rounded-full bg-blue-500 mr-2"></span>
-                                                                        {file}
+                                                                        <span className="flex items-center truncate">
+                                                                             <FileText className="h-3 w-3 mr-2 opacity-70" />
+                                                                             {file}
+                                                                        </span>
+                                                                        <span className="text-[10px] bg-blue-500/20 text-blue-300 px-1.5 py-0.5 rounded">
+                                                                            Diff
+                                                                        </span>
                                                                     </div>
-                                                                )
-                                                            )}
+                                                                ))}
+                                                            </div>
                                                         </div>
+                                                    )}
+
+                                                    {incident.action_result.pr_url && (
+                                                        <Button
+                                                            size="sm"
+                                                            variant="secondary"
+                                                            className="w-full mt-2"
+                                                            onClick={() => window.open(incident.action_result?.pr_url, '_blank')}
+                                                        >
+                                                            <ExternalLink className="mr-2 h-3 w-3" />
+                                                            View Pull Request #{incident.action_result.pr_number}
+                                                        </Button>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </CardContent>
+                                </Card>
+                            </TabsContent>
+
+                            <TabsContent value="logs" className="m-0 h-full">
+                                <Card className="border-none shadow-none bg-transparent h-full">
+                                    <CardContent className="p-0 h-full">
+                                        <ScrollArea className="h-full rounded-md border bg-zinc-950">
+                                            <div className="divide-y divide-zinc-800">
+                                                {logs.map((log) => (
+                                                    <div key={log.id} className="p-3 text-sm">
+                                                        <div className="flex items-center justify-between mb-1">
+                                                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                                                                log.level === 'CRITICAL' ? 'bg-red-900/30 text-red-400' :
+                                                                log.level === 'ERROR' ? 'bg-red-900/20 text-red-300' :
+                                                                'bg-zinc-800 text-zinc-400'
+                                                            }`}>
+                                                                {log.level}
+                                                            </span>
+                                                            <span className="text-[10px] text-zinc-500 font-mono">
+                                                                {new Date(log.timestamp).toLocaleTimeString()}
+                                                            </span>
+                                                        </div>
+                                                        <p className="text-zinc-300 font-mono text-xs break-all">
+                                                            {log.message}
+                                                        </p>
+                                                    </div>
+                                                ))}
+                                                {logs.length === 0 && (
+                                                    <div className="p-8 text-center text-muted-foreground text-sm">
+                                                        No logs found.
                                                     </div>
                                                 )}
+                                            </div>
+                                        </ScrollArea>
+                                    </CardContent>
+                                </Card>
+                            </TabsContent>
 
-                                            {incident.action_result.pr_url && (
-                                                <Button
-                                                    size="sm"
-                                                    className="w-full mt-2 bg-blue-600 hover:bg-blue-700 text-white"
-                                                    onClick={() =>
-                                                        window.open(
-                                                            incident
-                                                                .action_result
-                                                                ?.pr_url,
-                                                            '_blank'
-                                                        )
-                                                    }
-                                                >
-                                                    <GitPullRequest className="mr-2 h-4 w-4" />
-                                                    Review PR #
-                                                    {
-                                                        incident.action_result
-                                                            .pr_number
-                                                    }
-                                                    <ExternalLink className="ml-2 h-3 w-3 opacity-70" />
-                                                </Button>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-                        </CardContent>
-                    </Card>
+                            <TabsContent value="metadata" className="m-0 h-full">
+                                <Card className="border-none shadow-none bg-transparent h-full">
+                                    <CardContent className="p-0 h-full space-y-4">
+                                         {incident.metadata_json !== null && (
+                                            <div className="space-y-2">
+                                                <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Incident Metadata</h4>
+                                                <div className="rounded-md bg-zinc-950 p-3 border border-zinc-800 overflow-auto max-h-[200px]">
+                                                    <pre className="text-xs font-mono text-zinc-300">
+                                                        {JSON.stringify(incident.metadata_json as object, null, 2)}
+                                                    </pre>
+                                                </div>
+                                            </div>
+                                         )}
+
+                                         <div className="space-y-2">
+                                            <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Trace Data</h4>
+                                            <div className="rounded-md bg-zinc-950 p-3 border border-zinc-800 overflow-auto max-h-[300px]">
+                                                 {logs.filter(l => l.metadata_json).length > 0 ? (
+                                                     logs.map(log => (
+                                                         <div key={log.id} className="mb-4 last:mb-0">
+                                                             <div className="text-[10px] text-zinc-500 mb-1">Log #{log.id}</div>
+                                                             <pre className="text-xs font-mono text-zinc-300 whitespace-pre-wrap">
+                                                                 {JSON.stringify(log.metadata_json, null, 2)}
+                                                             </pre>
+                                                         </div>
+                                                     ))
+                                                 ) : (
+                                                     <p className="text-xs text-muted-foreground">No trace data available.</p>
+                                                 )}
+                                            </div>
+                                         </div>
+                                    </CardContent>
+                                </Card>
+                            </TabsContent>
+                        </div>
+                    </Tabs>
                 </div>
             </div>
-        </div>
-        </ScrollArea>
-        </div>
-        {/* Right Pane - Diff Viewer */}
-        {selectedFileDiff && (
-            <div className="w-1/2 flex flex-col border-l h-full overflow-hidden bg-background">
-                <div className="flex items-center justify-between p-4 border-b">
-                    <h3 className="font-semibold">{selectedFileDiff.file}</h3>
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setSelectedFileDiff(null)}
-                    >
-                        Close
-                    </Button>
+
+            {selectedFileDiff && (
+                <div className="w-1/2 flex flex-col border-l h-full overflow-hidden bg-background">
+                    <div className="flex items-center justify-between p-4 border-b">
+                        <h3 className="font-semibold">{selectedFileDiff.file}</h3>
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setSelectedFileDiff(null)}
+                        >
+                            Close
+                        </Button>
+                    </div>
+                    <div className="flex-1 overflow-auto">
+                        <CodeDiffViewer
+                            oldCode={selectedFileDiff.oldCode}
+                            newCode={selectedFileDiff.newCode}
+                            language={selectedFileDiff.file.split('.').pop() || 'javascript'}
+                        />
+                    </div>
                 </div>
-                <div className="flex-1 overflow-auto">
-                    <CodeDiffViewer
-                        oldCode={selectedFileDiff.oldCode}
-                        newCode={selectedFileDiff.newCode}
-                        language={selectedFileDiff.file.split('.').pop() || 'javascript'}
-                    />
-                </div>
-            </div>
-        )}
+            )}
         </div>
     );
 }

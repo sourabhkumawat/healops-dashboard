@@ -17,34 +17,34 @@ const CodeDiffViewer: React.FC<CodeDiffViewerProps> = ({
   splitView = true,
 }) => {
   return (
-    <div className="h-full overflow-auto text-sm border rounded-md">
+    <div className="h-full overflow-auto text-sm border rounded-md bg-[#2d2d2d]">
       <ReactDiffViewer
         oldValue={oldCode}
         newValue={newCode}
         splitView={splitView}
         compareMethod={DiffMethod.WORDS}
+        useDarkTheme={true}
         styles={{
           variables: {
-            light: {
-              diffViewerBackground: '#f8f9fa',
-              diffViewerTitleBackground: '#fafbfc',
-              addedBackground: '#e6ffed',
-              addedColor: '#24292e',
-              removedBackground: '#ffeef0',
-              removedColor: '#24292e',
-              wordAddedBackground: '#acf2bd',
-              wordRemovedBackground: '#fdb8c0',
-            },
             dark: {
-              diffViewerBackground: '#2d2d2d',
-              diffViewerTitleBackground: '#333333',
-              addedBackground: '#044b53',
-              addedColor: 'white',
-              removedBackground: '#632b30',
-              removedColor: 'white',
-              wordAddedBackground: '#055d67',
-              wordRemovedBackground: '#7d383f',
+              diffViewerBackground: '#1e1e1e',
+              diffViewerTitleBackground: '#252526',
+              gutterBackground: '#1e1e1e',
+              gutterColor: '#858585',
+              addedBackground: '#203424',
+              addedColor: '#e2e2e2',
+              removedBackground: '#3e2021',
+              removedColor: '#e2e2e2',
+              wordAddedBackground: '#2ea043',
+              wordRemovedBackground: '#da3633',
             },
+          },
+          lineNumber: {
+            color: '#858585',
+          },
+          contentText: {
+            color: '#d4d4d4',
+            fontFamily: 'Consolas, "Courier New", monospace',
           },
         }}
         leftTitle="Original"
