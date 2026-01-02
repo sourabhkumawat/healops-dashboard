@@ -10,6 +10,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import func
 from database import engine, Base, get_db, SessionLocal
 from models import Incident, LogEntry, User, Integration, ApiKey, IntegrationStatus
+import memory_models  # Ensure memory tables are created
 from auth import verify_password, get_password_hash, create_access_token, verify_token
 from integrations import generate_api_key
 

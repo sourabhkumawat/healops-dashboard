@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional
 from models import Incident, LogEntry, Integration
 from sqlalchemy.orm import Session
 from integrations.github_integration import GithubIntegration
+from memory import CodeMemory
 
 # Cost-optimized model configuration
 # Use cheaper models for simpler tasks, expensive models only when needed
@@ -789,6 +790,21 @@ def analyze_repository_and_create_pr(
             # especially if it's a "missing file" error.
             print("⚠️  No relevant code files found. Proceeding with empty context to allow file creation.")
             files_context = "No existing code files found. The error might be due to a missing file."
+
+        # MEMORY: Retrieve context to help with coding
+        memory_context_str = ""
+        try:
+            code_memory = CodeMemory()
+            fingerprint = get_incident_fingerprint(incident, logs)
+            memory_data = code_memory.retrieve_context(fingerprint)
+            known_fixes = memory_data.get("known_fixes", [])
+
+            if known_fixes:
+                 memory_context_str = "\nPREVIOUS SUCCESSFUL FIXES FOR THIS ERROR:\n"
+                 for i, fix in enumerate(known_fixes[:2]):
+                     memory_context_str += f"Fix #{i+1} Description: {fix.get('description')}\n"
+        except Exception as e:
+            print(f"⚠️ Error retrieving memory for coding: {e}")
         
         # Build base prompt (estimate ~500 tokens)
         base_prompt = f"""You are an expert software engineer analyzing an incident and generating code fixes.
@@ -798,6 +814,8 @@ Incident Details:
 - Service: {incident.service_name}
 - Root Cause: {root_cause}
 - Recommended Action: {action_taken}
+
+{memory_context_str}
 
 Related Code Files:
 {files_context}
@@ -992,6 +1010,21 @@ Only include files that need changes. Provide the COMPLETE file content for each
                 pr_url = pr_result.get("pr_url")
                 pr_number = pr_result.get("pr_number")
                 
+                # MEMORY: Store the successful fix to learn from it
+                try:
+                    print(f"🧠 Storing fix in CodeMemory for future learning...")
+                    code_memory = CodeMemory()
+                    fingerprint = get_incident_fingerprint(incident, logs)
+                    # Store the files changed and the explanation
+                    fix_data = json.dumps({
+                        "changes": changes,
+                        "pr_url": pr_url
+                    })
+                    code_memory.store_fix(fingerprint, explanation, fix_data)
+                    print(f"✅ Fix stored in memory for fingerprint: {fingerprint}")
+                except Exception as mem_err:
+                    print(f"⚠️ Failed to store fix in memory: {mem_err}")
+
                 # Send email notification
                 try:
                     from email_service import send_pr_creation_email
@@ -1040,6 +1073,7 @@ Only include files that need changes. Provide the COMPLETE file content for each
                     "pr_url": pr_url,
                     "pr_number": pr_number,
                     "files_changed": list(changes.keys()),
+                    "changes": changes, # Return full content for frontend diff viewer
                     "explanation": explanation
                 }
             else:
@@ -1231,6 +1265,36 @@ Trace Statistics:
 
 """
     
+    # MEMORY: Retrieve context from CodeMemory
+    memory_context_str = ""
+    try:
+        code_memory = CodeMemory()
+        # Recalculate or use existing fingerprint
+        mem_fingerprint = get_incident_fingerprint(incident, logs)
+        memory_data = code_memory.retrieve_context(mem_fingerprint)
+
+        known_fixes = memory_data.get("known_fixes", [])
+        past_errors = memory_data.get("past_errors", [])
+
+        if known_fixes or past_errors:
+            print(f"🧠 Found {len(known_fixes)} known fixes and {len(past_errors)} past error contexts in memory")
+
+            memory_context_parts = []
+            if known_fixes:
+                memory_context_parts.append("KNOWN FIXES FROM PAST INCIDENTS:")
+                for i, fix in enumerate(known_fixes[:3]): # Limit to top 3
+                    memory_context_parts.append(f"Fix #{i+1}: {fix.get('description', 'No description')}")
+
+            if past_errors:
+                memory_context_parts.append("PAST ERROR CONTEXT:")
+                for i, err in enumerate(past_errors[:2]):
+                    memory_context_parts.append(f"Context #{i+1}: {err.get('context', '')[:500]}...")
+
+            memory_context_str = "\n".join(memory_context_parts)
+            memory_context_str = f"\n\nSYSTEM MEMORY (Previous Incidents):\n{memory_context_str}\n"
+    except Exception as e:
+        print(f"⚠️ Error retrieving code memory: {e}")
+
     # Build incident context
     incident_details = f"""
 Incident Details:
@@ -1243,6 +1307,7 @@ Incident Details:
 - Last Seen: {incident.last_seen_at}
 - Description: {incident.description or 'No description'}
 
+{memory_context_str}
 {trace_context}Related Logs (including full trace context):
 {log_context}
 """
