@@ -4,10 +4,7 @@ import { useEffect, useState, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
     Card,
-    CardContent,
-    CardDescription,
-    CardHeader,
-    CardTitle
+    CardContent
 } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -19,7 +16,6 @@ import {
     CheckCircle2,
     GitPullRequest,
     ExternalLink,
-    AlertTriangle,
     FileText,
     Activity,
     Code
@@ -30,7 +26,7 @@ import {
     triggerIncidentAnalysis,
     updateIncidentStatus
 } from '@/actions/incidents';
-import CodeDiffViewer from '@/components/CodeDiffViewer';
+import FileDiffCard from '@/components/FileDiffCard';
 
 interface LogEntry {
     id: number;
@@ -52,64 +48,11 @@ export default function IncidentDetailsPage() {
     const [loading, setLoading] = useState(true);
     const [resolving, setResolving] = useState(false);
     const [analyzing, setAnalyzing] = useState(false);
-    const [selectedFileDiff, setSelectedFileDiff] = useState<{
-        file: string;
-        oldCode: string;
-        newCode: string;
-    } | null>(null);
 
     const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const fetchingIncidentRef = useRef(false);
 
-    const triggerAnalysis = async () => {
-        try {
-            setAnalyzing(true);
-            await triggerIncidentAnalysis(Number(params.id));
-            // Start polling after triggering analysis
-            if (!pollIntervalRef.current) {
-                pollIntervalRef.current = setInterval(async () => {
-                    if (fetchingIncidentRef.current) return; // Prevent duplicate calls
-                    fetchingIncidentRef.current = true;
-                    try {
-                        const result = await getIncident(Number(params.id));
-                        if (result) {
-                            setData(result);
-                            if (result.incident?.root_cause) {
-                                if (pollIntervalRef.current) {
-                                    clearInterval(pollIntervalRef.current);
-                                    pollIntervalRef.current = null;
-                                }
-                                setAnalyzing(false);
-                            }
-                        }
-                    } catch (error) {
-                        console.error(
-                            'Failed to fetch incident during polling:',
-                            error
-                        );
-                    } finally {
-                        fetchingIncidentRef.current = false;
-                    }
-                }, 3000);
-            }
-        } catch (error) {
-            console.error('Failed to trigger analysis:', error);
-            setAnalyzing(false);
-        }
-    };
-
-    // Auto-select the first changed file when data loads
-    useEffect(() => {
-        if (data?.incident?.action_result?.pr_files_changed && data.incident.action_result.pr_files_changed.length > 0 && !selectedFileDiff) {
-            const firstFile = data.incident.action_result.pr_files_changed[0];
-            setSelectedFileDiff({
-                file: firstFile,
-                oldCode: `// Original content of ${firstFile}\nfunction example() {\n  return "error";\n}`,
-                newCode: `// Fixed content of ${firstFile}\nfunction example() {\n  return "success";\n}`
-            });
-        }
-    }, [data, selectedFileDiff]);
-
+    // Polling logic
     useEffect(() => {
         let pollCount = 0;
         const MAX_POLL_ATTEMPTS = 40; // 2 minutes max (40 * 3 seconds)
@@ -245,11 +188,12 @@ export default function IncidentDetailsPage() {
     }
 
     const { incident, logs } = data;
+    const hasFilesChanged = incident.action_result?.pr_files_changed && incident.action_result.pr_files_changed.length > 0;
 
     return (
         <div className="flex h-[calc(100vh-65px)] overflow-hidden">
              {/* Left Pane - Incident Details */}
-             <div className={`${selectedFileDiff ? 'w-1/2 border-r' : 'w-full'} flex flex-col h-full overflow-hidden bg-background`}>
+             <div className={`${hasFilesChanged ? 'w-1/2 border-r' : 'w-full'} flex flex-col h-full overflow-hidden bg-background`}>
                 <div className="border-b p-4">
                     <div className="flex items-center justify-between mb-4">
                         <div className="flex items-center gap-4">
@@ -355,36 +299,7 @@ export default function IncidentDetailsPage() {
                                                 </div>
 
                                                 <div className="space-y-3">
-                                                     {incident.action_result.pr_files_changed && incident.action_result.pr_files_changed.length > 0 && (
-                                                        <div className="space-y-2">
-                                                            <p className="text-xs font-medium text-zinc-400 uppercase tracking-wider">
-                                                                Changed Files
-                                                            </p>
-                                                            <div className="grid gap-1">
-                                                                {incident.action_result.pr_files_changed.map((file, i) => (
-                                                                    <div
-                                                                        key={i}
-                                                                        className={`text-xs font-mono p-2 rounded flex items-center justify-between cursor-pointer transition-colors border ${selectedFileDiff?.file === file ? 'bg-blue-500/20 border-blue-500/50 text-blue-200' : 'bg-zinc-900/50 border-zinc-800 text-zinc-300 hover:bg-zinc-800'}`}
-                                                                        onClick={() => {
-                                                                            setSelectedFileDiff({
-                                                                                file: file,
-                                                                                oldCode: `// Original content of ${file}\nfunction example() {\n  return "error";\n}`,
-                                                                                newCode: `// Fixed content of ${file}\nfunction example() {\n  return "success";\n}`
-                                                                            });
-                                                                        }}
-                                                                    >
-                                                                        <span className="flex items-center truncate">
-                                                                             <FileText className="h-3 w-3 mr-2 opacity-70" />
-                                                                             {file}
-                                                                        </span>
-                                                                        <span className="text-[10px] bg-blue-500/20 text-blue-300 px-1.5 py-0.5 rounded">
-                                                                            Diff
-                                                                        </span>
-                                                                    </div>
-                                                                ))}
-                                                            </div>
-                                                        </div>
-                                                    )}
+                                                    {/* We removed the individual file list here because it's now in the right panel */}
 
                                                     {incident.action_result.pr_url && (
                                                         <Button
@@ -478,25 +393,26 @@ export default function IncidentDetailsPage() {
                 </div>
             </div>
 
-            {selectedFileDiff && (
+            {/* Right Pane - Stacked File Diffs */}
+            {hasFilesChanged && (
                 <div className="w-1/2 flex flex-col border-l h-full overflow-hidden bg-background">
                     <div className="flex items-center justify-between p-4 border-b">
-                        <h3 className="font-semibold">{selectedFileDiff.file}</h3>
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setSelectedFileDiff(null)}
-                        >
-                            Close
-                        </Button>
+                        <div className="flex items-center gap-2">
+                            <GitPullRequest className="h-4 w-4 text-muted-foreground" />
+                            <h3 className="font-semibold">Files Changed</h3>
+                            <Badge variant="secondary" className="text-xs">
+                                {incident.action_result?.pr_files_changed?.length || 0}
+                            </Badge>
+                        </div>
                     </div>
-                    <div className="flex-1 overflow-auto">
-                        <CodeDiffViewer
-                            oldCode={selectedFileDiff.oldCode}
-                            newCode={selectedFileDiff.newCode}
-                            language={selectedFileDiff.file.split('.').pop() || 'javascript'}
-                        />
-                    </div>
+
+                    <ScrollArea className="flex-1 p-4 bg-zinc-950/30">
+                        <div className="space-y-4 pb-10">
+                            {incident.action_result?.pr_files_changed?.map((file, i) => (
+                                <FileDiffCard key={i} filename={file} />
+                            ))}
+                        </div>
+                    </ScrollArea>
                 </div>
             )}
         </div>
