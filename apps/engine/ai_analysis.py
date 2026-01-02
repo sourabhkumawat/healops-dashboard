@@ -21,12 +21,12 @@ MODEL_CONFIG = {
         "temperature": 0.3
     },
     "complex_analysis": {
-        "model": "anthropic/claude-3-haiku",  # ~$0.25 per 1M input tokens
+        "model": "deepseek/deepseek-chat",  # ~$0.14 per 1M input tokens (DeepSeek V3)
         "max_tokens": 1000,
         "temperature": 0.3
     },
     "code_generation": {
-        "model": "anthropic/claude-3.5-sonnet",  # ~$3.00 per 1M input tokens (only for code fixes)
+        "model": "deepseek/deepseek-chat",  # ~$0.14 per 1M input tokens (DeepSeek V3 - SOTA Coding)
         "max_tokens": 8000,
         "temperature": 0.2
     }
@@ -1442,6 +1442,8 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
             model_name = model_config.get("model", "unknown") if isinstance(model_config, dict) else "unknown"
             if model_name == "google/gemini-flash-1.5":
                 estimated_cost = (input_tokens * 0.075 / 1_000_000) + (output_tokens * 0.30 / 1_000_000)
+            elif "deepseek" in model_name:
+                estimated_cost = (input_tokens * 0.14 / 1_000_000) + (output_tokens * 0.28 / 1_000_000)
             elif model_name == "anthropic/claude-3-haiku":
                 estimated_cost = (input_tokens * 0.25 / 1_000_000) + (output_tokens * 1.25 / 1_000_000)
             else:  # Claude 3.5 Sonnet or default
