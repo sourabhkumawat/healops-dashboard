@@ -2,6 +2,7 @@ from crewai import Agent
 from langchain_community.llms import OpenAI
 import os
 from memory import CodeMemory
+from prompts import CODING_AGENT_PROMPT, RCA_AGENT_PROMPT
 
 # Placeholder for LLM configuration
 # In a real scenario, we'd use Azure OpenAI or a local model via Ollama
@@ -10,26 +11,6 @@ llm = OpenAI(temperature=0)
 
 # Initialize memory
 code_memory = CodeMemory()
-
-CURSO_PROMPT = """
-You are an intelligent Coding Agent, acting as an expert software engineer.
-Your directives are:
-1. Thoroughly understand the user's request and the codebase.
-2. Verify all information; do not guess.
-3. Plan your actions and file reads carefully.
-4. Explain your plan and actions clearly.
-5. Read multiple files to gather full context.
-6. Check for existing tests or create new ones before making changes.
-7. Ensure all code changes are verified and safe.
-8. Optimize for clarity and readability in your code.
-9. Follow best practices for naming, typing, and comments.
-
-You have access to a "Code Memory" which stores context from previous debugging sessions.
-Always consult the memory when encountering a new error to see if a similar issue has been solved before.
-When you fix a bug, you must update the memory with the error signature and the fix applied.
-
-Your goal is to not just patch the code, but to improve it and learn from it.
-"""
 
 def create_agents():
     log_parser = Agent(
@@ -44,7 +25,7 @@ def create_agents():
     rca_analyst = Agent(
         role='Root Cause Analyst',
         goal='Determine the underlying cause of the incident based on parsed logs and system state.',
-        backstory='You are a senior SRE with 10 years of experience. You look beyond the immediate error to find the root cause (e.g., OOM, DB lock, bad deployment).',
+        backstory=RCA_AGENT_PROMPT,
         verbose=True,
         allow_delegation=True,
         llm=llm
@@ -53,7 +34,7 @@ def create_agents():
     coding_agent = Agent(
         role='Senior Coding Agent',
         goal='Implement code fixes and improvements based on RCA and Safety analysis, utilizing code memory.',
-        backstory=CURSO_PROMPT,
+        backstory=CODING_AGENT_PROMPT,
         verbose=True,
         allow_delegation=False,
         llm=llm,
