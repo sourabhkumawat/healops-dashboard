@@ -12,7 +12,7 @@ base_url = "https://openrouter.ai/api/v1"
 
 # Cost-effective models via OpenRouter
 # Gemini Flash 1.5: Low cost, high context window (perfect for logs) - ~$0.075/M
-# DeepSeek V3: SOTA Coding capability, extremely low cost - ~$0.14/M
+# DeepSeek V3: SOTA Coding capability, extremely low cost - ~$0.30/M Input, ~$1.20/M Output
 # NOTE: Prefixing with "openai/" forces CrewAI to use the OpenAI protocol (compatible with OpenRouter)
 # instead of trying to load native drivers for google/gemini which require GOOGLE_API_KEY.
 

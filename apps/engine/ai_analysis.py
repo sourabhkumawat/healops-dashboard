@@ -1443,7 +1443,8 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
             if model_name == "google/gemini-flash-1.5":
                 estimated_cost = (input_tokens * 0.075 / 1_000_000) + (output_tokens * 0.30 / 1_000_000)
             elif "deepseek" in model_name:
-                estimated_cost = (input_tokens * 0.14 / 1_000_000) + (output_tokens * 0.28 / 1_000_000)
+                # Pricing based on OpenRouter screenshot for DeepSeek V3
+                estimated_cost = (input_tokens * 0.30 / 1_000_000) + (output_tokens * 1.20 / 1_000_000)
             elif model_name == "anthropic/claude-3-haiku":
                 estimated_cost = (input_tokens * 0.25 / 1_000_000) + (output_tokens * 1.25 / 1_000_000)
             else:  # Claude 3.5 Sonnet or default
