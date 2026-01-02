@@ -98,6 +98,18 @@ export default function IncidentDetailsPage() {
         }
     };
 
+    // Auto-select the first changed file when data loads
+    useEffect(() => {
+        if (data?.incident?.action_result?.pr_files_changed && data.incident.action_result.pr_files_changed.length > 0 && !selectedFileDiff) {
+            const firstFile = data.incident.action_result.pr_files_changed[0];
+            setSelectedFileDiff({
+                file: firstFile,
+                oldCode: `// Original content of ${firstFile}\nfunction example() {\n  return "error";\n}`,
+                newCode: `// Fixed content of ${firstFile}\nfunction example() {\n  return "success";\n}`
+            });
+        }
+    }, [data, selectedFileDiff]);
+
     useEffect(() => {
         let pollCount = 0;
         const MAX_POLL_ATTEMPTS = 40; // 2 minutes max (40 * 3 seconds)
