@@ -1,5 +1,5 @@
 from crewai import Agent
-from langchain_community.llms import OpenAI
+from langchain_community.chat_models import ChatOpenAI
 import os
 from memory import CodeMemory
 from prompts import CODING_AGENT_PROMPT, RCA_AGENT_PROMPT
@@ -7,7 +7,17 @@ from prompts import CODING_AGENT_PROMPT, RCA_AGENT_PROMPT
 # Placeholder for LLM configuration
 # In a real scenario, we'd use Azure OpenAI or a local model via Ollama
 # For now, we'll assume OpenAI API key is present or we mock it
-llm = OpenAI(temperature=0)
+# Using OpenRouter as requested
+api_key = os.getenv("OPENCOUNCIL_API")
+base_url = "https://openrouter.ai/api/v1"
+model_name = "google/gemini-flash-1.5" # Default to cheaper model
+
+llm = ChatOpenAI(
+    temperature=0,
+    openai_api_key=api_key,
+    openai_api_base=base_url,
+    model_name=model_name
+)
 
 # Initialize memory
 code_memory = CodeMemory()
