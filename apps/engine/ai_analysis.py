@@ -1071,14 +1071,33 @@ Only include files that need changes. Provide the COMPLETE file content for each
                 # Extract original content for the changed files
                 original_contents = {}
                 for file_path in changes.keys():
+                    # Try exact match first
                     if file_path in file_contents:
                         original_contents[file_path] = file_contents[file_path]
                     else:
-                        # If for some reason we don't have it in file_contents (e.g. new file created entirely by AI not in relevant_files)
-                        # Try to fetch it (will return None if it's a new file)
-                        content = github_integration.get_file_contents(repo_name, file_path, ref=default_branch)
-                        if content:
-                            original_contents[file_path] = content
+                        # Try normalized path match
+                        found_normalized = False
+                        norm_path = normalize_path(file_path)
+                        for existing_path, content in file_contents.items():
+                            if normalize_path(existing_path) == norm_path:
+                                original_contents[file_path] = content
+                                found_normalized = True
+                                break
+
+                        if not found_normalized:
+                            # If for some reason we don't have it in file_contents (e.g. new file created entirely by AI not in relevant_files)
+                            # Try to fetch it (will return None if it's a new file)
+                            try:
+                                content = github_integration.get_file_contents(repo_name, file_path, ref=default_branch)
+                                if content:
+                                    original_contents[file_path] = content
+                                else:
+                                    # Mark as empty if truly new file or not found, so UI doesn't say "not available"
+                                    # but instead treats it as empty original
+                                    original_contents[file_path] = ""
+                            except Exception as e:
+                                print(f"⚠️ Failed to fetch original content for {file_path}: {e}")
+                                original_contents[file_path] = ""
 
                 return {
                     "status": "success",

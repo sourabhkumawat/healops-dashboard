@@ -15,7 +15,12 @@ export default function FileDiffCard({ filename, newCode, oldCode }: FileDiffCar
     const [isExpanded, setIsExpanded] = useState(true);
 
     // Use provided oldCode or fallback to a placeholder
-    const originalCode = oldCode ?? `// Original content not available for comparison\n// Displaying new content for ${filename}`;
+    // If oldCode is empty string, it means it's a new file, so keep it empty
+    // If oldCode is undefined/null, it means we couldn't fetch it, so show placeholder
+    const originalCode = oldCode !== undefined && oldCode !== null
+        ? oldCode
+        : `// Original content not available for comparison\n// Displaying new content for ${filename}`;
+
     const language = filename.split('.').pop() || 'javascript';
 
     return (
