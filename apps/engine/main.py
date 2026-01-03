@@ -791,26 +791,19 @@ class OTelErrorPayload(BaseModel):
     spans: List[OTelSpan]
 
 @app.post("/otel/errors")
-async def ingest_otel_errors(payload: OTelErrorPayload, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def ingest_otel_errors(payload: OTelErrorPayload, background_tasks: BackgroundTasks, request: Request, db: Session = Depends(get_db)):
     """
     Ingest OpenTelemetry spans from HealOps SDK.
     Now receives ALL spans (success & error).
     - Broadcasts ALL spans to WebSocket (Live Logs)
     - Persists ONLY ERROR/CRITICAL spans to Database
     """
-    # Verify API key
-    from integrations import verify_api_key
-    
-    api_key_obj = db.query(ApiKey).filter(ApiKey.is_active == 1).all()
-    valid_key = None
-    
-    for key in api_key_obj:
-        if verify_api_key(payload.apiKey, key.key_hash):
-            valid_key = key
-            break
-    
-    if not valid_key:
+    # API key is already validated by APIKeyMiddleware and set in request.state
+    # Use it to update last_used timestamp
+    if not hasattr(request.state, 'api_key') or not request.state.api_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    valid_key = request.state.api_key
     
     # Update last_used timestamp
     valid_key.last_used = datetime.utcnow()
@@ -1235,129 +1228,161 @@ def github_authorize(request: Request, reconnect: Optional[str] = None, integrat
     return RedirectResponse(install_url)
 
 @app.get("/integrations/github/callback")
-def github_callback(installation_id: Optional[str] = None, setup_action: Optional[str] = None, state: Optional[str] = None, db: Session = Depends(get_db)):
+def github_callback(request: Request, installation_id: Optional[str] = None, setup_action: Optional[str] = None, state: Optional[str] = None, db: Session = Depends(get_db)):
     """Handle GitHub App installation callback.
     
     GitHub redirects here after installation with installation_id in query params.
     """
-    if not GITHUB_APP_ID:
-        raise HTTPException(status_code=500, detail="GitHub App ID not configured")
-    
-    if not installation_id:
-        raise HTTPException(status_code=400, detail="installation_id parameter is required")
-    
     try:
-        installation_id_int = int(installation_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid installation_id format")
-    
-    # Decode state parameter if provided
-    reconnect = False
-    integration_id = None
-    user_id = None
-    if state:
+        if not GITHUB_APP_ID:
+            print("ERROR: GITHUB_APP_ID not configured")
+            raise HTTPException(status_code=500, detail="GitHub App ID not configured")
+        
+        if not installation_id:
+            print("ERROR: installation_id parameter missing")
+            raise HTTPException(status_code=400, detail="installation_id parameter is required")
+        
         try:
-            import base64
-            state_data = json.loads(base64.urlsafe_b64decode(state.encode()).decode())
-            reconnect = state_data.get("reconnect", False)
-            integration_id = state_data.get("integration_id")
-            user_id = state_data.get("user_id")  # SECURITY: Extract user_id from state
-        except Exception as e:
-            # If state decoding fails, this is a security issue
-            raise HTTPException(status_code=400, detail=f"Invalid state parameter: {str(e)}")
+            installation_id_int = int(installation_id)
+        except ValueError:
+            print(f"ERROR: Invalid installation_id format: {installation_id}")
+            raise HTTPException(status_code=400, detail="Invalid installation_id format")
+        
+        # Decode state parameter if provided
+        reconnect = False
+        integration_id = None
+        user_id = None
+        if state:
+            try:
+                import base64
+                state_data = json.loads(base64.urlsafe_b64decode(state.encode()).decode())
+                reconnect = state_data.get("reconnect", False)
+                integration_id = state_data.get("integration_id")
+                user_id = state_data.get("user_id")  # SECURITY: Extract user_id from state
+                print(f"DEBUG: Decoded state - user_id={user_id}, reconnect={reconnect}, integration_id={integration_id}")
+            except Exception as e:
+                print(f"ERROR: Failed to decode state parameter: {e}")
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(status_code=400, detail=f"Invalid state parameter: {str(e)}")
+        
+        # SECURITY: user_id is required - try to get from state, or from request state (if authenticated)
+        if not user_id:
+            # Fallback: try to get user_id from request state (if user is authenticated via session)
+            try:
+                if hasattr(request.state, 'user_id') and request.state.user_id:
+                    user_id = request.state.user_id
+                    print(f"DEBUG: Got user_id from request.state: {user_id}")
+            except Exception as e:
+                print(f"DEBUG: Could not get user_id from request.state: {e}")
+                pass
+        
+        # If still no user_id, this is an invalid request
+        if not user_id:
+            print("ERROR: No user_id found in state or request")
+            error_msg = "Please initiate the GitHub installation from the application settings page."
+            return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&error={error_msg}")
+        
+        print(f"DEBUG: Getting installation info for installation_id={installation_id_int}")
+        # Get installation info to get account details
+        installation_info = get_installation_info(installation_id_int)
+        if not installation_info:
+            print(f"ERROR: Failed to retrieve installation info for installation_id={installation_id_int}")
+            raise HTTPException(status_code=400, detail="Failed to retrieve installation information from GitHub. Please check your GitHub App configuration.")
+        
+        account = installation_info.get("account", {})
+        account_login = account.get("login", "GitHub App")
+        account_type = account.get("type", "User")
+        print(f"DEBUG: Installation account: {account_login} (type: {account_type})")
     
-    # SECURITY: user_id is required - try to get from state, or from request state (if authenticated)
-    if not user_id:
-        # Fallback: try to get user_id from request state (if user is authenticated via session)
-        try:
-            if hasattr(request.state, 'user_id') and request.state.user_id:
-                user_id = request.state.user_id
-        except:
-            pass
-    
-    # If still no user_id, this is an invalid request
-    if not user_id:
-        # Redirect to frontend with error - user should start installation from the app
-        error_msg = "Please initiate the GitHub installation from the application settings page."
-        return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&error={error_msg}")
-    
-    # Get installation info to get account details
-    installation_info = get_installation_info(installation_id_int)
-    if not installation_info:
-        raise HTTPException(status_code=400, detail="Failed to retrieve installation information")
-    
-    account = installation_info.get("account", {})
-    account_login = account.get("login", "GitHub App")
-    account_type = account.get("type", "User")
-    
-    # Handle reconnection: if integration_id is provided and reconnecting, update that specific integration
-    # SECURITY: Verify the integration belongs to the user_id from state
-    if reconnect and integration_id:
+        # Handle reconnection: if integration_id is provided and reconnecting, update that specific integration
+        # SECURITY: Verify the integration belongs to the user_id from state
+        if reconnect and integration_id:
+            print(f"DEBUG: Reconnecting integration_id={integration_id}")
+            integration = db.query(Integration).filter(
+                Integration.id == integration_id,
+                Integration.user_id == user_id,  # SECURITY: Verify integration belongs to user
+                Integration.provider == "GITHUB"
+            ).first()
+            if not integration:
+                print(f"ERROR: Integration {integration_id} not found for user {user_id}")
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"Integration not found or does not belong to your account"
+                )
+            integration.installation_id = installation_id_int
+            integration.access_token = None  # Clear OAuth token if present
+            integration.status = "CONFIGURING"  # Set to CONFIGURING for repository selection
+            integration.last_verified = datetime.utcnow()
+            integration.name = f"GitHub ({account_login})"
+            # Store installation metadata in config
+            if not integration.config:
+                integration.config = {}
+            integration.config["installation_account"] = account_login
+            integration.config["installation_account_type"] = account_type
+            db.commit()
+            db.refresh(integration)
+            print(f"DEBUG: Reconnected integration {integration.id}, redirecting to setup")
+            # Redirect to setup page for repository selection (though repos are already selected during installation)
+            return RedirectResponse(f"{FRONTEND_URL}/integrations/github/setup?integration_id={integration.id}&reconnected=true")
+
+        # Check if integration already exists for this user
+        print(f"DEBUG: Checking for existing integration for user_id={user_id}")
         integration = db.query(Integration).filter(
-            Integration.id == integration_id,
-            Integration.user_id == user_id,  # SECURITY: Verify integration belongs to user
+            Integration.user_id == user_id,
             Integration.provider == "GITHUB"
         ).first()
+
         if not integration:
-            raise HTTPException(
-                status_code=404, 
-                detail=f"Integration not found or does not belong to your account"
+            print(f"DEBUG: Creating new integration for user_id={user_id}")
+            integration = Integration(
+                user_id=user_id,
+                provider="GITHUB",
+                name=f"GitHub ({account_login})",
+                status="CONFIGURING",  # Start in CONFIGURING state
+                installation_id=installation_id_int,
+                access_token=None,  # GitHub Apps don't use OAuth tokens
+                last_verified=datetime.utcnow(),
+                config={
+                    "installation_account": account_login,
+                    "installation_account_type": account_type
+                }
             )
-        integration.installation_id = installation_id_int
-        integration.access_token = None  # Clear OAuth token if present
-        integration.status = "CONFIGURING"  # Set to CONFIGURING for repository selection
-        integration.last_verified = datetime.utcnow()
-        integration.name = f"GitHub ({account_login})"
-        # Store installation metadata in config
-        if not integration.config:
-            integration.config = {}
-        integration.config["installation_account"] = account_login
-        integration.config["installation_account_type"] = account_type
-        db.commit()
-        db.refresh(integration)
-        # Redirect to setup page for repository selection (though repos are already selected during installation)
-        return RedirectResponse(f"{FRONTEND_URL}/integrations/github/setup?integration_id={integration.id}&reconnected=true")
-
-    # Check if integration already exists for this user
-    integration = db.query(Integration).filter(
-        Integration.user_id == user_id,
-        Integration.provider == "GITHUB"
-    ).first()
-
-    if not integration:
-        integration = Integration(
-            user_id=user_id,
-            provider="GITHUB",
-            name=f"GitHub ({account_login})",
-            status="CONFIGURING",  # Start in CONFIGURING state
-            installation_id=installation_id_int,
-            access_token=None,  # GitHub Apps don't use OAuth tokens
-            last_verified=datetime.utcnow(),
-            config={
-                "installation_account": account_login,
-                "installation_account_type": account_type
-            }
-        )
-        db.add(integration)
-        db.commit()
-        db.refresh(integration)
-        # Redirect to setup page for initial configuration
-        return RedirectResponse(f"{FRONTEND_URL}/integrations/github/setup?integration_id={integration.id}&new=true")
-    else:
-        # Update existing integration with new installation_id
-        integration.installation_id = installation_id_int
-        integration.access_token = None  # Clear OAuth token if present
-        integration.status = "CONFIGURING"  # Set to CONFIGURING for reconfiguration
-        integration.last_verified = datetime.utcnow()
-        integration.name = f"GitHub ({account_login})"
-        if not integration.config:
-            integration.config = {}
-        integration.config["installation_account"] = account_login
-        integration.config["installation_account_type"] = account_type
-        db.commit()
-        db.refresh(integration)
-        # Redirect to setup page
-        return RedirectResponse(f"{FRONTEND_URL}/integrations/github/setup?integration_id={integration.id}")
+            db.add(integration)
+            db.commit()
+            db.refresh(integration)
+            print(f"DEBUG: Created integration {integration.id}, redirecting to setup")
+            # Redirect to setup page for initial configuration
+            return RedirectResponse(f"{FRONTEND_URL}/integrations/github/setup?integration_id={integration.id}&new=true")
+        else:
+            print(f"DEBUG: Updating existing integration {integration.id}")
+            # Update existing integration with new installation_id
+            integration.installation_id = installation_id_int
+            integration.access_token = None  # Clear OAuth token if present
+            integration.status = "CONFIGURING"  # Set to CONFIGURING for reconfiguration
+            integration.last_verified = datetime.utcnow()
+            integration.name = f"GitHub ({account_login})"
+            if not integration.config:
+                integration.config = {}
+            integration.config["installation_account"] = account_login
+            integration.config["installation_account_type"] = account_type
+            db.commit()
+            db.refresh(integration)
+            print(f"DEBUG: Updated integration {integration.id}, redirecting to setup")
+            # Redirect to setup page
+            return RedirectResponse(f"{FRONTEND_URL}/integrations/github/setup?integration_id={integration.id}")
+    
+    except HTTPException:
+        # Re-raise HTTPExceptions as-is
+        raise
+    except Exception as e:
+        # Log unexpected errors
+        print(f"ERROR: Unexpected error in github_callback: {e}")
+        import traceback
+        traceback.print_exc()
+        # Redirect to frontend with error
+        error_msg = f"Internal server error: {str(e)}"
+        return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&error={error_msg}")
 
 
 @app.post("/integrations/github/connect")

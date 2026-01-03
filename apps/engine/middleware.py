@@ -25,8 +25,67 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS":
             return await call_next(request)
 
-        # Only enforce for /ingest/logs and /api/sourcemaps/upload
-        if request.url.path.startswith("/ingest/logs") or request.url.path.startswith("/api/sourcemaps"):
+        # Handle /otel/errors endpoint - API key is in request body
+        if request.url.path == "/otel/errors":
+            # Read request body to extract API key
+            body = await request.body()
+            if not body:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Missing request body with API key"}
+                )
+            
+            try:
+                import json
+                payload = json.loads(body)
+                api_key_from_body = payload.get("apiKey")
+            except json.JSONDecodeError:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Invalid request body. Expected JSON with 'apiKey' field"}
+                )
+            
+            if not api_key_from_body:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Missing API key in request body"}
+                )
+
+            # Hash the key to look it up
+            key_hash = hashlib.sha256(api_key_from_body.encode()).hexdigest()
+
+            db: Session = SessionLocal()
+            try:
+                api_key = db.query(ApiKey).filter(
+                    ApiKey.key_hash == key_hash,
+                    ApiKey.is_active == 1
+                ).first()
+
+                if not api_key:
+                    from fastapi.responses import JSONResponse
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Invalid or inactive API key"}
+                    )
+
+                # Attach API key and user_id to request state
+                request.state.api_key = api_key
+                request.state.user_id = api_key.user_id
+
+            finally:
+                db.close()
+            
+            # Restore body for endpoint handler
+            # FastAPI needs the body to be available for the endpoint handler
+            async def receive():
+                return {"type": "http.request", "body": body}
+            request._receive = receive
+
+        # Handle /ingest/logs and /api/sourcemaps - API key is in headers
+        elif request.url.path.startswith("/ingest/logs") or request.url.path.startswith("/api/sourcemaps"):
             # Support both X-HealOps-Key header and Authorization Bearer token
             api_key_header = request.headers.get("X-HealOps-Key")
             if not api_key_header:
@@ -98,6 +157,13 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
 
         # Allow public endpoints without authentication
         if request.url.path in self.PUBLIC_ENDPOINTS:
+            return await call_next(request)
+
+        # Skip /otel/errors - it's handled by APIKeyMiddleware (API key in body)
+        # Skip /ingest/logs and /api/sourcemaps - they're handled by APIKeyMiddleware (API key in headers)
+        if (request.url.path == "/otel/errors" or 
+            request.url.path.startswith("/ingest/logs") or 
+            request.url.path.startswith("/api/sourcemaps")):
             return await call_next(request)
 
         # Check if user_id was already set by APIKeyMiddleware
