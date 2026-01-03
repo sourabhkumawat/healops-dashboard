@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import func
 from database import engine, Base, get_db, SessionLocal
-from models import Incident, LogEntry, User, Integration, ApiKey, IntegrationStatus
+from models import Incident, LogEntry, User, Integration, ApiKey, IntegrationStatus, SourceMap
 import memory_models  # Ensure memory tables are created
 from auth import verify_password, get_password_hash, create_access_token, verify_token
 from integrations import generate_api_key
@@ -994,7 +994,91 @@ def list_logs(limit: int = 50, user_id: Optional[int] = None, request: Request =
     }
 
 
+# ============================================================================
+# Source Maps Upload
+# ============================================================================
 
+class SourceMapFile(BaseModel):
+    file_path: str
+    source_map: str  # Base64 encoded source map
+
+class SourceMapUploadRequest(BaseModel):
+    service_name: str
+    release: str
+    environment: str = "production"
+    files: List[SourceMapFile]
+
+@app.post("/api/sourcemaps/upload")
+async def upload_sourcemaps(
+    request: SourceMapUploadRequest,
+    http_request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Upload source maps for a service/release/environment combination.
+    Requires API key authentication via X-HealOps-Key header.
+    """
+    try:
+        # API Key is already validated by middleware
+        api_key = http_request.state.api_key
+        user_id = api_key.user_id
+        
+        # Decode base64 source maps and store them
+        uploaded_count = 0
+        for file_data in request.files:
+            # Decode base64 source map
+            import base64
+            try:
+                source_map_content = base64.b64decode(file_data.source_map).decode('utf-8')
+                # Validate it's valid JSON
+                import json
+                json.loads(source_map_content)
+            except Exception as e:
+                # Skip invalid source maps but continue with others
+                print(f"Warning: Invalid source map for {file_data.file_path}: {e}")
+                continue
+            
+            # Check if source map already exists for this combination
+            existing = db.query(SourceMap).filter(
+                SourceMap.user_id == user_id,
+                SourceMap.service_name == request.service_name,
+                SourceMap.release == request.release,
+                SourceMap.environment == request.environment,
+                SourceMap.file_path == file_data.file_path
+            ).first()
+            
+            if existing:
+                # Update existing source map
+                existing.source_map = source_map_content
+            else:
+                # Create new source map
+                source_map = SourceMap(
+                    user_id=user_id,
+                    service_name=request.service_name,
+                    release=request.release,
+                    environment=request.environment,
+                    file_path=file_data.file_path,
+                    source_map=source_map_content
+                )
+                db.add(source_map)
+            
+            uploaded_count += 1
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "files_uploaded": uploaded_count,
+            "release_id": request.release,
+            "message": f"Successfully uploaded {uploaded_count} source maps"
+        }
+        
+    except Exception as e:
+        db.rollback()
+        print(f"Error uploading source maps: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 # ============================================================================

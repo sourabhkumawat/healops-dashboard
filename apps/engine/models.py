@@ -172,5 +172,22 @@ class EmailLog(Base):
     
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
+class SourceMap(Base):
+    __tablename__ = "sourcemaps"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    service_name = Column(String, index=True, nullable=False)
+    release = Column(String, index=True, nullable=False)
+    environment = Column(String, index=True, default="production")
+    file_path = Column(String, index=True, nullable=False)
+    source_map = Column(Text, nullable=False)  # Base64 encoded or raw JSON
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    
+    # Composite index for lookups
+    __table_args__ = (
+        {'schema': None},
+    )
+
 # Import new memory models so they are registered with Base
 from memory_models import AgentMemoryError, AgentMemoryFix, AgentRepoContext

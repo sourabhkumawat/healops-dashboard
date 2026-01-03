@@ -11,8 +11,8 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS":
             return await call_next(request)
         
-        # Only enforce for /ingest/logs
-        if request.url.path.startswith("/ingest/logs"):
+        # Only enforce for /ingest/logs and /api/sourcemaps/upload
+        if request.url.path.startswith("/ingest/logs") or request.url.path.startswith("/api/sourcemaps"):
             # Support both X-HealOps-Key header and Authorization Bearer token
             api_key_header = request.headers.get("X-HealOps-Key")
             if not api_key_header:
