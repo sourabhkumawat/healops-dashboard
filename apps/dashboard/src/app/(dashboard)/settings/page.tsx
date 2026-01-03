@@ -36,7 +36,9 @@ import {
     removeServiceMapping,
     getServices,
     getRepositories,
-    listIntegrations
+    listIntegrations,
+    updateIntegration,
+    getIntegrationDetails
 } from '@/actions/integrations';
 import {
     Select,
@@ -99,6 +101,12 @@ export default function SettingsPage() {
     const [loadingRepos, setLoadingRepos] = useState<Record<number, boolean>>(
         {}
     );
+    const [editDefaultRepo, setEditDefaultRepo] = useState<
+        Record<number, string>
+    >({});
+    const [updatingDefaultRepo, setUpdatingDefaultRepo] = useState<
+        number | null
+    >(null);
 
     // User profile state
     const [user, setUser] = useState<CurrentUser | null>(null);
@@ -186,7 +194,7 @@ export default function SettingsPage() {
         // Check for success param first
         const params = new URLSearchParams(window.location.search);
         const githubConnected = params.get('github_connected') === 'true';
-        
+
         if (githubConnected) {
             // Clear param
             window.history.replaceState({}, '', window.location.pathname);
@@ -382,6 +390,30 @@ export default function SettingsPage() {
         setMappingLoading(null);
     };
 
+    const handleUpdateDefaultRepo = async (integrationId: number) => {
+        const newDefaultRepo = editDefaultRepo[integrationId];
+        if (!newDefaultRepo) return;
+
+        setUpdatingDefaultRepo(integrationId);
+        try {
+            const result = await updateIntegration(integrationId, {
+                default_repo: newDefaultRepo
+            });
+            if (!result.error) {
+                await fetchIntegrationConfig(integrationId);
+                setEditDefaultRepo((prev) => {
+                    const updated = { ...prev };
+                    delete updated[integrationId];
+                    return updated;
+                });
+            }
+        } catch (error) {
+            console.error('Error updating default repository:', error);
+        } finally {
+            setUpdatingDefaultRepo(null);
+        }
+    };
+
     const getStatusBadge = (status: string) => {
         const statusConfig = {
             ACTIVE: { color: 'bg-green-600', label: 'Active' },
@@ -456,7 +488,8 @@ export default function SettingsPage() {
                                     {profileMessage && (
                                         <Alert
                                             className={
-                                                profileMessage.type === 'success'
+                                                profileMessage.type ===
+                                                'success'
                                                     ? 'bg-green-900/20 border-green-700'
                                                     : 'bg-red-900/20 border-red-700'
                                             }
@@ -819,7 +852,190 @@ export default function SettingsPage() {
                                             </div>
 
                                             {isExpanded && isGitHub && (
-                                                <div className="mt-6 pt-6 border-t border-zinc-800 space-y-4">
+                                                <div className="mt-6 pt-6 border-t border-zinc-800 space-y-6">
+                                                    {/* Default Repository Section */}
+                                                    <div>
+                                                        <h4 className="text-sm font-semibold text-zinc-100 mb-3">
+                                                            Default Repository
+                                                        </h4>
+                                                        <p className="text-xs text-zinc-400 mb-4">
+                                                            The default
+                                                            repository used for
+                                                            creating pull
+                                                            requests from
+                                                            incidents
+                                                        </p>
+                                                        {editDefaultRepo[
+                                                            integration.id
+                                                        ] !== undefined ? (
+                                                            <div className="flex gap-2">
+                                                                {loadingRepos[
+                                                                    integration
+                                                                        .id
+                                                                ] ? (
+                                                                    <div className="flex-1 flex items-center justify-center p-2 bg-zinc-800 border border-zinc-700 rounded-md">
+                                                                        <Loader2 className="h-4 w-4 animate-spin text-zinc-400" />
+                                                                        <span className="ml-2 text-sm text-zinc-400">
+                                                                            Loading
+                                                                            repos...
+                                                                        </span>
+                                                                    </div>
+                                                                ) : (
+                                                                    <div className="flex-1">
+                                                                        <Select
+                                                                            value={
+                                                                                editDefaultRepo[
+                                                                                    integration
+                                                                                        .id
+                                                                                ]
+                                                                            }
+                                                                            onValueChange={(
+                                                                                value
+                                                                            ) => {
+                                                                                setEditDefaultRepo(
+                                                                                    (
+                                                                                        prev
+                                                                                    ) => ({
+                                                                                        ...prev,
+                                                                                        [integration.id]:
+                                                                                            value
+                                                                                    })
+                                                                                );
+                                                                            }}
+                                                                            disabled={
+                                                                                updatingDefaultRepo ===
+                                                                                integration.id
+                                                                            }
+                                                                        >
+                                                                            <SelectTrigger className="bg-zinc-800 border-zinc-700 text-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed">
+                                                                                <SelectValue placeholder="Select repository" />
+                                                                            </SelectTrigger>
+                                                                            <SelectContent className="bg-zinc-800 border-zinc-700">
+                                                                                {availableRepos[
+                                                                                    integration
+                                                                                        .id
+                                                                                ]
+                                                                                    ?.length >
+                                                                                0 ? (
+                                                                                    availableRepos[
+                                                                                        integration
+                                                                                            .id
+                                                                                    ].map(
+                                                                                        (
+                                                                                            repo
+                                                                                        ) => (
+                                                                                            <SelectItem
+                                                                                                key={
+                                                                                                    repo.full_name
+                                                                                                }
+                                                                                                value={
+                                                                                                    repo.full_name
+                                                                                                }
+                                                                                                className="text-zinc-100 focus:bg-zinc-700"
+                                                                                            >
+                                                                                                {
+                                                                                                    repo.full_name
+                                                                                                }
+                                                                                            </SelectItem>
+                                                                                        )
+                                                                                    )
+                                                                                ) : (
+                                                                                    <SelectItem
+                                                                                        value="no-repos"
+                                                                                        disabled
+                                                                                    >
+                                                                                        No
+                                                                                        repositories
+                                                                                        found
+                                                                                    </SelectItem>
+                                                                                )}
+                                                                            </SelectContent>
+                                                                        </Select>
+                                                                    </div>
+                                                                )}
+                                                                <Button
+                                                                    onClick={() =>
+                                                                        handleUpdateDefaultRepo(
+                                                                            integration.id
+                                                                        )
+                                                                    }
+                                                                    disabled={
+                                                                        updatingDefaultRepo ===
+                                                                            integration.id ||
+                                                                        !editDefaultRepo[
+                                                                            integration
+                                                                                .id
+                                                                        ]
+                                                                    }
+                                                                    className="bg-green-600 hover:bg-green-700"
+                                                                >
+                                                                    {updatingDefaultRepo ===
+                                                                    integration.id ? (
+                                                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                                                    ) : (
+                                                                        'Save'
+                                                                    )}
+                                                                </Button>
+                                                                <Button
+                                                                    variant="outline"
+                                                                    onClick={() => {
+                                                                        setEditDefaultRepo(
+                                                                            (
+                                                                                prev
+                                                                            ) => {
+                                                                                const updated =
+                                                                                    {
+                                                                                        ...prev
+                                                                                    };
+                                                                                delete updated[
+                                                                                    integration
+                                                                                        .id
+                                                                                ];
+                                                                                return updated;
+                                                                            }
+                                                                        );
+                                                                    }}
+                                                                    disabled={
+                                                                        updatingDefaultRepo ===
+                                                                        integration.id
+                                                                    }
+                                                                    className="border-zinc-700"
+                                                                >
+                                                                    Cancel
+                                                                </Button>
+                                                            </div>
+                                                        ) : (
+                                                            <div className="flex items-center justify-between p-3 bg-zinc-800 rounded-lg">
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="text-sm text-zinc-300 font-mono">
+                                                                        {config?.default_repo ||
+                                                                            'Not set'}
+                                                                    </span>
+                                                                </div>
+                                                                <Button
+                                                                    size="sm"
+                                                                    variant="outline"
+                                                                    onClick={() => {
+                                                                        setEditDefaultRepo(
+                                                                            (
+                                                                                prev
+                                                                            ) => ({
+                                                                                ...prev,
+                                                                                [integration.id]:
+                                                                                    config?.default_repo ||
+                                                                                    ''
+                                                                            })
+                                                                        );
+                                                                    }}
+                                                                    className="border-zinc-700 text-zinc-300 hover:bg-zinc-700"
+                                                                >
+                                                                    Edit
+                                                                </Button>
+                                                            </div>
+                                                        )}
+                                                    </div>
+
+                                                    {/* Service Mappings Section */}
                                                     <div>
                                                         <h4 className="text-sm font-semibold text-zinc-100 mb-3">
                                                             Service to

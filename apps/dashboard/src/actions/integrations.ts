@@ -232,3 +232,100 @@ export async function getRepositories(integrationId: number) {
         return { repositories: [] };
     }
 }
+
+export async function completeIntegrationSetup(
+    integrationId: number,
+    setupData: { default_repo: string; service_mappings?: Record<string, string> }
+) {
+    try {
+        const apiUrl = `${API_BASE}/integrations/${integrationId}/setup`;
+        console.log('Completing integration setup:', apiUrl);
+        const headers = await getAuthHeaders();
+        const response = await fetchWithAuth(apiUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(setupData)
+        });
+        console.log('Setup response status:', response.status);
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error(
+                'Failed to complete setup:',
+                response.status,
+                errorText
+            );
+            return { error: errorText || 'Failed to complete setup' };
+        }
+        const data = await response.json();
+        console.log('Setup completed successfully:', data);
+        return data;
+    } catch (error) {
+        console.error('Error completing setup:', error);
+        return { error: 'Failed to complete integration setup' };
+    }
+}
+
+export async function updateIntegration(
+    integrationId: number,
+    updateData: {
+        default_repo?: string;
+        service_mappings?: Record<string, string>;
+        name?: string;
+    }
+) {
+    try {
+        const apiUrl = `${API_BASE}/integrations/${integrationId}`;
+        console.log('Updating integration:', apiUrl);
+        const headers = await getAuthHeaders();
+        const response = await fetchWithAuth(apiUrl, {
+            method: 'PUT',
+            headers,
+            body: JSON.stringify(updateData)
+        });
+        console.log('Update response status:', response.status);
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error(
+                'Failed to update integration:',
+                response.status,
+                errorText
+            );
+            return { error: errorText || 'Failed to update integration' };
+        }
+        const data = await response.json();
+        console.log('Integration updated successfully:', data);
+        return data;
+    } catch (error) {
+        console.error('Error updating integration:', error);
+        return { error: 'Failed to update integration' };
+    }
+}
+
+export async function getIntegrationDetails(integrationId: number) {
+    try {
+        const apiUrl = `${API_BASE}/integrations/${integrationId}`;
+        console.log('Fetching integration details from:', apiUrl);
+        const headers = await getAuthHeaders();
+        const response = await fetchWithAuth(apiUrl, {
+            method: 'GET',
+            headers,
+            cache: 'no-store'
+        });
+        console.log('Integration details response status:', response.status);
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error(
+                'Failed to fetch integration details:',
+                response.status,
+                errorText
+            );
+            return { error: errorText || 'Failed to fetch integration details' };
+        }
+        const data = await response.json();
+        console.log('Integration details fetched:', data);
+        return data;
+    } catch (error) {
+        console.error('Error fetching integration details:', error);
+        return { error: 'Failed to fetch integration details' };
+    }
+}

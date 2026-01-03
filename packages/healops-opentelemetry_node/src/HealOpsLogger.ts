@@ -253,6 +253,9 @@ export class HealOpsLogger {
      * Extract caller information from stack trace
      * This works in browsers (Chrome, Firefox, Safari, Edge) and Node.js
      * Also extracts function name for OpenTelemetry semantic conventions
+     *
+     * This method intelligently skips SDK internal frames and known interceptors
+     * (like Sentry) to find the actual caller code.
      */
     private getCallerInfo(): {
         filePath?: string;
@@ -266,9 +269,66 @@ export class HealOpsLogger {
             if (!stack) return {};
 
             const stackLines = stack.split('\n');
-            // Skip: "Error", "getCallerInfo", "sendLog", and the public method (info/warn/error/critical)
-            // Line 4 is the actual caller
-            const callerLine = stackLines[4] || stackLines[3];
+
+            // Patterns to identify SDK/internal frames that should be skipped
+            const skipPatterns = [
+                /HealOpsLogger/,
+                /healops-opentelemetry/,
+                /getCallerInfo/,
+                /sendLog/,
+                /\.error\(/,
+                /\.warn\(/,
+                /\.info\(/,
+                /\.critical\(/,
+                /ConsoleInterceptor/,
+                /NodeConsoleInterceptor/,
+                /initHealOpsLogger/,
+                /@sentry/,
+                /sentry/,
+                /instrument\.console/,
+                /Error\s*$/ // Just "Error" line
+            ];
+
+            // Find the first stack line that's not from our SDK or known interceptors
+            let callerLine: string | undefined = undefined;
+
+            for (let i = 0; i < stackLines.length; i++) {
+                const line = stackLines[i];
+                if (!line || line.trim().length === 0) continue;
+
+                // Skip error message lines
+                if (
+                    line.trim().startsWith('Error:') ||
+                    line.trim().startsWith('TypeError:') ||
+                    line.trim().startsWith('ReferenceError:') ||
+                    line.trim().startsWith('SyntaxError:')
+                ) {
+                    continue;
+                }
+
+                // Check if this line should be skipped
+                const shouldSkip = skipPatterns.some((pattern) =>
+                    pattern.test(line)
+                );
+                if (shouldSkip) {
+                    continue;
+                }
+
+                // Found a potential caller line - check if it has file path info
+                if (
+                    line.includes(':') &&
+                    (line.match(/:\d+:\d+/) || line.match(/:\d+\)/))
+                ) {
+                    callerLine = line;
+                    break;
+                }
+            }
+
+            // Fallback: if we didn't find a caller, try the old approach with fixed indices
+            if (!callerLine) {
+                callerLine = stackLines[4] || stackLines[3] || stackLines[2];
+            }
+
             if (!callerLine) return { fullStack: stack };
 
             // Chrome/Edge format: "at functionName (file:line:column)" or "at file:line:column"
@@ -276,25 +336,39 @@ export class HealOpsLogger {
                 /at\s+([^(]+)\s+\(([^)]+):(\d+):(\d+)\)/
             );
             if (chromeMatchWithFunction) {
-                return {
-                    functionName: chromeMatchWithFunction[1].trim(),
-                    filePath: chromeMatchWithFunction[2].trim(),
-                    line: parseInt(chromeMatchWithFunction[3]),
-                    column: parseInt(chromeMatchWithFunction[4]),
-                    fullStack: stack
-                };
+                const filePath = chromeMatchWithFunction[2].trim();
+                const lineNum = parseInt(chromeMatchWithFunction[3], 10);
+                const colNum = parseInt(chromeMatchWithFunction[4], 10);
+
+                // Validate parsed values
+                if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
+                    return {
+                        functionName: chromeMatchWithFunction[1].trim(),
+                        filePath,
+                        line: lineNum,
+                        column: colNum,
+                        fullStack: stack
+                    };
+                }
             }
 
             const chromeMatch =
                 callerLine.match(/\(([^)]+):(\d+):(\d+)\)/) ||
                 callerLine.match(/at\s+([^:]+):(\d+):(\d+)/);
             if (chromeMatch) {
-                return {
-                    filePath: chromeMatch[1].trim(),
-                    line: parseInt(chromeMatch[2]),
-                    column: parseInt(chromeMatch[3]),
-                    fullStack: stack
-                };
+                const filePath = chromeMatch[1].trim();
+                const lineNum = parseInt(chromeMatch[2], 10);
+                const colNum = parseInt(chromeMatch[3], 10);
+
+                // Validate parsed values
+                if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
+                    return {
+                        filePath,
+                        line: lineNum,
+                        column: colNum,
+                        fullStack: stack
+                    };
+                }
             }
 
             // Firefox format: "functionName@file:line:column"
@@ -302,13 +376,20 @@ export class HealOpsLogger {
                 /([^@]+)@([^:]+):(\d+):(\d+)/
             );
             if (firefoxMatch) {
-                return {
-                    functionName: firefoxMatch[1].trim(),
-                    filePath: firefoxMatch[2].trim(),
-                    line: parseInt(firefoxMatch[3]),
-                    column: parseInt(firefoxMatch[4]),
-                    fullStack: stack
-                };
+                const filePath = firefoxMatch[2].trim();
+                const lineNum = parseInt(firefoxMatch[3], 10);
+                const colNum = parseInt(firefoxMatch[4], 10);
+
+                // Validate parsed values
+                if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
+                    return {
+                        functionName: firefoxMatch[1].trim(),
+                        filePath,
+                        line: lineNum,
+                        column: colNum,
+                        fullStack: stack
+                    };
+                }
             }
 
             // Node.js format: "at functionName (file:line:column)" or "at file:line:column"
@@ -316,30 +397,54 @@ export class HealOpsLogger {
                 /at\s+([^(]+)\s+\(([^:)]+):(\d+):(\d+)\)/
             );
             if (nodeMatchWithFunction) {
-                return {
-                    functionName: nodeMatchWithFunction[1].trim(),
-                    filePath: nodeMatchWithFunction[2].trim(),
-                    line: parseInt(nodeMatchWithFunction[3]),
-                    column: parseInt(nodeMatchWithFunction[4]),
-                    fullStack: stack
-                };
+                const filePath = nodeMatchWithFunction[2].trim();
+                const lineNum = parseInt(nodeMatchWithFunction[3], 10);
+                const colNum = parseInt(nodeMatchWithFunction[4], 10);
+
+                // Validate parsed values
+                if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
+                    return {
+                        functionName: nodeMatchWithFunction[1].trim(),
+                        filePath,
+                        line: lineNum,
+                        column: colNum,
+                        fullStack: stack
+                    };
+                }
             }
 
             const nodeMatch = callerLine.match(
                 /at\s+(?:[^(]+)?\(?([^:)]+):(\d+):(\d+)\)?/
             );
             if (nodeMatch) {
-                return {
-                    filePath: nodeMatch[1].trim(),
-                    line: parseInt(nodeMatch[2]),
-                    column: parseInt(nodeMatch[3]),
-                    fullStack: stack
-                };
+                const filePath = nodeMatch[1].trim();
+                const lineNum = parseInt(nodeMatch[2], 10);
+                const colNum = parseInt(nodeMatch[3], 10);
+
+                // Validate parsed values
+                if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
+                    return {
+                        filePath,
+                        line: lineNum,
+                        column: colNum,
+                        fullStack: stack
+                    };
+                }
             }
 
             return { fullStack: stack };
         } catch (e) {
             // Silent fail - don't break logging if stack parsing fails
+            // Log to original console if available to avoid recursion
+            if (typeof process !== 'undefined' && process.env.HEALOPS_DEBUG) {
+                try {
+                    const originalConsole =
+                        (console as any)._originalConsole || console;
+                    originalConsole.error('HealOps getCallerInfo error:', e);
+                } catch {
+                    // Ignore errors in error handling
+                }
+            }
             return {};
         }
     }

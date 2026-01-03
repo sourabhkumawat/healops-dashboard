@@ -1335,41 +1335,44 @@ def github_callback(code: str, state: Optional[str] = None, db: Session = Depend
         ).first()
         if integration:
             integration.access_token = encrypted_token
-            integration.status = "ACTIVE"
+            integration.status = "CONFIGURING"  # Set to CONFIGURING, not ACTIVE
             integration.last_verified = datetime.utcnow()
             integration.name = f"GitHub ({user_info['username']})"
             db.commit()
-            return RedirectResponse(f"{FRONTEND_URL}/settings?github_connected=true&reconnected=true")
-    
+            db.refresh(integration)
+            # Redirect to setup page for repository selection
+            return RedirectResponse(f"{FRONTEND_URL}/integrations/github/setup?integration_id={integration.id}&reconnected=true")
+
     # Check if integration already exists for this user
     integration = db.query(Integration).filter(
         Integration.user_id == user_id,
         Integration.provider == "GITHUB"
     ).first()
-    
+
     if not integration:
         integration = Integration(
             user_id=user_id,
             provider="GITHUB",
             name=f"GitHub ({user_info['username']})",
-            status="ACTIVE",
+            status="CONFIGURING",  # Start in CONFIGURING state
             access_token=encrypted_token,
             last_verified=datetime.utcnow()
         )
         db.add(integration)
+        db.commit()
+        db.refresh(integration)
+        # Redirect to setup page for initial configuration
+        return RedirectResponse(f"{FRONTEND_URL}/integrations/github/setup?integration_id={integration.id}&new=true")
     else:
         # Update existing integration with new token
         integration.access_token = encrypted_token
-        integration.status = "ACTIVE"
+        integration.status = "CONFIGURING"  # Set to CONFIGURING for reconfiguration
         integration.last_verified = datetime.utcnow()
         integration.name = f"GitHub ({user_info['username']})"
-        
-    db.commit()
-    
-    # Backfill integration_id to existing incidents for this user
-    backfill_integration_to_incidents(db, integration.id, user_id, integration.config)
-    
-    return RedirectResponse(f"{FRONTEND_URL}/settings?github_connected=true")
+        db.commit()
+        db.refresh(integration)
+        # Redirect to setup page
+        return RedirectResponse(f"{FRONTEND_URL}/integrations/github/setup?integration_id={integration.id}")
 
 
 @app.post("/integrations/github/connect")
@@ -1709,6 +1712,193 @@ def list_repositories(integration_id: int, request: Request, db: Session = Depen
             "repositories": [],
             "error": str(e)
         }
+
+@app.put("/integrations/{integration_id}")
+def update_integration(
+    integration_id: int,
+    update_data: dict,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Update integration configuration (default repo, service mappings, etc.).
+    This endpoint allows editing the integration after initial connection.
+    """
+    user_id = get_user_id_from_request(request, db=db)
+
+    integration = db.query(Integration).filter(
+        Integration.id == integration_id,
+        Integration.user_id == user_id
+    ).first()
+
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+
+    # Update allowed fields
+    if "name" in update_data:
+        integration.name = update_data["name"]
+
+    if "default_repo" in update_data or "repository" in update_data:
+        # Initialize config if needed
+        if not integration.config:
+            integration.config = {}
+
+        # Set default repository
+        default_repo = update_data.get("default_repo") or update_data.get("repository")
+        integration.config["repo_name"] = default_repo
+        integration.project_id = default_repo  # Also set project_id for backward compatibility
+
+    if "service_mappings" in update_data:
+        # Initialize config if needed
+        if not integration.config:
+            integration.config = {}
+
+        integration.config["service_mappings"] = update_data["service_mappings"]
+
+    # Update status if provided
+    if "status" in update_data:
+        integration.status = update_data["status"]
+
+    integration.updated_at = datetime.utcnow()
+
+    # Flag config as modified for SQLAlchemy
+    if integration.config:
+        flag_modified(integration, "config")
+
+    db.commit()
+    db.refresh(integration)
+
+    # Backfill integration to incidents if repo was set
+    if integration.config and integration.config.get("repo_name"):
+        backfill_integration_to_incidents(db, integration.id, user_id, integration.config)
+
+    return {
+        "status": "success",
+        "message": "Integration updated successfully",
+        "integration": {
+            "id": integration.id,
+            "provider": integration.provider,
+            "name": integration.name,
+            "status": integration.status,
+            "default_repo": integration.config.get("repo_name") if integration.config else None,
+            "service_mappings": integration.config.get("service_mappings", {}) if integration.config else {}
+        }
+    }
+
+@app.post("/integrations/{integration_id}/setup")
+def complete_integration_setup(
+    integration_id: int,
+    setup_data: dict,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Complete the initial setup of a GitHub integration.
+    Called after OAuth connection to set default repository and optionally service mappings.
+
+    Expected setup_data:
+    {
+        "default_repo": "owner/repo-name",
+        "service_mappings": {
+            "service1": "owner/repo1",
+            "service2": "owner/repo2"
+        }
+    }
+    """
+    user_id = get_user_id_from_request(request, db=db)
+
+    integration = db.query(Integration).filter(
+        Integration.id == integration_id,
+        Integration.user_id == user_id
+    ).first()
+
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+
+    if integration.provider != "GITHUB":
+        raise HTTPException(
+            status_code=400,
+            detail="Setup is only supported for GitHub integrations"
+        )
+
+    # Validate that we have at least a default repo
+    default_repo = setup_data.get("default_repo") or setup_data.get("repository")
+    if not default_repo:
+        raise HTTPException(
+            status_code=400,
+            detail="default_repo is required to complete setup"
+        )
+
+    # Initialize config if needed
+    if not integration.config:
+        integration.config = {}
+
+    # Set default repository
+    integration.config["repo_name"] = default_repo
+    integration.project_id = default_repo
+
+    # Set service mappings if provided
+    if "service_mappings" in setup_data:
+        integration.config["service_mappings"] = setup_data["service_mappings"]
+    elif "service_mappings" not in integration.config:
+        integration.config["service_mappings"] = {}
+
+    # Mark integration as active (setup complete)
+    integration.status = "ACTIVE"
+    integration.updated_at = datetime.utcnow()
+
+    # Flag config as modified
+    flag_modified(integration, "config")
+
+    db.commit()
+    db.refresh(integration)
+
+    # Backfill integration to existing incidents
+    backfill_integration_to_incidents(db, integration.id, user_id, integration.config)
+
+    return {
+        "status": "success",
+        "message": "Integration setup completed successfully",
+        "integration": {
+            "id": integration.id,
+            "provider": integration.provider,
+            "name": integration.name,
+            "status": integration.status,
+            "default_repo": integration.config.get("repo_name"),
+            "service_mappings": integration.config.get("service_mappings", {})
+        }
+    }
+
+@app.get("/integrations/{integration_id}")
+def get_integration_details(
+    integration_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Get detailed information about a specific integration."""
+    user_id = get_user_id_from_request(request, db=db)
+
+    integration = db.query(Integration).filter(
+        Integration.id == integration_id,
+        Integration.user_id == user_id
+    ).first()
+
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+
+    config = integration.config or {}
+
+    return {
+        "id": integration.id,
+        "provider": integration.provider,
+        "name": integration.name,
+        "status": integration.status,
+        "default_repo": config.get("repo_name") or integration.project_id,
+        "service_mappings": config.get("service_mappings", {}),
+        "created_at": integration.created_at.isoformat() if integration.created_at else None,
+        "updated_at": integration.updated_at.isoformat() if integration.updated_at else None,
+        "last_verified": integration.last_verified.isoformat() if integration.last_verified else None
+    }
 
 # ============================================================================
 # Statistics & Overview
