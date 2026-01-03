@@ -1211,7 +1211,7 @@ def github_reconnect(
             base_url = base_url.replace('http://', 'https://')
         callback_url = f"{base_url}/integrations/github/callback"
     
-    scope = "repo read:user"
+    scope = "repo read:user read:org"
     # Build authorization URL
     # Note: redirect_uri must match exactly what's configured in GitHub OAuth App settings
     auth_url = (
@@ -1252,10 +1252,11 @@ def github_authorize(request: Request, reconnect: Optional[str] = None, integrat
     import base64
     state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
     
-    # Scopes: repo (for private repos), read:user (for user info)
+    # Scopes: repo (for private repos), read:user (for user info), read:org (for organization info)
     # Note: GitHub OAuth doesn't allow selecting specific repos - it grants access to all repos
     # For repo selection, GitHub Apps installation flow would be needed
-    scope = "repo read:user"
+    # read:org allows listing user's organizations
+    scope = "repo read:user read:org"
     
     # Get the callback URL - use environment variable if set, otherwise construct from request
     from urllib.parse import quote
