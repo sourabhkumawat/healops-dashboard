@@ -17,7 +17,7 @@ base_url = "https://openrouter.ai/api/v1"
 # instead of trying to load native drivers for google/gemini which require GOOGLE_API_KEY.
 
 flash_llm = LLM(
-    model="openai/google/gemini-flash-1.5",
+    model="openai/google/gemini-flash-1.5-8b",
     base_url=base_url,
     api_key=api_key
 )

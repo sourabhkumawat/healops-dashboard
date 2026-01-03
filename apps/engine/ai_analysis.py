@@ -16,7 +16,7 @@ from memory import CodeMemory
 # Use cheaper models for simpler tasks, expensive models only when needed
 MODEL_CONFIG = {
     "simple_analysis": {
-        "model": "google/gemini-flash-1.5",  # ~$0.075 per 1M input tokens
+        "model": "google/gemini-flash-1.5-8b",  # ~$0.0375 per 1M input tokens
         "max_tokens": 500,
         "temperature": 0.3
     },
@@ -1440,7 +1440,9 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
         # Estimate cost (approximate) - safely handle model_config
         try:
             model_name = model_config.get("model", "unknown") if isinstance(model_config, dict) else "unknown"
-            if model_name == "google/gemini-flash-1.5":
+            if "gemini-flash-1.5-8b" in model_name:
+                estimated_cost = (input_tokens * 0.0375 / 1_000_000) + (output_tokens * 0.15 / 1_000_000)
+            elif model_name == "google/gemini-flash-1.5":
                 estimated_cost = (input_tokens * 0.075 / 1_000_000) + (output_tokens * 0.30 / 1_000_000)
             elif "deepseek" in model_name:
                 # Pricing based on OpenRouter screenshot for DeepSeek V3
