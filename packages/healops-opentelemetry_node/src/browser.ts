@@ -1,4 +1,8 @@
-import { HealOpsLogger, type HealOpsLoggerConfig } from './HealOpsLogger';
+import {
+    HealOpsLogger,
+    type HealOpsLoggerConfig,
+    cleanStackTrace
+} from './HealOpsLogger';
 
 /**
  * Console interceptor that automatically sends console logs to HealOps
@@ -95,6 +99,13 @@ export class ConsoleInterceptor {
                 metadata.errorName = arg.name;
                 metadata.errorMessage = arg.message;
                 metadata.errorStack = arg.stack;
+                metadata.stack = arg.stack; // Also include as 'stack' for backend extraction
+                // Include exception format for backend compatibility
+                metadata.exception = {
+                    type: arg.name,
+                    message: arg.message,
+                    stacktrace: arg.stack || ''
+                };
             } else if (typeof arg === 'object' && arg !== null) {
                 metadata[`arg${index}`] = arg;
             }
@@ -126,10 +137,23 @@ export function initHealOpsLogger(
     if (typeof window !== 'undefined') {
         // Catch unhandled JavaScript errors
         window.addEventListener('error', (event) => {
+            // Capture full stack trace - prefer error.stack, fallback to constructing from event
+            let fullStack = event.error?.stack;
+            if (!fullStack && event.filename) {
+                // Construct a basic stack trace if error.stack is not available
+                fullStack = `Error: ${event.message}\n    at ${event.filename}:${event.lineno}:${event.colno}`;
+            }
+
             logger.error(`Unhandled Error: ${event.message}`, {
-                errorName: event.error?.name,
-                errorMessage: event.error?.message,
-                errorStack: event.error?.stack,
+                errorName: event.error?.name || 'Error',
+                errorMessage: event.error?.message || event.message,
+                errorStack: fullStack,
+                stack: fullStack, // Also include as 'stack' for backend extraction
+                exception: {
+                    type: event.error?.name || 'Error',
+                    message: event.error?.message || event.message,
+                    stacktrace: fullStack || ''
+                },
                 filename: event.filename,
                 lineno: event.lineno,
                 colno: event.colno,
@@ -142,12 +166,19 @@ export function initHealOpsLogger(
             const reason = event.reason;
             const errorMessage =
                 reason instanceof Error ? reason.message : String(reason);
+            const errorStack =
+                reason instanceof Error ? reason.stack : undefined;
 
             logger.error(`Unhandled Promise Rejection: ${errorMessage}`, {
-                errorName: reason?.name,
-                errorMessage:
-                    reason instanceof Error ? reason.message : String(reason),
-                errorStack: reason instanceof Error ? reason.stack : undefined,
+                errorName: reason?.name || 'UnhandledPromiseRejection',
+                errorMessage: errorMessage,
+                errorStack: errorStack,
+                stack: errorStack, // Also include as 'stack' for backend extraction
+                exception: {
+                    type: reason?.name || 'UnhandledPromiseRejection',
+                    message: errorMessage,
+                    stacktrace: errorStack || String(reason)
+                },
                 type: 'unhandled_promise_rejection',
                 reason: reason
             });
@@ -179,6 +210,24 @@ export function initHealOpsLogger(
 
                 // Log failed HTTP requests (4xx, 5xx)
                 if (!response.ok && response.status >= 400) {
+                    // Capture stack trace from the calling context (where fetch was called)
+                    // Use Error.captureStackTrace if available to exclude our interceptor
+                    let stackTrace: string | undefined;
+                    try {
+                        const error = new Error();
+                        // In V8 (Chrome/Node), we can use captureStackTrace to exclude frames
+                        if (Error.captureStackTrace) {
+                            Error.captureStackTrace(error, window.fetch);
+                        }
+                        stackTrace = error.stack;
+                    } catch (e) {
+                        // Fallback: create error normally
+                        stackTrace = new Error().stack;
+                    }
+
+                    // Clean the stack trace to remove SDK internal frames
+                    const cleanedStack = cleanStackTrace(stackTrace);
+
                     logger.error(
                         `HTTP Error: ${response.status} ${response.statusText}`,
                         {
@@ -186,7 +235,13 @@ export function initHealOpsLogger(
                             status: response.status,
                             statusText: response.statusText,
                             method,
-                            type: 'http_error'
+                            type: 'http_error',
+                            stack: cleanedStack, // Include cleaned stack trace
+                            exception: {
+                                type: 'HTTPError',
+                                message: `${response.status} ${response.statusText}`,
+                                stacktrace: cleanedStack || stackTrace || ''
+                            }
                         }
                     );
                 }
@@ -194,25 +249,28 @@ export function initHealOpsLogger(
                 return response;
             } catch (error) {
                 // Log network errors (connection failures, timeouts, etc.)
-                logger.error(
-                    `Network Error: ${
-                        error instanceof Error ? error.message : String(error)
-                    }`,
-                    {
-                        url,
-                        errorName:
+                const errorMessage =
+                    error instanceof Error ? error.message : String(error);
+                const errorStack =
+                    error instanceof Error ? error.stack : undefined;
+
+                logger.error(`Network Error: ${errorMessage}`, {
+                    url,
+                    errorName:
+                        error instanceof Error ? error.name : 'NetworkError',
+                    errorMessage: errorMessage,
+                    errorStack: errorStack,
+                    stack: errorStack, // Also include as 'stack' for backend extraction
+                    exception: {
+                        type:
                             error instanceof Error
                                 ? error.name
                                 : 'NetworkError',
-                        errorMessage:
-                            error instanceof Error
-                                ? error.message
-                                : String(error),
-                        errorStack:
-                            error instanceof Error ? error.stack : undefined,
-                        type: 'network_error'
-                    }
-                );
+                        message: errorMessage,
+                        stacktrace: errorStack || String(error)
+                    },
+                    type: 'network_error'
+                });
                 throw error;
             }
         };

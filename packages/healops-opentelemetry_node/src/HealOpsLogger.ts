@@ -1,14 +1,79 @@
 import axios from 'axios';
 
+/**
+ * Filter out SDK internal frames and Next.js chunks from stack traces
+ * This helps get cleaner stack traces that point to actual source files
+ */
+export function cleanStackTrace(stack: string | undefined): string | undefined {
+    if (!stack) return undefined;
+
+    const lines = stack.split('\n');
+    const filtered: string[] = [];
+    const sdkPatterns = [
+        /HealOpsLogger/,
+        /healops-opentelemetry/,
+        /getCallerInfo/,
+        /sendLog/,
+        /\.error\(/,
+        /\.warn\(/,
+        /\.info\(/,
+        /\.critical\(/,
+        /ConsoleInterceptor/,
+        /initHealOpsLogger/
+    ];
+
+    // Patterns for bundled/minified files that should be filtered
+    const bundledPatterns = [
+        /\/_next\/static\/chunks\//, // Next.js chunks
+        /\/_next\/static\/.*\.js/, // Next.js static files
+        /webpack:\/\//, // Webpack internal
+        /node_modules\/.*\.js$/, // node_modules (unless it's the actual source)
+        /\.min\.js/, // Minified files
+        /chunk-[a-f0-9]+\.js/ // Generic chunk files
+    ];
+
+    // Filter out SDK internal frames and bundled files
+    for (const line of lines) {
+        // Always keep error message lines (first line usually)
+        if (
+            line.trim().startsWith('Error:') ||
+            line.trim().startsWith('TypeError:') ||
+            line.trim().startsWith('ReferenceError:') ||
+            line.trim().startsWith('SyntaxError:')
+        ) {
+            filtered.push(line);
+            continue;
+        }
+
+        // Skip SDK internal frames
+        const isSdkFrame = sdkPatterns.some((pattern) => pattern.test(line));
+        if (isSdkFrame) continue;
+
+        // Skip bundled/minified file references
+        const isBundled = bundledPatterns.some((pattern) => pattern.test(line));
+        if (isBundled) continue;
+
+        filtered.push(line);
+    }
+
+    // If we filtered everything except the error message, return original stack
+    // (at least the error message is useful)
+    if (filtered.length <= 1) {
+        return stack;
+    }
+
+    return filtered.join('\n');
+}
+
 export interface HealOpsLoggerConfig {
     apiKey: string;
     serviceName: string;
     endpoint?: string;
     source?: string;
     // Batching configuration
-    enableBatching?: boolean;       // Default: true
-    batchSize?: number;             // Default: 50
-    batchIntervalMs?: number;       // Default: 1000ms
+    enableBatching?: boolean; // Default: true
+    batchSize?: number; // Default: 50
+    batchIntervalMs?: number; // Default: 1000ms
 }
 
 export interface LogPayload {
@@ -47,12 +112,15 @@ export class HealOpsLogger {
         // Validate batching configuration
         this.BATCHING_ENABLED = config.enableBatching !== false; // Default: true
         this.BATCH_SIZE = Math.max(1, Math.min(config.batchSize || 50, 1000)); // Clamp between 1-1000
-        this.BATCH_INTERVAL_MS = Math.max(100, Math.min(config.batchIntervalMs || 1000, 60000)); // Clamp between 100ms-60s
+        this.BATCH_INTERVAL_MS = Math.max(
+            100,
+            Math.min(config.batchIntervalMs || 1000, 60000)
+        ); // Clamp between 100ms-60s
 
         // Setup graceful shutdown handlers (with cleanup tracking)
         if (typeof process !== 'undefined' && process.on) {
             this.shutdownHandlers.beforeExit = () => {
-                this.flushBatch().catch(err => {
+                this.flushBatch().catch((err) => {
                     console.error('Failed to flush logs on shutdown:', err);
                 });
             };
@@ -95,25 +163,32 @@ export class HealOpsLogger {
         // Remove event listeners to prevent memory leaks
         if (typeof process !== 'undefined' && process.removeListener) {
             if (this.shutdownHandlers.beforeExit) {
-                process.removeListener('beforeExit', this.shutdownHandlers.beforeExit);
+                process.removeListener(
+                    'beforeExit',
+                    this.shutdownHandlers.beforeExit
+                );
             }
             if (this.shutdownHandlers.sigint) {
                 process.removeListener('SIGINT', this.shutdownHandlers.sigint);
             }
             if (this.shutdownHandlers.sigterm) {
-                process.removeListener('SIGTERM', this.shutdownHandlers.sigterm);
+                process.removeListener(
+                    'SIGTERM',
+                    this.shutdownHandlers.sigterm
+                );
             }
         }
     }
 
     /**
      * Extract caller information from stack trace
-     * This works in browsers (Chrome, Firefox, Safari, Edge)
+     * This works in browsers (Chrome, Firefox, Safari, Edge) and Node.js
      */
     private getCallerInfo(): {
         filePath?: string;
         line?: number;
         column?: number;
+        fullStack?: string;
     } {
         try {
             const stack = new Error().stack;
@@ -123,7 +198,7 @@ export class HealOpsLogger {
             // Skip: "Error", "getCallerInfo", "sendLog", and the public method (info/warn/error/critical)
             // Line 4 is the actual caller
             const callerLine = stackLines[4] || stackLines[3];
-            if (!callerLine) return {};
+            if (!callerLine) return { fullStack: stack };
 
             // Chrome/Edge format: "at functionName (file:line:column)" or "at file:line:column"
             const chromeMatch =
@@ -133,7 +208,8 @@ export class HealOpsLogger {
                 return {
                     filePath: chromeMatch[1].trim(),
                     line: parseInt(chromeMatch[2]),
-                    column: parseInt(chromeMatch[3])
+                    column: parseInt(chromeMatch[3]),
+                    fullStack: stack
                 };
             }
 
@@ -143,11 +219,25 @@ export class HealOpsLogger {
                 return {
                     filePath: firefoxMatch[1].trim(),
                     line: parseInt(firefoxMatch[2]),
-                    column: parseInt(firefoxMatch[3])
+                    column: parseInt(firefoxMatch[3]),
+                    fullStack: stack
                 };
             }
 
-            return {};
+            // Node.js format: "at functionName (file:line:column)" or "at file:line:column"
+            const nodeMatch = callerLine.match(
+                /at\s+(?:[^(]+)?\(?([^:)]+):(\d+):(\d+)\)?/
+            );
+            if (nodeMatch) {
+                return {
+                    filePath: nodeMatch[1].trim(),
+                    line: parseInt(nodeMatch[2]),
+                    column: parseInt(nodeMatch[3]),
+                    fullStack: stack
+                };
+            }
+
+            return { fullStack: stack };
         } catch (e) {
             // Silent fail - don't break logging if stack parsing fails
             return {};
@@ -210,9 +300,45 @@ export class HealOpsLogger {
 
         // Automatically capture caller info and merge with user metadata
         const callerInfo = this.getCallerInfo();
+
+        // Prioritize original error stack over caller stack
+        // Original error stacks are more useful than logger-internal stacks
+        const rawStackTrace =
+            metadata?.errorStack || // Original error stack (most reliable)
+            metadata?.stack || // Generic stack
+            metadata?.exception?.stacktrace || // Exception stacktrace
+            callerInfo.fullStack; // Fallback to caller stack
+
+        // Clean the stack trace to remove SDK internal frames and Next.js chunks
+        const cleanedStackTrace = cleanStackTrace(rawStackTrace);
+
         const enrichedMetadata = {
             ...metadata,
-            ...callerInfo
+            // Only include caller info if we don't have original error info
+            ...(metadata?.errorStack ? {} : callerInfo),
+            // Use cleaned stack trace
+            stack: cleanedStackTrace,
+            // Preserve original errorStack for reference
+            ...(metadata?.errorStack
+                ? { errorStack: metadata.errorStack }
+                : {}),
+            // Also include exception format for backend compatibility
+            ...(cleanedStackTrace &&
+            (severity === 'ERROR' || severity === 'CRITICAL')
+                ? {
+                      exception: {
+                          type:
+                              metadata?.errorName ||
+                              metadata?.exception?.type ||
+                              'Error',
+                          message:
+                              metadata?.errorMessage ||
+                              metadata?.exception?.message ||
+                              message,
+                          stacktrace: cleanedStackTrace
+                      }
+                  }
+                : {})
         };
 
         const payload: LogPayload = {
@@ -236,7 +362,7 @@ export class HealOpsLogger {
         // Flush immediately if batch size reached
         if (this.logQueue.length >= this.BATCH_SIZE) {
             // Don't await - let it flush in background
-            this.flushBatch().catch(err => {
+            this.flushBatch().catch((err) => {
                 if (process.env.HEALOPS_DEBUG) {
                     console.error('Background flush failed:', err);
                 }
@@ -256,7 +382,7 @@ export class HealOpsLogger {
         }
 
         this.batchTimeout = setTimeout(() => {
-            this.flushBatch().catch(err => {
+            this.flushBatch().catch((err) => {
                 if (process.env.HEALOPS_DEBUG) {
                     console.error('Failed to flush batch:', err);
                 }
@@ -296,12 +422,15 @@ export class HealOpsLogger {
         } catch (error: any) {
             // If batch endpoint fails, fall back to individual sends
             if (process.env.HEALOPS_DEBUG) {
-                console.warn('Batch send failed, falling back to individual sends:', error.message);
+                console.warn(
+                    'Batch send failed, falling back to individual sends:',
+                    error.message
+                );
             }
 
             // Try sending individually (without awaiting to avoid blocking)
             for (const log of batch) {
-                this.sendSingleLog(log).catch(err => {
+                this.sendSingleLog(log).catch((err) => {
                     // Silent fail - already logged in sendSingleLog
                 });
             }
@@ -371,7 +500,8 @@ export class HealOpsLogger {
 
             if (
                 process.env.HEALOPS_DEBUG &&
-                (payload.severity === 'ERROR' || payload.severity === 'CRITICAL')
+                (payload.severity === 'ERROR' ||
+                    payload.severity === 'CRITICAL')
             ) {
                 console.log(
                     `HealOps Logger successfully sent ${payload.severity} log:`,

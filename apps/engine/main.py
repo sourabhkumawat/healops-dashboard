@@ -180,6 +180,9 @@ class LogIngestRequest(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
     integration_id: Optional[int] = None
 
+class LogBatchRequest(BaseModel):
+    logs: List[LogIngestRequest]
+
 @app.get("/")
 def read_root():
     return {"status": "online", "service": "engine"}
@@ -564,6 +567,167 @@ async def ingest_log(log: LogIngestRequest, request: Request, background_tasks: 
     except Exception as e:
         # Catch any unexpected errors
         print(f"✗ Unexpected error in ingest_log: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.post("/ingest/logs/batch")
+async def ingest_logs_batch(batch: LogBatchRequest, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """
+    Ingest multiple logs in a batch. All logs are broadcast to WebSockets.
+    Only ERROR and CRITICAL logs are persisted to the database.
+    """
+    try:
+        # API Key is already validated by middleware
+        api_key = request.state.api_key
+        
+        # Determine integration_id (same for all logs in batch)
+        integration_id = api_key.integration_id
+        
+        results = []
+        persisted_count = 0
+        broadcasted_count = 0
+        
+        for log in batch.logs:
+            try:
+                # Override integration_id if provided in log
+                log_integration_id = integration_id
+                if not log_integration_id and log.integration_id:
+                    integration = db.query(Integration).filter(
+                        Integration.id == log.integration_id,
+                        Integration.user_id == api_key.user_id
+                    ).first()
+                    if integration:
+                        log_integration_id = integration.id
+                
+                # Prepare log data
+                log_data = {
+                    "service_name": log.service_name,
+                    "severity": log.severity,
+                    "message": log.message,
+                    "source": log.source,
+                    "timestamp": log.timestamp or datetime.utcnow().isoformat(),
+                    "metadata": log.metadata
+                }
+                
+                # 1. Broadcast to WebSockets (ALL LOGS)
+                try:
+                    await manager.broadcast(log_data)
+                    broadcasted_count += 1
+                except Exception as ws_error:
+                    print(f"Warning: Failed to broadcast log to WebSockets: {ws_error}")
+                    # Continue execution even if broadcast fails
+                
+                # 2. Persistence & Incident Logic (ERRORS ONLY)
+                severity_upper = log.severity.upper() if log.severity else ""
+                should_persist = severity_upper in ["ERROR", "CRITICAL"]
+                
+                if should_persist:
+                    try:
+                        # Use a savepoint for each log so failures don't affect others
+                        savepoint = db.begin_nested()
+                        try:
+                            # Parse timestamp and ensure partition exists
+                            log_timestamp = datetime.utcnow()
+                            if log.timestamp:
+                                try:
+                                    # Try parsing ISO format timestamp
+                                    if isinstance(log.timestamp, str):
+                                        log_timestamp = datetime.fromisoformat(log.timestamp.replace('Z', '+00:00'))
+                                    elif isinstance(log.timestamp, datetime):
+                                        log_timestamp = log.timestamp
+                                except (ValueError, AttributeError) as e:
+                                    print(f"Warning: Could not parse timestamp {log.timestamp}, using current time: {e}")
+                                    log_timestamp = datetime.utcnow()
+                            
+                            # Ensure partition exists before inserting
+                            ensure_partition_exists_for_timestamp(log_timestamp)
+                            
+                            db_log = LogEntry(
+                                service_name=log.service_name,
+                                level=log.severity,
+                                severity=log.severity,
+                                message=log.message,
+                                source=log.source,
+                                integration_id=log_integration_id,
+                                user_id=api_key.user_id,  # Store user_id from API key
+                                metadata_json=log.metadata,
+                                timestamp=log_timestamp
+                            )
+                            db.add(db_log)
+                            db.flush()  # Flush to get the ID without committing
+                            savepoint.commit()
+                            persisted_count += 1
+                            
+                            # Log successful persistence for debugging
+                            print(f"✓ Persisted {severity_upper} log: id={db_log.id}, service={log.service_name}, message={log.message[:50]}")
+                            
+                            # Trigger incident check
+                            try:
+                                from tasks import process_log_entry
+                                background_tasks.add_task(process_log_entry, db_log.id)
+                            except Exception as task_error:
+                                print(f"Warning: Failed to queue incident check task: {task_error}")
+                                # Don't fail the request if task queuing fails
+                            
+                            results.append({"status": "ingested", "id": db_log.id, "persisted": True, "severity": log.severity})
+                        except Exception as db_error:
+                            # Rollback only this savepoint, not the entire transaction
+                            savepoint.rollback()
+                            print(f"✗ Failed to persist log to database: {db_error}")
+                            print(f"  Log details: service={log.service_name}, severity={log.severity}, message={log.message[:50]}")
+                            # Return error response but don't raise exception (log was received)
+                            results.append({
+                                "status": "broadcasted",
+                                "persisted": False,
+                                "error": "Failed to persist log to database",
+                                "severity": log.severity
+                            })
+                    except Exception as savepoint_error:
+                        # Handle savepoint creation errors
+                        print(f"✗ Failed to create savepoint: {savepoint_error}")
+                        results.append({
+                            "status": "broadcasted",
+                            "persisted": False,
+                            "error": "Failed to persist log to database",
+                            "severity": log.severity
+                        })
+                else:
+                    # Log received but not persisted (INFO/WARNING)
+                    print(f"Received {severity_upper} log (not persisted): service={log.service_name}, message={log.message[:50]}")
+                    results.append({"status": "broadcasted", "persisted": False, "severity": log.severity})
+                    
+            except Exception as log_error:
+                # Handle individual log errors without failing the entire batch
+                print(f"✗ Error processing log in batch: {log_error}")
+                import traceback
+                traceback.print_exc()
+                results.append({
+                    "status": "error",
+                    "error": str(log_error),
+                    "severity": log.severity if log else "UNKNOWN"
+                })
+        
+        # Commit all persisted logs at once
+        if persisted_count > 0:
+            try:
+                db.commit()
+            except Exception as commit_error:
+                db.rollback()
+                print(f"✗ Failed to commit batch: {commit_error}")
+                raise HTTPException(status_code=500, detail=f"Failed to commit logs: {str(commit_error)}")
+        
+        return {
+            "status": "success",
+            "total": len(batch.logs),
+            "broadcasted": broadcasted_count,
+            "persisted": persisted_count,
+            "results": results
+        }
+            
+    except Exception as e:
+        # Catch any unexpected errors
+        print(f"✗ Unexpected error in ingest_logs_batch: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")

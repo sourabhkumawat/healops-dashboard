@@ -4,6 +4,18 @@ import { SpanStatusCode } from '@opentelemetry/api';
 import axios from 'axios';
 import { HealOpsConfig, HealOpsSpanPayload, HealOpsSpan } from './types';
 
+/**
+ * HealOps OpenTelemetry Exporter
+ * 
+ * Captures spans with full exception stack traces for source file path extraction.
+ * The backend will extract source file paths from exception.stacktrace attributes
+ * using regex patterns to identify original source files from bundled/minified code.
+ * 
+ * Note: For better source file resolution in bundled applications (Next.js, webpack, etc.),
+ * consider implementing source map support in the future to map bundled paths back to
+ * original source files.
+ */
+
 export class HealOpsExporter implements SpanExporter {
   private config: HealOpsConfig;
   private endpoint: string;
@@ -39,6 +51,36 @@ export class HealOpsExporter implements SpanExporter {
   // isErrorSpan method removed as we now export all spans
 
   private transformSpan(span: ReadableSpan): HealOpsSpan {
+    // Enhance attributes with exception information if available
+    let enhancedAttributes = { ...span.attributes };
+    
+    // Check if there's exception information in events that should be in attributes
+    for (const event of span.events) {
+      if (event.name === 'exception' && event.attributes) {
+        // Ensure exception.stacktrace is properly captured
+        if (event.attributes['exception.stacktrace']) {
+          enhancedAttributes['exception.stacktrace'] = event.attributes['exception.stacktrace'];
+        }
+        if (event.attributes['exception.type']) {
+          enhancedAttributes['exception.type'] = event.attributes['exception.type'];
+        }
+        if (event.attributes['exception.message']) {
+          enhancedAttributes['exception.message'] = event.attributes['exception.message'];
+        }
+      }
+    }
+    
+    // If span has error status but no exception event, try to extract from attributes
+    if (span.status.code === SpanStatusCode.ERROR && !enhancedAttributes['exception.stacktrace']) {
+      // Check if there's a stack trace in attributes
+      const stackTrace = enhancedAttributes['error.stack'] || 
+                        enhancedAttributes['stack'] ||
+                        enhancedAttributes['errorStack'];
+      if (stackTrace) {
+        enhancedAttributes['exception.stacktrace'] = String(stackTrace);
+      }
+    }
+    
     return {
       traceId: span.spanContext().traceId,
       spanId: span.spanContext().spanId,
@@ -47,7 +89,7 @@ export class HealOpsExporter implements SpanExporter {
       timestamp: Date.now(), // Current time of export, or use span end time? Requirement says timestamp, let's use endTime converted to ms
       startTime: this.hrTimeToMilliseconds(span.startTime),
       endTime: this.hrTimeToMilliseconds(span.endTime),
-      attributes: span.attributes,
+      attributes: enhancedAttributes,
       events: span.events.map(event => ({
         name: event.name,
         time: this.hrTimeToMilliseconds(event.time),

@@ -227,7 +227,22 @@ def extract_paths_from_stacktrace(text: str) -> list[str]:
     # Node.js/JS stack trace pattern: at FunctionName (/path/to/file.js:123:45)
     # or at /path/to/file.js:123:45
     js_pattern = r'at (?:.*? \()?([^:)]+(?:\.js|\.ts|\.jsx|\.tsx)):\d+:\d+\)?'
-    paths.extend(re.findall(js_pattern, text))
+    matches = re.findall(js_pattern, text)
+    
+    # Filter out bundled/minified files
+    bundled_patterns = [
+        r'/_next/static/chunks/',  # Next.js chunks
+        r'/_next/static/.*\.js',   # Next.js static files
+        r'webpack://',              # Webpack internal
+        r'\.min\.js',               # Minified files
+        r'chunk-[a-f0-9]+\.js',    # Generic chunk files
+    ]
+    
+    for match in matches:
+        # Skip if it matches bundled patterns
+        is_bundled = any(re.search(pattern, match) for pattern in bundled_patterns)
+        if not is_bundled:
+            paths.append(match)
     
     return paths
 
