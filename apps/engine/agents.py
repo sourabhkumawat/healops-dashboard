@@ -12,7 +12,7 @@ base_url = "https://openrouter.ai/api/v1"
 
 # Cost-effective models via OpenRouter
 # Xiaomi MiMo-V2-Flash (Free): Excellent reasoning/coding, 256K context, free of charge.
-# DeepSeek V3: SOTA Coding capability, extremely low cost - ~$0.30/M Input, ~$1.20/M Output
+# Grok Code Fast 1: Specialized for agentic coding with reasoning traces - $0.20/M Input, $1.50/M Output
 # NOTE: Prefixing with "openai/" forces CrewAI to use the OpenAI protocol (compatible with OpenRouter)
 # instead of trying to load native drivers for google/gemini which require GOOGLE_API_KEY.
 
@@ -23,7 +23,7 @@ flash_llm = LLM(
 )
 
 coding_llm = LLM(
-    model="openai/deepseek/deepseek-chat",
+    model="openai/x-ai/grok-code-fast-1",
     base_url=base_url,
     api_key=api_key
 )
