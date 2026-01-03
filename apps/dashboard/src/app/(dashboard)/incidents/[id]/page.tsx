@@ -102,11 +102,12 @@ export default function IncidentDetailsPage() {
                     setError(null); // Clear any previous errors
 
                     // Check if analysis is available
-                    const hasRootCause = !!result.incident?.root_cause;
-                    const hasAnalysisError = hasRootCause && (
-                        result.incident.root_cause.includes("Analysis failed") ||
-                        result.incident.root_cause.includes("Analysis error") ||
-                        result.incident.root_cause.includes("not configured")
+                    const rootCause = result.incident?.root_cause;
+                    const hasRootCause = !!rootCause;
+                    const hasAnalysisError = hasRootCause && rootCause && (
+                        rootCause.includes("Analysis failed") ||
+                        rootCause.includes("Analysis error") ||
+                        rootCause.includes("not configured")
                     );
 
                     if (hasRootCause) {
@@ -118,8 +119,8 @@ export default function IncidentDetailsPage() {
                         setAnalyzing(false);
                         
                         // Set error state if analysis failed
-                        if (hasAnalysisError) {
-                            setError(result.incident.root_cause);
+                        if (hasAnalysisError && rootCause) {
+                            setError(rootCause);
                         }
                         
                         return false; // Don't poll
@@ -201,11 +202,12 @@ export default function IncidentDetailsPage() {
                         setData(result);
                         setError(null);
 
-                        const hasRootCause = !!result.incident?.root_cause;
-                        const hasAnalysisError = hasRootCause && (
-                            result.incident.root_cause.includes("Analysis failed") ||
-                            result.incident.root_cause.includes("Analysis error") ||
-                            result.incident.root_cause.includes("not configured")
+                        const rootCause = result.incident?.root_cause;
+                        const hasRootCause = !!rootCause;
+                        const hasAnalysisError = hasRootCause && rootCause && (
+                            rootCause.includes("Analysis failed") ||
+                            rootCause.includes("Analysis error") ||
+                            rootCause.includes("not configured")
                         );
 
                         if (hasRootCause) {
@@ -216,8 +218,8 @@ export default function IncidentDetailsPage() {
                             }
                             setAnalyzing(false);
                             
-                            if (hasAnalysisError) {
-                                setError(result.incident.root_cause);
+                            if (hasAnalysisError && rootCause) {
+                                setError(rootCause);
                             }
                             
                             // Track analytics
