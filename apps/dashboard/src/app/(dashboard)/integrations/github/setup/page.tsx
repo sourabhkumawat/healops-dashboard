@@ -21,6 +21,7 @@ import {
 } from '@/components/ui/select';
 import { Loader2, CheckCircle2, Github, ArrowRight } from 'lucide-react';
 import { getRepositories, completeIntegrationSetup } from '@/actions/integrations';
+import { API_BASE } from '@/lib/config';
 
 type Repository = {
     full_name: string;
@@ -33,6 +34,8 @@ function GitHubSetupPageContent() {
     const router = useRouter();
 
     const integrationId = searchParams.get('integration_id');
+    const installationId = searchParams.get('installation_id');
+    const state = searchParams.get('state');
     const isNew = searchParams.get('new') === 'true';
     const isReconnect = searchParams.get('reconnected') === 'true';
 
@@ -43,13 +46,28 @@ function GitHubSetupPageContent() {
     const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
+        // If we have installation_id but not integration_id, redirect to callback endpoint
+        // This happens when GitHub redirects directly to the Setup URL
+        if (installationId && !integrationId) {
+            // Redirect to backend callback endpoint which will create the integration
+            // and redirect back to setup page with integration_id
+            const callbackUrl = new URL('/integrations/github/callback', API_BASE);
+            callbackUrl.searchParams.set('installation_id', installationId);
+            if (state) {
+                callbackUrl.searchParams.set('state', state);
+            }
+            // Redirect to callback endpoint
+            window.location.href = callbackUrl.toString();
+            return;
+        }
+
         if (!integrationId) {
             setError('No integration ID provided');
             setLoading(false);
             return;
         }
         fetchRepositories();
-    }, [integrationId]);
+    }, [integrationId, installationId, state]);
 
     async function fetchRepositories() {
         try {

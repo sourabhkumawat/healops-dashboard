@@ -1266,12 +1266,20 @@ def github_callback(installation_id: Optional[str] = None, setup_action: Optiona
             # If state decoding fails, this is a security issue
             raise HTTPException(status_code=400, detail=f"Invalid state parameter: {str(e)}")
     
-    # SECURITY: user_id is required - if not in state, this is an invalid request
+    # SECURITY: user_id is required - try to get from state, or from request state (if authenticated)
     if not user_id:
-        raise HTTPException(
-            status_code=400, 
-            detail="Invalid state: user_id not found. Please initiate the installation flow from the application."
-        )
+        # Fallback: try to get user_id from request state (if user is authenticated via session)
+        try:
+            if hasattr(request.state, 'user_id') and request.state.user_id:
+                user_id = request.state.user_id
+        except:
+            pass
+    
+    # If still no user_id, this is an invalid request
+    if not user_id:
+        # Redirect to frontend with error - user should start installation from the app
+        error_msg = "Please initiate the GitHub installation from the application settings page."
+        return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&error={error_msg}")
     
     # Get installation info to get account details
     installation_info = get_installation_info(installation_id_int)
