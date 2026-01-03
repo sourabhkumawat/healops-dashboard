@@ -179,6 +179,8 @@ class LogIngestRequest(BaseModel):
     timestamp: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     integration_id: Optional[int] = None
+    release: Optional[str] = None  # Release identifier for source map resolution
+    environment: Optional[str] = None  # Environment name for source map resolution
 
 class LogBatchRequest(BaseModel):
     logs: List[LogIngestRequest]
@@ -504,6 +506,27 @@ async def ingest_log(log: LogIngestRequest, request: Request, background_tasks: 
         
         if should_persist:
             try:
+                # Resolve source maps in metadata before saving
+                resolved_metadata = log.metadata
+                if log.metadata and isinstance(log.metadata, dict):
+                    try:
+                        from sourcemap_resolver import resolve_metadata_with_sourcemaps
+                        # Use release/environment from top-level request, fallback to metadata
+                        release = log.release or log.metadata.get('release') or log.metadata.get('releaseId') or None
+                        environment = log.environment or log.metadata.get('environment') or log.metadata.get('env') or "production"
+                        resolved_metadata = resolve_metadata_with_sourcemaps(
+                            db=db,
+                            user_id=api_key.user_id,
+                            service_name=log.service_name,
+                            metadata=log.metadata,
+                            release=release,
+                            environment=environment
+                        )
+                    except Exception as sm_error:
+                        # Don't fail log ingestion if source map resolution fails
+                        print(f"Warning: Source map resolution failed: {sm_error}")
+                        resolved_metadata = log.metadata
+                
                 # Parse timestamp and ensure partition exists
                 log_timestamp = datetime.utcnow()
                 if log.timestamp:
@@ -528,7 +551,7 @@ async def ingest_log(log: LogIngestRequest, request: Request, background_tasks: 
                     source=log.source,
                     integration_id=integration_id,
                     user_id=api_key.user_id,  # Store user_id from API key
-                    metadata_json=log.metadata,
+                    metadata_json=resolved_metadata,  # Use resolved metadata with source maps
                     timestamp=log_timestamp
                 )
                 db.add(db_log)
@@ -640,6 +663,27 @@ async def ingest_logs_batch(batch: LogBatchRequest, request: Request, background
                                     print(f"Warning: Could not parse timestamp {log.timestamp}, using current time: {e}")
                                     log_timestamp = datetime.utcnow()
                             
+                            # Resolve source maps in metadata before saving
+                            resolved_metadata = log.metadata
+                            if log.metadata and isinstance(log.metadata, dict):
+                                try:
+                                    from sourcemap_resolver import resolve_metadata_with_sourcemaps
+                                    # Use release/environment from top-level request, fallback to metadata
+                                    release = log.release or log.metadata.get('release') or log.metadata.get('releaseId') or None
+                                    environment = log.environment or log.metadata.get('environment') or log.metadata.get('env') or "production"
+                                    resolved_metadata = resolve_metadata_with_sourcemaps(
+                                        db=db,
+                                        user_id=api_key.user_id,
+                                        service_name=log.service_name,
+                                        metadata=log.metadata,
+                                        release=release,
+                                        environment=environment
+                                    )
+                                except Exception as sm_error:
+                                    # Don't fail log ingestion if source map resolution fails
+                                    print(f"Warning: Source map resolution failed: {sm_error}")
+                                    resolved_metadata = log.metadata
+                            
                             # Ensure partition exists before inserting
                             ensure_partition_exists_for_timestamp(log_timestamp)
                             
@@ -651,7 +695,7 @@ async def ingest_logs_batch(batch: LogBatchRequest, request: Request, background
                                 source=log.source,
                                 integration_id=log_integration_id,
                                 user_id=api_key.user_id,  # Store user_id from API key
-                                metadata_json=log.metadata,
+                                metadata_json=resolved_metadata,  # Use resolved metadata with source maps
                                 timestamp=log_timestamp
                             )
                             db.add(db_log)
