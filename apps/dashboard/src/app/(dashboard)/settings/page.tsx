@@ -16,7 +16,6 @@ import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import {
     Cloud,
-    Server,
     Box,
     Key,
     Plus,
@@ -37,8 +36,7 @@ import {
     getServices,
     getRepositories,
     listIntegrations,
-    updateIntegration,
-    getIntegrationDetails
+    updateIntegration
 } from '@/actions/integrations';
 import {
     Select,
@@ -88,7 +86,10 @@ export default function SettingsPage() {
         number | null
     >(null);
     const [integrationConfigs, setIntegrationConfigs] = useState<
-        Record<number, any>
+        Record<
+            number,
+            { default_repo?: string; service_mappings?: Record<string, string> }
+        >
     >({});
     const [newServiceName, setNewServiceName] = useState('');
     const [newRepoName, setNewRepoName] = useState('');

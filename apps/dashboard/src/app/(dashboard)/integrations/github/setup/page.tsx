@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import {
     Card,
@@ -28,7 +28,7 @@ type Repository = {
     private: boolean;
 };
 
-export default function GitHubSetupPage() {
+function GitHubSetupPageContent() {
     const searchParams = useSearchParams();
     const router = useRouter();
 
@@ -298,5 +298,26 @@ export default function GitHubSetupPage() {
                 </CardContent>
             </Card>
         </div>
+    );
+}
+
+export default function GitHubSetupPage() {
+    return (
+        <Suspense
+            fallback={
+                <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
+                    <Card className="w-full max-w-2xl border-zinc-800 bg-zinc-900">
+                        <CardContent className="p-12 text-center">
+                            <Loader2 className="h-12 w-12 animate-spin text-green-500 mx-auto mb-4" />
+                            <p className="text-zinc-400">
+                                Loading...
+                            </p>
+                        </CardContent>
+                    </Card>
+                </div>
+            }
+        >
+            <GitHubSetupPageContent />
+        </Suspense>
     );
 }
