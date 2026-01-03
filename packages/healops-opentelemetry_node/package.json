@@ -1,9 +1,12 @@
 {
   "name": "@sourabhkumawat0105/healops-opentelemetry",
-  "version": "0.10.0",
-  "description": "HealOps OpenTelemetry SDK for Node.js and Browser with automatic file path detection",
+  "version": "0.16.0",
+  "description": "HealOps OpenTelemetry SDK for Node.js and Browser with automatic file path detection and server-side source map resolution",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "healops": "./cli/upload-sourcemaps.js"
+  },
   "exports": {
     ".": {
       "browser": "./dist/browser.js",
@@ -20,7 +23,8 @@
     "test": "jest",
     "test:local": "node test-local.js",
     "lint": "eslint src/**/*.ts",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "upload-sourcemaps": "node ./cli/upload-sourcemaps.js"
   },
   "keywords": [
     "opentelemetry",
@@ -39,7 +43,8 @@
     "@opentelemetry/resources": "^1.19.0",
     "@opentelemetry/semantic-conventions": "^1.19.0",
     "axios": "^1.6.0",
-    "source-map": "^0.7.4"
+    "source-map": "^0.7.4",
+    "glob": "^10.3.10"
   },
   "devDependencies": {
     "typescript": "^5.3.0",

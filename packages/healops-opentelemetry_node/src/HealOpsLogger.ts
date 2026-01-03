@@ -1,5 +1,10 @@
 import axios from 'axios';
-import { resolveStackTrace } from './sourceMapResolver';
+import {
+    resolveStackTrace,
+    resolveFilePath,
+    extractFilePathFromStack,
+    isSourceFile
+} from './sourceMapResolver';
 
 /**
  * Filter out SDK internal frames from stack traces
@@ -107,6 +112,9 @@ export interface HealOpsLoggerConfig {
     serviceName: string;
     endpoint?: string;
     source?: string;
+    // Release tracking for source map resolution
+    release?: string; // Git SHA, version, or build ID
+    environment?: string; // production, staging, development
     // Batching configuration
     enableBatching?: boolean; // Default: true
     batchSize?: number; // Default: 50
@@ -119,6 +127,8 @@ export interface LogPayload {
     message: string;
     source: string;
     timestamp?: string;
+    release?: string; // Release identifier for source map resolution
+    environment?: string; // Environment name
     metadata?: Record<string, any>;
 }
 
@@ -145,6 +155,26 @@ export class HealOpsLogger {
     constructor(config: HealOpsLoggerConfig) {
         this.config = config;
         this.endpoint = config.endpoint || 'https://engine.healops.ai';
+
+        // Auto-detect release from meta tag if not provided (browser only)
+        if (!this.config.release && typeof document !== 'undefined') {
+            const metaRelease = document.querySelector(
+                'meta[name="healops-release"]'
+            );
+            if (metaRelease) {
+                this.config.release = metaRelease.getAttribute('content') || undefined;
+            }
+        }
+
+        // Auto-detect environment from meta tag if not provided (browser only)
+        if (!this.config.environment && typeof document !== 'undefined') {
+            const metaEnv = document.querySelector(
+                'meta[name="healops-environment"]'
+            );
+            if (metaEnv) {
+                this.config.environment = metaEnv.getAttribute('content') || undefined;
+            }
+        }
 
         // Validate batching configuration
         this.BATCHING_ENABLED = config.enableBatching !== false; // Default: true
@@ -220,11 +250,13 @@ export class HealOpsLogger {
     /**
      * Extract caller information from stack trace
      * This works in browsers (Chrome, Firefox, Safari, Edge) and Node.js
+     * Also extracts function name for OpenTelemetry semantic conventions
      */
     private getCallerInfo(): {
         filePath?: string;
         line?: number;
         column?: number;
+        functionName?: string;
         fullStack?: string;
     } {
         try {
@@ -238,6 +270,19 @@ export class HealOpsLogger {
             if (!callerLine) return { fullStack: stack };
 
             // Chrome/Edge format: "at functionName (file:line:column)" or "at file:line:column"
+            const chromeMatchWithFunction = callerLine.match(
+                /at\s+([^(]+)\s+\(([^)]+):(\d+):(\d+)\)/
+            );
+            if (chromeMatchWithFunction) {
+                return {
+                    functionName: chromeMatchWithFunction[1].trim(),
+                    filePath: chromeMatchWithFunction[2].trim(),
+                    line: parseInt(chromeMatchWithFunction[3]),
+                    column: parseInt(chromeMatchWithFunction[4]),
+                    fullStack: stack
+                };
+            }
+
             const chromeMatch =
                 callerLine.match(/\(([^)]+):(\d+):(\d+)\)/) ||
                 callerLine.match(/at\s+([^:]+):(\d+):(\d+)/);
@@ -251,17 +296,33 @@ export class HealOpsLogger {
             }
 
             // Firefox format: "functionName@file:line:column"
-            const firefoxMatch = callerLine.match(/@([^:]+):(\d+):(\d+)/);
+            const firefoxMatch = callerLine.match(
+                /([^@]+)@([^:]+):(\d+):(\d+)/
+            );
             if (firefoxMatch) {
                 return {
-                    filePath: firefoxMatch[1].trim(),
-                    line: parseInt(firefoxMatch[2]),
-                    column: parseInt(firefoxMatch[3]),
+                    functionName: firefoxMatch[1].trim(),
+                    filePath: firefoxMatch[2].trim(),
+                    line: parseInt(firefoxMatch[3]),
+                    column: parseInt(firefoxMatch[4]),
                     fullStack: stack
                 };
             }
 
             // Node.js format: "at functionName (file:line:column)" or "at file:line:column"
+            const nodeMatchWithFunction = callerLine.match(
+                /at\s+([^(]+)\s+\(([^:)]+):(\d+):(\d+)\)/
+            );
+            if (nodeMatchWithFunction) {
+                return {
+                    functionName: nodeMatchWithFunction[1].trim(),
+                    filePath: nodeMatchWithFunction[2].trim(),
+                    line: parseInt(nodeMatchWithFunction[3]),
+                    column: parseInt(nodeMatchWithFunction[4]),
+                    fullStack: stack
+                };
+            }
+
             const nodeMatch = callerLine.match(
                 /at\s+(?:[^(]+)?\(?([^:)]+):(\d+):(\d+)\)?/
             );
@@ -350,10 +411,245 @@ export class HealOpsLogger {
         // This resolves bundled/minified file paths to original source file paths
         const cleanedStackTrace = await cleanStackTrace(rawStackTrace);
 
+        // Resolve filePath from various sources
+        // Priority: metadata.filePath > extracted from error stack trace > extracted from cleaned stack > callerInfo.filePath
+        // IMPORTANT: Always prioritize the actual error location over SDK interceptor locations
+        let resolvedFilePath: string | undefined = undefined;
+        let fallbackFilePath: string | undefined = undefined;
+
+        if (metadata?.filePath) {
+            // Resolve filePath from metadata if it's a bundled file
+            // Try to get source file path, but fallback to original if resolution fails
+            resolvedFilePath = await resolveFilePath(
+                metadata.filePath,
+                metadata.line,
+                metadata.column,
+                true // Always return a path for traceability
+            );
+            // If metadata.filePath is already a source file (not bundled), use it
+            if (
+                !resolvedFilePath &&
+                metadata.filePath &&
+                isSourceFile(metadata.filePath)
+            ) {
+                resolvedFilePath = metadata.filePath;
+            }
+            // Keep original as fallback
+            if (!resolvedFilePath) {
+                fallbackFilePath = metadata.filePath;
+            }
+        }
+
+        // PRIORITY: Extract from error stack trace first (most reliable - contains actual error location)
+        // This is better than callerInfo which might point to our SDK's fetch interceptor
+        if (
+            !resolvedFilePath &&
+            rawStackTrace &&
+            (metadata?.errorStack ||
+                metadata?.stack ||
+                metadata?.exception?.stacktrace)
+        ) {
+            // Extract the first meaningful file path (skips SDK frames including window.fetch)
+            const extractedPath = extractFilePathFromStack(rawStackTrace, true);
+            if (extractedPath) {
+                // Extract line and column from the stack trace for better resolution
+                const stackLines = rawStackTrace.split('\n');
+                let extractedLine: number | undefined = undefined;
+                let extractedColumn: number | undefined = undefined;
+
+                for (const line of stackLines) {
+                    // Skip SDK frames and window.fetch interceptor
+                    if (
+                        line.includes('HealOpsLogger') ||
+                        line.includes('window.fetch') ||
+                        line.includes('healops-opentelemetry')
+                    ) {
+                        continue;
+                    }
+
+                    // Match patterns to find line/column for this file
+                    const match =
+                        line.match(/\(([^)]+):(\d+):(\d+)\)/) ||
+                        line.match(/at\s+([^:]+):(\d+):(\d+)/) ||
+                        line.match(/@([^:]+):(\d+):(\d+)/);
+
+                    if (match) {
+                        const filePath = match[1]?.trim();
+                        if (filePath === extractedPath) {
+                            extractedLine = parseInt(match[2], 10);
+                            extractedColumn = parseInt(match[3], 10);
+                            break;
+                        }
+                    }
+                }
+
+                // Try to resolve it if it's a bundled file (with line/column for better accuracy)
+                resolvedFilePath = await resolveFilePath(
+                    extractedPath,
+                    extractedLine,
+                    extractedColumn,
+                    true
+                );
+                // If extracted path is already a source file, use it
+                if (
+                    !resolvedFilePath &&
+                    extractedPath &&
+                    isSourceFile(extractedPath)
+                ) {
+                    resolvedFilePath = extractedPath;
+                }
+                // Keep extracted path as fallback
+                if (!resolvedFilePath && !fallbackFilePath) {
+                    fallbackFilePath = extractedPath;
+                }
+            }
+        }
+
+        // If we don't have a resolved path yet, try extracting from cleaned stack trace
+        // This has resolved source maps but might miss some frames
+        if (!resolvedFilePath && cleanedStackTrace) {
+            // Extract the first meaningful file path (skips SDK frames)
+            const extractedPath = extractFilePathFromStack(
+                cleanedStackTrace,
+                true
+            ); // Allow bundled files as fallback
+            if (extractedPath) {
+                // Extract line and column from the stack trace for better resolution
+                const stackLines = cleanedStackTrace.split('\n');
+                let extractedLine: number | undefined = undefined;
+                let extractedColumn: number | undefined = undefined;
+
+                for (const line of stackLines) {
+                    // Match patterns to find line/column for this file
+                    const match =
+                        line.match(/\(([^)]+):(\d+):(\d+)\)/) ||
+                        line.match(/at\s+([^:]+):(\d+):(\d+)/) ||
+                        line.match(/@([^:]+):(\d+):(\d+)/);
+
+                    if (match) {
+                        const filePath = match[1]?.trim();
+                        if (filePath === extractedPath) {
+                            extractedLine = parseInt(match[2], 10);
+                            extractedColumn = parseInt(match[3], 10);
+                            break;
+                        }
+                    }
+                }
+
+                // Try to resolve it if it's a bundled file (with line/column for better accuracy)
+                resolvedFilePath = await resolveFilePath(
+                    extractedPath,
+                    extractedLine,
+                    extractedColumn,
+                    true
+                );
+                // If extracted path is already a source file, use it
+                if (
+                    !resolvedFilePath &&
+                    extractedPath &&
+                    isSourceFile(extractedPath)
+                ) {
+                    resolvedFilePath = extractedPath;
+                }
+                // Keep extracted path as fallback
+                if (!resolvedFilePath && !fallbackFilePath) {
+                    fallbackFilePath = extractedPath;
+                }
+            }
+        }
+
+        // If still no path, try callerInfo (but only if we don't have error stack)
+        // NOTE: callerInfo might point to our SDK's fetch interceptor, so we prioritize stack trace extraction
+        // Only use callerInfo as a last resort
+        if (
+            !resolvedFilePath &&
+            !fallbackFilePath &&
+            callerInfo.filePath &&
+            !metadata?.errorStack
+        ) {
+            // Skip callerInfo if it's from our SDK's fetch interceptor
+            const isFetchInterceptor =
+                callerInfo.filePath.includes('46bf396f3323cd2c.js') ||
+                callerInfo.functionName === 'window.fetch';
+
+            if (!isFetchInterceptor) {
+                resolvedFilePath = await resolveFilePath(
+                    callerInfo.filePath,
+                    callerInfo.line,
+                    callerInfo.column,
+                    true // Always return a path for traceability
+                );
+                // If callerInfo.filePath is already a source file, use it
+                if (
+                    !resolvedFilePath &&
+                    callerInfo.filePath &&
+                    isSourceFile(callerInfo.filePath)
+                ) {
+                    resolvedFilePath = callerInfo.filePath;
+                }
+                // Keep callerInfo path as fallback
+                if (!resolvedFilePath && !fallbackFilePath) {
+                    fallbackFilePath = callerInfo.filePath;
+                }
+            }
+        }
+
+        // Last resort: extract from raw stack trace if available
+        if (!resolvedFilePath && rawStackTrace) {
+            const extractedPath = extractFilePathFromStack(rawStackTrace, true); // Allow bundled files as fallback
+            if (extractedPath) {
+                resolvedFilePath = await resolveFilePath(
+                    extractedPath,
+                    undefined,
+                    undefined,
+                    true
+                );
+                // If extracted path is already a source file, use it
+                if (
+                    !resolvedFilePath &&
+                    extractedPath &&
+                    isSourceFile(extractedPath)
+                ) {
+                    resolvedFilePath = extractedPath;
+                }
+                // Keep extracted path as fallback
+                if (!resolvedFilePath && !fallbackFilePath) {
+                    fallbackFilePath = extractedPath;
+                }
+            }
+        }
+
+        // Always use resolved source file path if available, otherwise use fallback
+        // This ensures logs always have a file path for traceability
+        const finalFilePath = resolvedFilePath || fallbackFilePath;
+
+        // Extract line, column, and function name from caller info or metadata
+        const finalLine = metadata?.line || callerInfo.line;
+        const finalColumn = metadata?.column || callerInfo.column;
+        const finalFunctionName =
+            metadata?.functionName || callerInfo.functionName;
+
         const enrichedMetadata = {
             ...metadata,
             // Only include caller info if we don't have original error info
             ...(metadata?.errorStack ? {} : callerInfo),
+            // Always include filePath if we have one (resolved or fallback)
+            ...(finalFilePath ? { filePath: finalFilePath } : {}),
+            // Include OpenTelemetry semantic convention attributes for source code information
+            // See: https://opentelemetry.io/docs/specs/semconv/code/
+            // These attributes follow OpenTelemetry standards and can be used by any OTel-compatible tool
+            ...(finalFilePath
+                ? {
+                      'code.file.path': finalFilePath,
+                      ...(finalLine ? { 'code.line.number': finalLine } : {}),
+                      ...(finalColumn
+                          ? { 'code.column.number': finalColumn }
+                          : {}),
+                      ...(finalFunctionName
+                          ? { 'code.function.name': finalFunctionName }
+                          : {})
+                  }
+                : {}),
             // Use cleaned stack trace
             stack: cleanedStackTrace,
             // Preserve original errorStack for reference
@@ -385,6 +681,11 @@ export class HealOpsLogger {
             message,
             source: this.config.source || 'healops-sdk',
             timestamp: new Date().toISOString(),
+            // Include release and environment for server-side source map resolution
+            ...(this.config.release ? { release: this.config.release } : {}),
+            ...(this.config.environment
+                ? { environment: this.config.environment }
+                : {}),
             metadata: enrichedMetadata
         };
 

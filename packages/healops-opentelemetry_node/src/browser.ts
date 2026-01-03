@@ -3,6 +3,11 @@ import {
     type HealOpsLoggerConfig,
     cleanStackTrace
 } from './HealOpsLogger';
+import {
+    resolveFilePath,
+    extractFilePathFromStack,
+    isSourceFile
+} from './sourceMapResolver';
 
 /**
  * Console interceptor that automatically sends console logs to HealOps
@@ -136,7 +141,7 @@ export function initHealOpsLogger(
     let errorHandlersSetup = false;
     if (typeof window !== 'undefined') {
         // Catch unhandled JavaScript errors
-        window.addEventListener('error', (event) => {
+        window.addEventListener('error', async (event) => {
             // Capture full stack trace - prefer error.stack, fallback to constructing from event
             let fullStack = event.error?.stack;
             if (!fullStack && event.filename) {
@@ -144,17 +149,107 @@ export function initHealOpsLogger(
                 fullStack = `Error: ${event.message}\n    at ${event.filename}:${event.lineno}:${event.colno}`;
             }
 
+            // Clean the stack trace to resolve source maps
+            const cleanedStack = fullStack
+                ? await cleanStackTrace(fullStack, 1000)
+                : undefined;
+
+            // Resolve filePath from multiple sources
+            // IMPORTANT: Always return a file path (prefer source, but use chunk path if needed) for traceability
+            let resolvedFilePath: string | undefined = undefined;
+            let fallbackFilePath: string | undefined = undefined;
+
+            // First, try to resolve from filename
+            if (event.filename) {
+                resolvedFilePath = await resolveFilePath(
+                    event.filename,
+                    event.lineno,
+                    event.colno,
+                    true // Always return a path for traceability
+                );
+                // If filename is already a source file (not bundled), use it
+                if (
+                    !resolvedFilePath &&
+                    event.filename &&
+                    isSourceFile(event.filename)
+                ) {
+                    resolvedFilePath = event.filename;
+                }
+                // Keep filename as fallback
+                if (!resolvedFilePath && !fallbackFilePath) {
+                    fallbackFilePath = event.filename;
+                }
+            }
+
+            // Also try to extract from cleaned stack trace
+            if (!resolvedFilePath && cleanedStack) {
+                const extractedPath = extractFilePathFromStack(
+                    cleanedStack,
+                    true
+                ); // Allow bundled files as fallback
+                if (extractedPath) {
+                    resolvedFilePath = await resolveFilePath(
+                        extractedPath,
+                        undefined,
+                        undefined,
+                        true
+                    );
+                    // If extracted path is already a source file, use it
+                    if (
+                        !resolvedFilePath &&
+                        extractedPath &&
+                        isSourceFile(extractedPath)
+                    ) {
+                        resolvedFilePath = extractedPath;
+                    }
+                    // Keep extracted path as fallback
+                    if (!resolvedFilePath && !fallbackFilePath) {
+                        fallbackFilePath = extractedPath;
+                    }
+                }
+            }
+
+            // Last resort: extract from original stack
+            if (!resolvedFilePath && fullStack) {
+                const extractedPath = extractFilePathFromStack(fullStack, true); // Allow bundled files as fallback
+                if (extractedPath) {
+                    resolvedFilePath = await resolveFilePath(
+                        extractedPath,
+                        undefined,
+                        undefined,
+                        true
+                    );
+                    // If extracted path is already a source file, use it
+                    if (
+                        !resolvedFilePath &&
+                        extractedPath &&
+                        isSourceFile(extractedPath)
+                    ) {
+                        resolvedFilePath = extractedPath;
+                    }
+                    // Keep extracted path as fallback
+                    if (!resolvedFilePath && !fallbackFilePath) {
+                        fallbackFilePath = extractedPath;
+                    }
+                }
+            }
+
+            // Always use resolved source file path if available, otherwise use fallback
+            // This ensures logs always have a file path for traceability
+            const finalFilePath = resolvedFilePath || fallbackFilePath;
+
             logger.error(`Unhandled Error: ${event.message}`, {
                 errorName: event.error?.name || 'Error',
                 errorMessage: event.error?.message || event.message,
                 errorStack: fullStack,
-                stack: fullStack, // Also include as 'stack' for backend extraction
+                stack: cleanedStack || fullStack, // Use cleaned stack if available
                 exception: {
                     type: event.error?.name || 'Error',
                     message: event.error?.message || event.message,
-                    stacktrace: fullStack || ''
+                    stacktrace: cleanedStack || fullStack || ''
                 },
                 filename: event.filename,
+                filePath: finalFilePath, // Use resolved or extracted file path
                 lineno: event.lineno,
                 colno: event.colno,
                 type: 'unhandled_error'
@@ -227,7 +322,87 @@ export function initHealOpsLogger(
 
                     // Clean the stack trace to remove SDK internal frames and resolve source maps
                     // This resolves bundled/minified file paths to original source file paths
-                    const cleanedStack = await cleanStackTrace(stackTrace, 1000);
+                    const cleanedStack = await cleanStackTrace(
+                        stackTrace,
+                        1000
+                    );
+
+                    // Extract and resolve filePath from the stack trace
+                    // IMPORTANT: Extract from the actual error location (skip window.fetch interceptor)
+                    // Priority: cleaned stack > original stack, but always skip window.fetch
+                    let resolvedFilePath: string | undefined = undefined;
+                    let fallbackFilePath: string | undefined = undefined;
+
+                    // Use the original stack trace to find the actual error location
+                    // The cleaned stack might have resolved paths, but we need the original for extraction
+                    const stackToExtractFrom = stackTrace || cleanedStack;
+
+                    if (stackToExtractFrom) {
+                        // Extract the first meaningful file path (skips SDK frames including window.fetch)
+                        const extractedPath = extractFilePathFromStack(
+                            stackToExtractFrom,
+                            true
+                        );
+                        if (extractedPath) {
+                            // Extract line and column from the stack trace for better resolution
+                            const stackLines = stackToExtractFrom.split('\n');
+                            let extractedLine: number | undefined = undefined;
+                            let extractedColumn: number | undefined = undefined;
+
+                            for (const line of stackLines) {
+                                // Skip SDK frames and window.fetch interceptor
+                                if (
+                                    line.includes('HealOpsLogger') ||
+                                    line.includes('window.fetch') ||
+                                    line.includes('healops-opentelemetry')
+                                ) {
+                                    continue;
+                                }
+
+                                // Match patterns to find line/column for this file
+                                const match =
+                                    line.match(/\(([^)]+):(\d+):(\d+)\)/) ||
+                                    line.match(/at\s+([^:]+):(\d+):(\d+)/) ||
+                                    line.match(/@([^:]+):(\d+):(\d+)/);
+
+                                if (match) {
+                                    const filePath = match[1]?.trim();
+                                    if (filePath === extractedPath) {
+                                        extractedLine = parseInt(match[2], 10);
+                                        extractedColumn = parseInt(
+                                            match[3],
+                                            10
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // Try to resolve it if it's a bundled file (with line/column for better accuracy)
+                            resolvedFilePath = await resolveFilePath(
+                                extractedPath,
+                                extractedLine,
+                                extractedColumn,
+                                true
+                            );
+                            // If extracted path is already a source file, use it
+                            if (
+                                !resolvedFilePath &&
+                                extractedPath &&
+                                isSourceFile(extractedPath)
+                            ) {
+                                resolvedFilePath = extractedPath;
+                            }
+                            // Keep extracted path as fallback
+                            if (!resolvedFilePath && !fallbackFilePath) {
+                                fallbackFilePath = extractedPath;
+                            }
+                        }
+                    }
+
+                    // Always use resolved source file path if available, otherwise use fallback
+                    // This ensures logs always have a file path for traceability
+                    const finalFilePath = resolvedFilePath || fallbackFilePath;
 
                     logger.error(
                         `HTTP Error: ${response.status} ${response.statusText}`,
@@ -237,6 +412,7 @@ export function initHealOpsLogger(
                             statusText: response.statusText,
                             method,
                             type: 'http_error',
+                            filePath: finalFilePath, // Include resolved or extracted file path
                             stack: cleanedStack, // Include cleaned stack trace with resolved source paths
                             exception: {
                                 type: 'HTTPError',
