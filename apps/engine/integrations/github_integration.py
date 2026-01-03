@@ -243,7 +243,7 @@ class GithubIntegration:
             print(f"Error getting repo structure: {e}")
             return []
 
-    def create_pr(self, repo_name: str, title: str, body: str, head_branch: str, base_branch: str = "main", changes: Dict[str, str] = None) -> Dict[str, Any]:
+    def create_pr(self, repo_name: str, title: str, body: str, head_branch: str, base_branch: str = "main", changes: Dict[str, str] = None, draft: bool = False) -> Dict[str, Any]:
         """
         Create a Pull Request with changes.
         
@@ -254,6 +254,7 @@ class GithubIntegration:
             head_branch: Name of the new branch
             base_branch: Target branch (default: main)
             changes: Dict of {file_path: new_content}
+            draft: If True, create as draft PR
             
         Returns:
             PR details
@@ -293,13 +294,14 @@ class GithubIntegration:
                         # File doesn't exist, create it
                         repo.create_file(file_path, f"Create: {file_path}", content, branch=head_branch)
             
-            # Create PR
-            pr = repo.create_pull(title=title, body=body, head=head_branch, base=base_branch)
+            # Create PR (draft or regular)
+            pr = repo.create_pull(title=title, body=body, head=head_branch, base=base_branch, draft=draft)
             
             return {
                 "status": "success",
                 "pr_url": pr.html_url,
-                "pr_number": pr.number
+                "pr_number": pr.number,
+                "draft": draft
             }
             
         except Exception as e:

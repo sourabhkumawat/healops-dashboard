@@ -1560,15 +1560,182 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                         if repo_name:
                             print(f"🔍 Analyzing repository {repo_name} for incident {incident.id} (service: {incident.service_name})")
                             github_integration = GithubIntegration(integration_id=integration.id)
-                            pr_result = analyze_repository_and_create_pr(
-                                incident=incident,
-                                logs=logs,
-                                root_cause=root_cause,
-                                action_taken=action_taken or "",
-                                github_integration=github_integration,
-                                repo_name=repo_name,
-                                db=db
-                            )
+                            
+                            # Always use enhanced crew by default, fallback to old crew if needed
+                            use_old_crew = os.getenv("USE_OLD_CREW", "false").lower() == "true"
+                            
+                            if not use_old_crew:
+                                # Try enhanced crew first (default)
+                                try:
+                                    print("🚀 Using enhanced multi-agent crew system")
+                                    from enhanced_crew import run_enhanced_crew
+                                    enhanced_result = run_enhanced_crew(
+                                        incident=incident,
+                                        logs=logs,
+                                        root_cause=root_cause,
+                                        github_integration=github_integration,
+                                        repo_name=repo_name,
+                                        db=db
+                                    )
+                                    
+                                    # Process enhanced result - handle all decision actions
+                                    decision_action = enhanced_result.get("decision", {}).get("action")
+                                    best_fix = enhanced_result.get("best_fix", {})
+                                    fix_data = best_fix.get("fix_data", {})
+                                    
+                                    # Convert to PR format
+                                    changes = {}
+                                    if isinstance(fix_data, dict):
+                                        for file_path, file_info in fix_data.items():
+                                            if isinstance(file_info, dict):
+                                                changes[file_path] = file_info.get("content", "")
+                                            else:
+                                                changes[file_path] = str(file_info)
+                                    
+                                    # Determine if draft PR
+                                    is_draft = decision_action == "CREATE_DRAFT_PR"
+                                    confidence_score = best_fix.get("confidence", {}).get("overall_confidence", 0)
+                                    
+                                    if changes and decision_action in ["CREATE_PR", "CREATE_PR_WITH_WARNINGS", "CREATE_DRAFT_PR"]:
+                                        # Build PR body with appropriate warnings
+                                        warnings_text = ""
+                                        if decision_action == "CREATE_PR_WITH_WARNINGS":
+                                            warnings = enhanced_result.get("decision", {}).get("warnings", [])
+                                            if warnings:
+                                                warnings_text = "\n### ⚠️ Warnings\n" + "\n".join(f"- {w}" for w in warnings) + "\n"
+                                        elif decision_action == "CREATE_DRAFT_PR":
+                                            warnings = enhanced_result.get("decision", {}).get("warnings", [])
+                                            if warnings:
+                                                warnings_text = "\n### ⚠️ Low Confidence - Draft PR\n" + "\n".join(f"- {w}" for w in warnings) + "\n"
+                                            warnings_text += "\n**This is a draft PR. Please review the changes on the incident page before merging.**\n"
+                                        
+                                        pr_result = github_integration.create_pr(
+                                            repo_name=repo_name,
+                                            title=f"Fix: {incident.title} (Enhanced AI)" + (" [DRAFT]" if is_draft else ""),
+                                            body=f"""## Incident Fix (Enhanced AI)
+
+**Incident ID:** #{incident.id}
+**Service:** {incident.service_name}
+**Root Cause:** {root_cause}
+
+### AI Analysis
+This PR was generated using the enhanced multi-agent system with:
+- Interactive codebase exploration
+- Incremental edits (Cursor-style)
+- Multi-layer validation
+- Confidence scoring: {confidence_score}%
+
+{warnings_text}
+### Decision
+{enhanced_result.get('decision', {}).get('reasoning', 'N/A')}
+
+### Files Changed
+{chr(10).join(f"- `{path}`" for path in changes.keys())}
+
+---
+*Generated by HealOps Enhanced Multi-Agent System*
+""",
+                                            head_branch=f"healops-enhanced-fix-{incident.id}",
+                                            base_branch="main",
+                                            changes=changes,
+                                            draft=is_draft
+                                        )
+                                        
+                                        if pr_result.get("status") == "success":
+                                            result["pr_url"] = pr_result.get("pr_url")
+                                            result["pr_number"] = pr_result.get("pr_number")
+                                            result["pr_files_changed"] = list(changes.keys())
+                                            result["changes"] = changes
+                                            result["enhanced_crew"] = True
+                                            result["confidence_score"] = confidence_score
+                                            result["is_draft"] = is_draft
+                                            result["decision"] = enhanced_result.get("decision")
+                                            
+                                            # Store original file contents for comparison on UI
+                                            original_contents = {}
+                                            for file_path in changes.keys():
+                                                original_content = github_integration.get_file_contents(repo_name, file_path, ref="main")
+                                                if original_content:
+                                                    original_contents[file_path] = original_content
+                                            result["original_contents"] = original_contents
+                                            
+                                            if is_draft:
+                                                print(f"📝 Created DRAFT PR using enhanced crew: {pr_result.get('pr_url')}")
+                                            else:
+                                                print(f"✅ Created PR using enhanced crew: {pr_result.get('pr_url')}")
+                                        else:
+                                            print(f"⚠️  Enhanced crew PR creation failed: {pr_result.get('message')}")
+                                            result["pr_error"] = pr_result.get("message")
+                                    elif not changes:
+                                        print("⚠️  Enhanced crew generated no changes")
+                                        result["enhanced_crew"] = True
+                                        result["decision"] = enhanced_result.get("decision")
+                                    else:
+                                        # SKIP_PR or other action - still store decision and changes for UI
+                                        print(f"⚠️  Enhanced crew decision: {decision_action}")
+                                        result["enhanced_crew"] = True
+                                        result["decision"] = enhanced_result.get("decision")
+                                        result["confidence_score"] = confidence_score
+                                        if changes:
+                                            result["changes"] = changes
+                                            # Store original contents for UI display
+                                            original_contents = {}
+                                            for file_path in changes.keys():
+                                                original_content = github_integration.get_file_contents(repo_name, file_path, ref="main")
+                                                if original_content:
+                                                    original_contents[file_path] = original_content
+                                            result["original_contents"] = original_contents
+                                    
+                                except Exception as e:
+                                    import traceback
+                                    print(f"⚠️  Enhanced crew failed, falling back to old crew: {e}")
+                                    print(traceback.format_exc())
+                                    # Fallback to old crew/regular analysis
+                                    pr_result = analyze_repository_and_create_pr(
+                                        incident=incident,
+                                        logs=logs,
+                                        root_cause=root_cause,
+                                        action_taken=action_taken or "",
+                                        github_integration=github_integration,
+                                        repo_name=repo_name,
+                                        db=db
+                                    )
+                                    
+                                    if pr_result.get("status") == "success":
+                                        result["pr_url"] = pr_result.get("pr_url")
+                                        result["pr_number"] = pr_result.get("pr_number")
+                                        result["pr_files_changed"] = pr_result.get("files_changed", [])
+                                        result["changes"] = pr_result.get("changes", {})
+                                        result["original_contents"] = pr_result.get("original_contents", {})
+                                        result["enhanced_crew"] = False  # Used old crew as fallback
+                                        print(f"✅ Created PR using old crew (fallback): {pr_result.get('pr_url')}")
+                                    elif pr_result.get("status") == "error":
+                                        print(f"⚠️  Old crew PR creation also failed: {pr_result.get('message')}")
+                                        result["pr_error"] = pr_result.get("message")
+                            else:
+                                # Use old crew explicitly
+                                print("📋 Using old crew system (USE_OLD_CREW=true)")
+                                pr_result = analyze_repository_and_create_pr(
+                                    incident=incident,
+                                    logs=logs,
+                                    root_cause=root_cause,
+                                    action_taken=action_taken or "",
+                                    github_integration=github_integration,
+                                    repo_name=repo_name,
+                                    db=db
+                                )
+                                
+                                if pr_result.get("status") == "success":
+                                    result["pr_url"] = pr_result.get("pr_url")
+                                    result["pr_number"] = pr_result.get("pr_number")
+                                    result["pr_files_changed"] = pr_result.get("files_changed", [])
+                                    result["changes"] = pr_result.get("changes", {})
+                                    result["original_contents"] = pr_result.get("original_contents", {})
+                                    result["enhanced_crew"] = False
+                                    print(f"✅ Created PR using old crew: {pr_result.get('pr_url')}")
+                                elif pr_result.get("status") == "error":
+                                    print(f"⚠️  Old crew PR creation failed: {pr_result.get('message')}")
+                                    result["pr_error"] = pr_result.get("message")
                             
                             if pr_result.get("status") == "success":
                                 result["pr_url"] = pr_result.get("pr_url")

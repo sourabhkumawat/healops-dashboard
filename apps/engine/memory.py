@@ -45,9 +45,20 @@ class CodeMemory:
         except Exception as e:
             print(f"Error storing error context in Redis: {e}")
 
-    def store_fix(self, error_signature: str, fix_description: str, code_patch: str):
-        """Stores a successful fix for an error in DB."""
+    def store_fix(self, error_signature: str, fix_description: str, code_patch: str, structured_data: Optional[Dict[str, Any]] = None):
+        """Stores a successful fix for an error in DB.
+        
+        Args:
+            error_signature: Error signature/fingerprint
+            fix_description: Description of the fix
+            code_patch: Code patch (can be edit blocks or full file)
+            structured_data: Optional structured fix data (edits, validation, etc.)
+        """
         try:
+            # If structured_data provided, store as JSON in code_patch
+            if structured_data:
+                code_patch = json.dumps(structured_data)
+            
             new_fix = AgentMemoryFix(
                 error_signature=error_signature,
                 description=fix_description,
@@ -57,7 +68,6 @@ class CodeMemory:
             self.db.commit()
 
             # Invalidate/Update Redis cache for retrieval
-            # We might want to cache the LIST of fixes for an error
             self._cache_fixes(error_signature)
 
         except Exception as e:
@@ -141,3 +151,66 @@ class CodeMemory:
         except Exception as e:
             self.db.rollback()
             print(f"Error updating repo context: {e}")
+    
+    def compare_with_memory(self, error_signature: str, current_fix: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Compare current fix with past fixes in memory.
+        
+        Args:
+            error_signature: Error signature to look up
+            current_fix: Current fix data to compare
+            
+        Returns:
+            Comparison results with similarity scores
+        """
+        memory_data = self.retrieve_context(error_signature)
+        known_fixes = memory_data.get("known_fixes", [])
+        
+        if not known_fixes:
+            return {
+                "similarity_score": 0,
+                "matches": [],
+                "message": "No past fixes found in memory"
+            }
+        
+        matches = []
+        current_files = set(current_fix.get("files_changed", []))
+        
+        for i, past_fix in enumerate(known_fixes[:5]):  # Compare with top 5 past fixes
+            try:
+                # Try to parse structured data if available
+                patch_data = past_fix.get("patch", "")
+                if patch_data.startswith("{"):
+                    past_fix_data = json.loads(patch_data)
+                    past_files = set(past_fix_data.get("files_changed", []))
+                else:
+                    # Legacy format - extract file paths from patch
+                    past_files = set()
+                    # Simple extraction (would need more sophisticated parsing)
+                
+                # Calculate similarity
+                if current_files and past_files:
+                    common_files = current_files.intersection(past_files)
+                    similarity = len(common_files) / max(len(current_files), len(past_files))
+                else:
+                    similarity = 0.5 if past_fix.get("description", "").lower() in str(current_fix).lower() else 0.0
+                
+                matches.append({
+                    "index": i,
+                    "description": past_fix.get("description", ""),
+                    "similarity": round(similarity * 100, 2),
+                    "common_files": list(common_files) if current_files and past_files else []
+                })
+            except Exception as e:
+                print(f"Error comparing with fix {i}: {e}")
+                continue
+        
+        # Get best match
+        best_match = max(matches, key=lambda x: x["similarity"]) if matches else None
+        
+        return {
+            "similarity_score": best_match["similarity"] if best_match else 0,
+            "matches": matches,
+            "best_match": best_match,
+            "total_past_fixes": len(known_fixes)
+        }

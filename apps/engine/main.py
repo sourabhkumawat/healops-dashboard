@@ -18,6 +18,7 @@ from integrations.github_integration import GithubIntegration
 from integrations.github_app_auth import get_installation_info, get_installation_repositories
 from middleware import APIKeyMiddleware
 from crypto_utils import encrypt_token, decrypt_token
+from rate_limiter import check_rate_limit
 from datetime import timedelta, datetime
 from partition_manager import ensure_partition_exists_for_timestamp
 import os
@@ -2077,6 +2078,24 @@ async def analyze_incident(incident_id: int, background_tasks: BackgroundTasks, 
     # Get authenticated user (middleware ensures this is set)
     user_id = get_user_id_from_request(request, db=db)
 
+    # Rate limiting: 5 analyses per user per hour
+    rate_limit_key = f"analyze_incident:user:{user_id}"
+    is_allowed, remaining = check_rate_limit(rate_limit_key, max_requests=5, window_seconds=3600)
+    
+    if not is_allowed:
+        # Calculate human-readable time
+        if remaining >= 3600:
+            time_str = f"{remaining // 3600} hour(s)"
+        elif remaining >= 60:
+            time_str = f"{remaining // 60} minute(s)"
+        else:
+            time_str = f"{remaining} second(s)"
+        
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Maximum 5 analyses per hour. Try again in {time_str}."
+        )
+
     # ALWAYS filter by user_id to prevent cross-user access
     incident = db.query(Incident).filter(
         Incident.id == incident_id,
@@ -2086,17 +2105,28 @@ async def analyze_incident(incident_id: int, background_tasks: BackgroundTasks, 
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
 
-    background_tasks.add_task(analyze_incident_async, incident_id)
+    # Track analytics
+    try:
+        # Log analysis request
+        print(f"📊 Analytics: Analysis requested for incident {incident_id} by user {user_id}")
+    except Exception as e:
+        print(f"⚠️  Failed to log analytics: {e}")
+
+    background_tasks.add_task(analyze_incident_async, incident_id, user_id)
 
     return {"status": "analysis_triggered", "message": "AI analysis started in background"}
 
-async def analyze_incident_async(incident_id: int):
+async def analyze_incident_async(incident_id: int, user_id: Optional[int] = None):
     """Background task to analyze an incident."""
     from database import SessionLocal
     from ai_analysis import analyze_incident_with_openrouter
     
     db = SessionLocal()
     incident = None
+    analysis_start_time = time.time()
+    analysis_success = False
+    analysis_error = None
+    
     try:
         incident = db.query(Incident).filter(Incident.id == incident_id).first()
         if not incident:
@@ -2106,7 +2136,10 @@ async def analyze_incident_async(incident_id: int):
         # Fetch related logs
         logs = []
         if incident.log_ids:
-            logs = db.query(LogEntry).filter(LogEntry.id.in_(incident.log_ids)).order_by(LogEntry.timestamp.desc()).all()
+            # Ensure log_ids is a list and not empty
+            log_id_list = incident.log_ids if isinstance(incident.log_ids, list) else []
+            if log_id_list:
+                logs = db.query(LogEntry).filter(LogEntry.id.in_(log_id_list)).order_by(LogEntry.timestamp.desc()).all()
         
         # Perform analysis
         analysis = analyze_incident_with_openrouter(incident, logs, db)
@@ -2120,51 +2153,144 @@ async def analyze_incident_async(incident_id: int):
         
         # Store PR information in action_result if PR was created
         if analysis.get("pr_url"):
+            changes = analysis.get("changes", {})
+            original_contents = analysis.get("original_contents", {})
+            
+            # Ensure original_contents has entries for all changed files
+            # If missing, set to empty string (new file) to prevent UI errors
+            for file_path in changes.keys():
+                if file_path not in original_contents:
+                    original_contents[file_path] = ""
+            
             incident.action_result = {
                 "pr_url": analysis.get("pr_url"),
                 "pr_number": analysis.get("pr_number"),
                 "pr_files_changed": analysis.get("pr_files_changed", []),
-                "changes": analysis.get("changes", {}),
-                "original_contents": analysis.get("original_contents", {}),
-                "status": "pr_created"
+                "changes": changes,
+                "original_contents": original_contents,
+                "is_draft": analysis.get("is_draft", False),
+                "confidence_score": analysis.get("confidence_score"),
+                "decision": analysis.get("decision", {}),
+                "status": "pr_created_draft" if analysis.get("is_draft") else "pr_created"
             }
-            print(f"✅ PR created for incident {incident_id}: {analysis.get('pr_url')}")
+            pr_type = "DRAFT PR" if analysis.get("is_draft") else "PR"
+            print(f"✅ {pr_type} created for incident {incident_id}: {analysis.get('pr_url')}")
         elif analysis.get("pr_error"):
             # Store PR error if creation failed
             incident.action_result = {
                 "status": "pr_failed",
                 "error": analysis.get("pr_error")
             }
+        elif analysis.get("changes"):
+            # Store changes even if PR wasn't created (for UI display)
+            changes = analysis.get("changes", {})
+            original_contents = analysis.get("original_contents", {})
+            
+            # Ensure original_contents has entries for all changed files
+            # If missing, set to empty string (new file) to prevent UI errors
+            for file_path in changes.keys():
+                if file_path not in original_contents:
+                    original_contents[file_path] = ""
+            
+            incident.action_result = {
+                "changes": changes,
+                "original_contents": original_contents,
+                "pr_files_changed": list(changes.keys()),  # Set file list for UI display
+                "confidence_score": analysis.get("confidence_score"),
+                "decision": analysis.get("decision", {}),
+                "status": "changes_generated"
+            }
+            print(f"📝 Changes generated for incident {incident_id} (no PR created)")
         
         # Ensure we always set something to stop infinite loading
         if not incident.root_cause:
             incident.root_cause = "Analysis failed - no results returned. Please check logs."
         
-        db.commit()
-        print(f"✅ AI analysis completed for incident {incident_id}: {incident.root_cause[:100]}")
+        # Commit with error handling
+        try:
+            db.commit()
+            analysis_success = True
+        except Exception as commit_error:
+            db.rollback()
+            print(f"❌ Failed to commit analysis results for incident {incident_id}: {commit_error}")
+            # Try to set error message and commit again
+            try:
+                incident.root_cause = f"Analysis completed but failed to save: {str(commit_error)[:200]}"
+                db.commit()
+            except Exception as retry_error:
+                db.rollback()
+                print(f"❌ Failed to save error message: {retry_error}")
+        
+        analysis_duration = time.time() - analysis_start_time
+        if analysis_success:
+            print(f"✅ AI analysis completed for incident {incident_id}: {incident.root_cause[:100]}")
+        
+        # Track successful analysis analytics
+        try:
+            print(f"📊 Analytics: Analysis succeeded for incident {incident_id}, duration: {analysis_duration:.2f}s, user: {user_id}")
+            # In production, you would send this to your analytics service
+            # Example: analytics.track('incident_analysis_success', {
+            #     'incident_id': incident_id,
+            #     'user_id': user_id,
+            #     'duration_seconds': analysis_duration,
+            #     'has_pr': bool(incident.action_result and incident.action_result.get('pr_url')),
+            #     'is_draft': bool(incident.action_result and incident.action_result.get('is_draft'))
+            # })
+        except Exception as analytics_error:
+            print(f"⚠️  Failed to track analytics: {analytics_error}")
         
     except Exception as e:
         import traceback
         error_trace = traceback.format_exc()
+        analysis_error = str(e)
+        analysis_duration = time.time() - analysis_start_time
         print(f"❌ Error analyzing incident {incident_id}: {e}")
         print(f"Full traceback: {error_trace}")
+        
+        # Track failed analysis analytics
+        try:
+            print(f"📊 Analytics: Analysis failed for incident {incident_id}, duration: {analysis_duration:.2f}s, error: {str(e)[:100]}, user: {user_id}")
+            # In production, you would send this to your analytics service
+            # Example: analytics.track('incident_analysis_failure', {
+            #     'incident_id': incident_id,
+            #     'user_id': user_id,
+            #     'duration_seconds': analysis_duration,
+            #     'error_type': type(e).__name__,
+            #     'error_message': str(e)[:200]
+            # })
+        except Exception as analytics_error:
+            print(f"⚠️  Failed to track analytics: {analytics_error}")
         
         # Set error message to stop infinite loading in UI
         try:
             if incident:
                 incident.root_cause = f"Analysis error: {str(e)[:200]}. Please check server logs."
-                db.commit()
-                print(f"✅ Set error message for incident {incident_id}")
-            else:
-                # Try to get incident again if we lost the reference
-                incident = db.query(Incident).filter(Incident.id == incident_id).first()
-                if incident:
-                    incident.root_cause = f"Analysis error: {str(e)[:200]}. Please check server logs."
+                try:
                     db.commit()
                     print(f"✅ Set error message for incident {incident_id}")
-        except Exception as commit_error:
-            print(f"❌ Failed to update incident with error message: {commit_error}")
-            db.rollback()
+                except Exception as commit_error:
+                    db.rollback()
+                    print(f"❌ Failed to commit error message: {commit_error}")
+            else:
+                # Try to get incident again if we lost the reference
+                try:
+                    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+                    if incident:
+                        incident.root_cause = f"Analysis error: {str(e)[:200]}. Please check server logs."
+                        try:
+                            db.commit()
+                            print(f"✅ Set error message for incident {incident_id}")
+                        except Exception as commit_error:
+                            db.rollback()
+                            print(f"❌ Failed to commit error message: {commit_error}")
+                except Exception as query_error:
+                    print(f"❌ Failed to query incident: {query_error}")
+        except Exception as update_error:
+            print(f"❌ Failed to update incident with error message: {update_error}")
+            try:
+                db.rollback()
+            except Exception:
+                pass  # Ignore rollback errors if connection is already closed
     finally:
         db.close()
 
