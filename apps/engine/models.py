@@ -112,10 +112,13 @@ class Integration(Base):
     # Provider-specific config (encrypted JSON)
     config = Column(JSON)
     
-    # OAuth tokens (encrypted)
+    # OAuth tokens (encrypted) - for backward compatibility
     access_token = Column(String, nullable=True)
     refresh_token = Column(String, nullable=True)
     token_expiry = Column(DateTime(timezone=True), nullable=True)
+    
+    # GitHub App installation ID (for GitHub Apps)
+    installation_id = Column(Integer, nullable=True, index=True)
     
     # Metadata
     project_id = Column(String, nullable=True)

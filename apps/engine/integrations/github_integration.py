@@ -1,47 +1,115 @@
 """
 GitHub integration for PR creation and code management.
+Supports both OAuth tokens (legacy) and GitHub App installations.
 """
 from typing import Dict, Any, Optional
 import os
+from datetime import datetime, timedelta
 from github import Github, GithubException
 from database import SessionLocal
 from models import Integration
+from integrations.github_app_auth import get_installation_token
 
 class GithubIntegration:
     """Handles GitHub interactions."""
     
     def __init__(self, access_token: Optional[str] = None, integration_id: Optional[int] = None):
         self.access_token = access_token
+        self.installation_id = None
+        self._cached_token = None
+        self._token_expires_at = None
+        
         if not self.access_token and integration_id:
             # Fetch from DB
             db = SessionLocal()
             try:
                 integration = db.query(Integration).filter(Integration.id == integration_id).first()
-                if integration and integration.access_token:
-                    from crypto_utils import decrypt_token
-                    try:
-                        self.access_token = decrypt_token(integration.access_token)
-                    except Exception:
-                        # Fallback for legacy plain text tokens
-                        self.access_token = integration.access_token
+                if integration:
+                    # Check for GitHub App installation_id first
+                    if integration.installation_id:
+                        self.installation_id = integration.installation_id
+                        # Installation tokens are generated on-demand, not stored
+                    elif integration.access_token:
+                        # Fall back to OAuth token (legacy)
+                        from crypto_utils import decrypt_token
+                        try:
+                            self.access_token = decrypt_token(integration.access_token)
+                        except Exception:
+                            # Fallback for legacy plain text tokens
+                            self.access_token = integration.access_token
             finally:
                 db.close()
-                
-        self.client = Github(self.access_token) if self.access_token else None
+        
+        # Initialize client - will be set when token is available
+        self.client = None
+        self._ensure_client()
+    
+    def _ensure_client(self):
+        """Ensure GitHub client is initialized with a valid token."""
+        if self.client:
+            return
+        
+        if self.installation_id:
+            # Generate or use cached installation token
+            token = self._get_installation_token()
+            if token:
+                self.client = Github(token)
+        elif self.access_token:
+            # Use OAuth token (legacy)
+            self.client = Github(self.access_token)
+    
+    def _get_installation_token(self) -> Optional[str]:
+        """Get installation token, using cache if valid."""
+        # Check if we have a valid cached token
+        if self._cached_token and self._token_expires_at:
+            if datetime.utcnow() < self._token_expires_at - timedelta(minutes=5):  # Refresh 5 min before expiry
+                return self._cached_token
+        
+        # Generate new installation token
+        if not self.installation_id:
+            return None
+        
+        token_data = get_installation_token(self.installation_id)
+        if token_data and token_data.get("token"):
+            self._cached_token = token_data["token"]
+            self._token_expires_at = token_data.get("expires_at")
+            return self._cached_token
+        
+        return None
     
     def verify_connection(self) -> Dict[str, Any]:
         """Verify GitHub token validity."""
+        self._ensure_client()
         if not self.client:
-            return {"status": "error", "message": "No access token provided"}
+            return {"status": "error", "message": "No access token or installation ID provided"}
             
         try:
-            user = self.client.get_user()
-            return {
-                "status": "verified",
-                "username": user.login,
-                "name": user.name,
-                "email": user.email
-            }
+            # For GitHub Apps, get_user() returns the app, not the installation account
+            # Try to get installation info instead
+            if self.installation_id:
+                from integrations.github_app_auth import get_installation_info
+                installation_info = get_installation_info(self.installation_id)
+                if installation_info:
+                    account = installation_info.get("account", {})
+                    return {
+                        "status": "verified",
+                        "username": account.get("login", "GitHub App Installation"),
+                        "name": account.get("login"),
+                        "email": None,  # GitHub Apps don't have email
+                        "installation_id": self.installation_id,
+                        "account_type": installation_info.get("account", {}).get("type", "User")
+                    }
+                else:
+                    return {"status": "error", "message": "Failed to get installation info"}
+            else:
+                # OAuth token (legacy)
+                user = self.client.get_user()
+                return {
+                    "status": "verified",
+                    "username": user.login,
+                    "name": user.name,
+                    "email": user.email
+                }
         except GithubException as e:
             return {"status": "error", "message": str(e)}
 

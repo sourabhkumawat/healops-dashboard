@@ -15,6 +15,7 @@ from auth import verify_password, get_password_hash, create_access_token, verify
 from integrations import generate_api_key
 
 from integrations.github_integration import GithubIntegration
+from integrations.github_app_auth import get_installation_info, get_installation_repositories
 from middleware import APIKeyMiddleware
 from crypto_utils import encrypt_token, decrypt_token
 from datetime import timedelta, datetime
@@ -1135,8 +1136,14 @@ class ServiceMappingsUpdateRequest(BaseModel):
     service_mappings: Dict[str, str]  # Dict of {service_name: repo_name}
     default_repo: Optional[str] = None  # Default repo for services without mapping
 
+# GitHub OAuth (legacy - may be removed after migration)
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
+
+# GitHub App configuration
+GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
+GITHUB_APP_SLUG = os.getenv("GITHUB_APP_SLUG")
+
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 GITHUB_CALLBACK_URL = "https://engine.healops.ai/integrations/github/callback"
 
@@ -1146,7 +1153,10 @@ def github_reconnect(
     integration_id: int = Query(..., description="The integration ID to reconnect"),
     db: Session = Depends(get_db)
 ):
-    """Handle reconnection by first trying to revoke existing token, then redirecting to authorize."""
+    """Handle reconnection by redirecting to GitHub App installation page."""
+    if not GITHUB_APP_SLUG:
+        raise HTTPException(status_code=500, detail="GitHub App Slug not configured")
+    
     # Get the integration to reconnect
     user_id = get_user_id_from_request(request, db=db)
     
@@ -1163,81 +1173,44 @@ def github_reconnect(
             detail=f"GitHub integration with ID {integration_id} not found or does not belong to your account"
         )
     
-    # Try to revoke the existing authorization on GitHub if we have a token
-    if integration.access_token:
-        try:
-            from crypto_utils import decrypt_token
-            try:
-                access_token = decrypt_token(integration.access_token)
-            except Exception:
-                # Fallback for legacy plain text tokens
-                access_token = integration.access_token
-            
-            # Note: We can't easily revoke the GitHub OAuth grant programmatically without
-            # the user's explicit action. Instead, we'll clear our local token and
-            # redirect to authorize, which should prompt GitHub to show the authorization page
-            # if the grant has been revoked or if we use a unique state parameter
-        except Exception as e:
-            # Continue even if revocation fails
-            pass
-    
     # Mark as disconnected to indicate we're reconnecting
     integration.status = "DISCONNECTED"
-    # Clear the access token so it won't be reused
-    integration.access_token = None
     db.commit()
     
-    # Redirect to authorize with reconnect flag
-    # Use a unique timestamp and nonce to ensure GitHub treats it as a new authorization request
+    # Redirect to GitHub App installation with reconnect flag
+    # Use a unique timestamp and nonce to ensure GitHub treats it as a new installation request
     import base64
     state_data = {
         "timestamp": int(time.time() * 1000),  # Use milliseconds for uniqueness
         "user_id": user_id,  # SECURITY: Include user_id to ensure integration is associated with correct user
         "reconnect": True,
         "integration_id": integration_id,
-        "nonce": secrets.token_urlsafe(16)  # Add random nonce to force new authorization
+        "nonce": secrets.token_urlsafe(16)  # Add random nonce to force new installation
     }
     state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
     
-    # Get the callback URL - use environment variable if set, otherwise construct from request
-    from urllib.parse import quote
-    if GITHUB_CALLBACK_URL:
-        callback_url = GITHUB_CALLBACK_URL
-    else:
-        # Construct from request, forcing HTTPS for production
-        base_url = str(request.base_url).rstrip('/')
-        if 'localhost' not in base_url and base_url.startswith('http://'):
-            # Force HTTPS for production
-            base_url = base_url.replace('http://', 'https://')
-        callback_url = f"{base_url}/integrations/github/callback"
-    
-    scope = "repo read:user read:org"
-    # Build authorization URL
-    # Note: redirect_uri must match exactly what's configured in GitHub OAuth App settings
-    auth_url = (
-        f"https://github.com/login/oauth/authorize"
-        f"?client_id={GITHUB_CLIENT_ID}"
-        f"&scope={scope}"
-        f"&state={state}"
-        f"&redirect_uri={quote(callback_url, safe='')}"
+    # GitHub App installation URL
+    install_url = (
+        f"https://github.com/apps/{GITHUB_APP_SLUG}/installations/new"
+        f"?state={state}"
     )
     
-    return RedirectResponse(auth_url)
+    return RedirectResponse(install_url)
 
 @app.get("/integrations/github/authorize")
 def github_authorize(request: Request, reconnect: Optional[str] = None, integration_id: Optional[int] = None, db: Session = Depends(get_db)):
-    """Redirect user to GitHub OAuth authorization page.
+    """Redirect user to GitHub App installation page.
     
     SECURITY: This endpoint requires authentication to ensure integrations are
-    created for the correct user. User ID is included in OAuth state parameter.
+    created for the correct user. User ID is included in state parameter.
     """
-    if not GITHUB_CLIENT_ID:
-        raise HTTPException(status_code=500, detail="GitHub Client ID not configured")
+    if not GITHUB_APP_SLUG:
+        raise HTTPException(status_code=500, detail="GitHub App Slug not configured")
     
     # Get authenticated user_id (middleware ensures this is set)
     user_id = get_user_id_from_request(request, db=db)
     
-    # Generate state parameter for OAuth security
+    # Generate state parameter for security
     # Include user_id, integration_id if reconnecting, and a nonce
     state_data = {
         "timestamp": int(time.time() * 1000),  # Use milliseconds for uniqueness
@@ -1248,46 +1221,36 @@ def github_authorize(request: Request, reconnect: Optional[str] = None, integrat
     if integration_id:
         state_data["integration_id"] = integration_id
     
-    # Encode state as base64 JSON for passing through OAuth flow
+    # Encode state as base64 JSON for passing through installation flow
     import base64
     state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
     
-    # Scopes: repo (for private repos), read:user (for user info), read:org (for organization info)
-    # Note: GitHub OAuth doesn't allow selecting specific repos - it grants access to all repos
-    # For repo selection, GitHub Apps installation flow would be needed
-    # read:org allows listing user's organizations
-    scope = "repo read:user read:org"
-    
-    # Get the callback URL - use environment variable if set, otherwise construct from request
-    from urllib.parse import quote
-    if GITHUB_CALLBACK_URL:
-        callback_url = GITHUB_CALLBACK_URL
-    else:
-        # Construct from request, forcing HTTPS for production
-        base_url = str(request.base_url).rstrip('/')
-        if 'localhost' not in base_url and base_url.startswith('http://'):
-            # Force HTTPS for production
-            base_url = base_url.replace('http://', 'https://')
-        callback_url = f"{base_url}/integrations/github/callback"
-    
-    # Build authorization URL
-    # Note: redirect_uri must match exactly what's configured in GitHub OAuth App settings
-    auth_url = (
-        f"https://github.com/login/oauth/authorize"
-        f"?client_id={GITHUB_CLIENT_ID}"
-        f"&scope={scope}"
-        f"&state={state}"
-        f"&redirect_uri={quote(callback_url, safe='')}"
+    # GitHub App installation URL
+    # Users can select organizations and repositories during installation
+    install_url = (
+        f"https://github.com/apps/{GITHUB_APP_SLUG}/installations/new"
+        f"?state={state}"
     )
     
-    return RedirectResponse(auth_url)
+    return RedirectResponse(install_url)
 
 @app.get("/integrations/github/callback")
-def github_callback(code: str, state: Optional[str] = None, db: Session = Depends(get_db)):
-    """Handle GitHub OAuth callback."""
-    if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
-        raise HTTPException(status_code=500, detail="GitHub credentials not configured")
-        
+def github_callback(installation_id: Optional[str] = None, setup_action: Optional[str] = None, state: Optional[str] = None, db: Session = Depends(get_db)):
+    """Handle GitHub App installation callback.
+    
+    GitHub redirects here after installation with installation_id in query params.
+    """
+    if not GITHUB_APP_ID:
+        raise HTTPException(status_code=500, detail="GitHub App ID not configured")
+    
+    if not installation_id:
+        raise HTTPException(status_code=400, detail="installation_id parameter is required")
+    
+    try:
+        installation_id_int = int(installation_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid installation_id format")
+    
     # Decode state parameter if provided
     reconnect = False
     integration_id = None
@@ -1301,44 +1264,23 @@ def github_callback(code: str, state: Optional[str] = None, db: Session = Depend
             user_id = state_data.get("user_id")  # SECURITY: Extract user_id from state
         except Exception as e:
             # If state decoding fails, this is a security issue
-            raise HTTPException(status_code=400, detail=f"Invalid OAuth state parameter: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Invalid state parameter: {str(e)}")
     
     # SECURITY: user_id is required - if not in state, this is an invalid request
     if not user_id:
         raise HTTPException(
             status_code=400, 
-            detail="Invalid OAuth state: user_id not found. Please initiate the OAuth flow from the application."
+            detail="Invalid state: user_id not found. Please initiate the installation flow from the application."
         )
-        
-    # Exchange code for token
-    response = requests.post(
-        "https://github.com/login/oauth/access_token",
-        headers={"Accept": "application/json"},
-        data={
-            "client_id": GITHUB_CLIENT_ID,
-            "client_secret": GITHUB_CLIENT_SECRET,
-            "code": code
-        }
-    )
     
-    if response.status_code != 200:
-        raise HTTPException(status_code=400, detail="Failed to retrieve access token")
-        
-    data = response.json()
-    access_token = data.get("access_token")
+    # Get installation info to get account details
+    installation_info = get_installation_info(installation_id_int)
+    if not installation_info:
+        raise HTTPException(status_code=400, detail="Failed to retrieve installation information")
     
-    if not access_token:
-        raise HTTPException(status_code=400, detail=f"No access token returned: {data}")
-        
-    # Verify and get user info
-    gh = GithubIntegration(access_token=access_token)
-    user_info = gh.verify_connection()
-    
-    if user_info["status"] == "error":
-        raise HTTPException(status_code=400, detail="Invalid token obtained")
-    
-    # Encrypt token
-    encrypted_token = encrypt_token(access_token)
+    account = installation_info.get("account", {})
+    account_login = account.get("login", "GitHub App")
+    account_type = account.get("type", "User")
     
     # Handle reconnection: if integration_id is provided and reconnecting, update that specific integration
     # SECURITY: Verify the integration belongs to the user_id from state
@@ -1353,13 +1295,19 @@ def github_callback(code: str, state: Optional[str] = None, db: Session = Depend
                 status_code=404, 
                 detail=f"Integration not found or does not belong to your account"
             )
-        integration.access_token = encrypted_token
-        integration.status = "CONFIGURING"  # Set to CONFIGURING, not ACTIVE
+        integration.installation_id = installation_id_int
+        integration.access_token = None  # Clear OAuth token if present
+        integration.status = "CONFIGURING"  # Set to CONFIGURING for repository selection
         integration.last_verified = datetime.utcnow()
-        integration.name = f"GitHub ({user_info['username']})"
+        integration.name = f"GitHub ({account_login})"
+        # Store installation metadata in config
+        if not integration.config:
+            integration.config = {}
+        integration.config["installation_account"] = account_login
+        integration.config["installation_account_type"] = account_type
         db.commit()
         db.refresh(integration)
-        # Redirect to setup page for repository selection
+        # Redirect to setup page for repository selection (though repos are already selected during installation)
         return RedirectResponse(f"{FRONTEND_URL}/integrations/github/setup?integration_id={integration.id}&reconnected=true")
 
     # Check if integration already exists for this user
@@ -1372,10 +1320,15 @@ def github_callback(code: str, state: Optional[str] = None, db: Session = Depend
         integration = Integration(
             user_id=user_id,
             provider="GITHUB",
-            name=f"GitHub ({user_info['username']})",
+            name=f"GitHub ({account_login})",
             status="CONFIGURING",  # Start in CONFIGURING state
-            access_token=encrypted_token,
-            last_verified=datetime.utcnow()
+            installation_id=installation_id_int,
+            access_token=None,  # GitHub Apps don't use OAuth tokens
+            last_verified=datetime.utcnow(),
+            config={
+                "installation_account": account_login,
+                "installation_account_type": account_type
+            }
         )
         db.add(integration)
         db.commit()
@@ -1383,11 +1336,16 @@ def github_callback(code: str, state: Optional[str] = None, db: Session = Depend
         # Redirect to setup page for initial configuration
         return RedirectResponse(f"{FRONTEND_URL}/integrations/github/setup?integration_id={integration.id}&new=true")
     else:
-        # Update existing integration with new token
-        integration.access_token = encrypted_token
+        # Update existing integration with new installation_id
+        integration.installation_id = installation_id_int
+        integration.access_token = None  # Clear OAuth token if present
         integration.status = "CONFIGURING"  # Set to CONFIGURING for reconfiguration
         integration.last_verified = datetime.utcnow()
-        integration.name = f"GitHub ({user_info['username']})"
+        integration.name = f"GitHub ({account_login})"
+        if not integration.config:
+            integration.config = {}
+        integration.config["installation_account"] = account_login
+        integration.config["installation_account_type"] = account_type
         db.commit()
         db.refresh(integration)
         # Redirect to setup page
@@ -1694,33 +1652,51 @@ def list_repositories(integration_id: int, request: Request, db: Session = Depen
         
         print(f"DEBUG: Found integration {integration_id}, provider: {integration.provider}")
         
-        github_integration = GithubIntegration(integration_id=integration.id)
-        
-        # Get user's repositories
-        if not github_integration.client:
-            print("DEBUG: GitHub client is None")
-            return {"repositories": []}
-        
-        print("DEBUG: Fetching repositories from GitHub...")
-        user = github_integration.client.get_user()
-        repos = []
-        
-        # Get user's repos (limit to 100 for performance)
-        repo_list = list(user.get_repos(type="all", sort="updated")[:100])
-        print(f"DEBUG: Found {len(repo_list)} repositories from GitHub")
-        
-        for repo in repo_list:
-            repos.append({
-                "full_name": repo.full_name,
-                "name": repo.name,
-                "private": repo.private
-            })
-            print(f"DEBUG: Added repo: {repo.full_name}")
-        
-        print(f"DEBUG: Returning {len(repos)} repositories")
-        return {
-            "repositories": repos
-        }
+        # Check if this is a GitHub App installation
+        if integration.installation_id:
+            print("DEBUG: Using GitHub App installation")
+            repos_data = get_installation_repositories(integration.installation_id)
+            repos = [
+                {
+                    "full_name": repo.get("full_name"),
+                    "name": repo.get("name"),
+                    "private": repo.get("private", False)
+                }
+                for repo in repos_data
+            ]
+            print(f"DEBUG: Found {len(repos)} repositories from GitHub App installation")
+            return {
+                "repositories": repos
+            }
+        else:
+            # Legacy OAuth token flow
+            github_integration = GithubIntegration(integration_id=integration.id)
+            
+            # Get user's repositories
+            if not github_integration.client:
+                print("DEBUG: GitHub client is None")
+                return {"repositories": []}
+            
+            print("DEBUG: Fetching repositories from GitHub (OAuth)...")
+            user = github_integration.client.get_user()
+            repos = []
+            
+            # Get user's repos (limit to 100 for performance)
+            repo_list = list(user.get_repos(type="all", sort="updated")[:100])
+            print(f"DEBUG: Found {len(repo_list)} repositories from GitHub")
+            
+            for repo in repo_list:
+                repos.append({
+                    "full_name": repo.full_name,
+                    "name": repo.name,
+                    "private": repo.private
+                })
+                print(f"DEBUG: Added repo: {repo.full_name}")
+            
+            print(f"DEBUG: Returning {len(repos)} repositories")
+            return {
+                "repositories": repos
+            }
     except HTTPException:
         raise
     except Exception as e:
