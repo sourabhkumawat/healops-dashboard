@@ -1,5 +1,5 @@
 """
-SECURE MIDDLEWARE - Authentication and Authorization
+SECURE VERSION OF MIDDLEWARE - Replace middleware.py with this file
 
 This version:
 1. Keeps existing APIKeyMiddleware for /ingest/logs and /api/sourcemaps

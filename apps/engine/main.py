@@ -87,55 +87,32 @@ def backfill_integration_to_incidents(db: Session, integration_id: int, user_id:
 
 
 
-def get_user_id_from_request(request: Request, default: int = 1, db: Session = None) -> int:
+def get_user_id_from_request(request: Request, db: Session = None) -> int:
     """
-    Get user_id from request state (API key) or JWT token if available, otherwise return default.
-    This allows endpoints to work with or without authentication.
-    
+    Get user_id from request state (set by AuthenticationMiddleware).
+
+    SECURITY: This function now REQUIRES authentication. The AuthenticationMiddleware
+    ensures request.state.user_id is always set for protected endpoints.
+
     Args:
         request: FastAPI Request object
-        default: Default user_id to return if not found
-        db: Optional database session (if not provided, will create a new one)
+        db: Optional database session (unused, kept for backward compatibility)
+
+    Returns:
+        int: The authenticated user's ID
+
+    Raises:
+        HTTPException: If user_id not found (should never happen if middleware works correctly)
     """
-    # First, try to get from API key (for API key authenticated requests)
-    if hasattr(request.state, 'api_key') and request.state.api_key:
-        return request.state.api_key.user_id
-    
-    # Second, try to get from JWT token (for dashboard/frontend requests)
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header.replace("Bearer ", "").strip()
-        try:
-            from jose import JWTError, jwt
-            import os
-            SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
-            ALGORITHM = "HS256"
-            
-            try:
-                payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-                email = payload.get("sub")
-                if email:
-                    # Look up user by email to get user_id
-                    # Use provided db session or create a new one
-                    should_close = False
-                    if db is None:
-                        db = SessionLocal()
-                        should_close = True
-                    
-                    try:
-                        user = db.query(User).filter(User.email == email).first()
-                        if user:
-                            return user.id
-                    finally:
-                        if should_close:
-                            db.close()
-            except JWTError:
-                pass  # Invalid token, fall through to default
-        except Exception as e:
-            # Silently fail and use default
-            pass
-    
-    return default
+    # User ID should have been set by middleware
+    if hasattr(request.state, 'user_id') and request.state.user_id:
+        return request.state.user_id
+
+    # If we reach here, middleware failed - this is a critical error
+    raise HTTPException(
+        status_code=401,
+        detail="Authentication required but user_id not found in request state. This indicates a middleware configuration error."
+    )
 
 
 # Create tables
@@ -156,8 +133,8 @@ async def startup_event():
         traceback.print_exc()
 
 # Add Middleware
-# Add Middleware
 from fastapi.middleware.cors import CORSMiddleware
+from middleware import APIKeyMiddleware, AuthenticationMiddleware
 
 # CORS Configuration - Allow all origins
 # Note: allow_credentials must be False when allowing all origins
@@ -169,6 +146,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# SECURITY: AuthenticationMiddleware MUST be added FIRST (order matters!)
+# It protects ALL endpoints except public ones
+app.add_middleware(AuthenticationMiddleware)
+
+# APIKeyMiddleware validates API keys for /ingest/logs and /api/sourcemaps
 app.add_middleware(APIKeyMiddleware)
 
 class LogIngestRequest(BaseModel):
@@ -961,7 +943,7 @@ class ApiKeyRequest(BaseModel):
 def create_api_key(request: ApiKeyRequest, http_request: Request, db: Session = Depends(get_db)):
     """Generate a new API key for integrations."""
     # Get user_id from request if available (from API key or JWT), otherwise default to 1
-    user_id = get_user_id_from_request(http_request, default=1, db=db)
+    user_id = get_user_id_from_request(http_request, db=db)
     
     full_key, key_hash, key_prefix = generate_api_key()
     
@@ -988,7 +970,7 @@ def create_api_key(request: ApiKeyRequest, http_request: Request, db: Session = 
 def list_api_keys(request: Request, db: Session = Depends(get_db)):
     """List all API keys (without revealing the actual keys)."""
     # Get user_id from request if available, otherwise default to 1
-    user_id = get_user_id_from_request(request, default=1, db=db)
+    user_id = get_user_id_from_request(request, db=db)
     
     keys = db.query(ApiKey).filter(ApiKey.user_id == user_id).all()
     
@@ -1007,19 +989,15 @@ def list_api_keys(request: Request, db: Session = Depends(get_db)):
     }
 
 @app.get("/logs")
-def list_logs(limit: int = 50, user_id: Optional[int] = None, request: Request = None, db: Session = Depends(get_db)):
-    """List recent log entries. Optionally filter by user_id."""
-    query = db.query(LogEntry)
-    
-    # If user_id is provided as query param, use it; otherwise try to get from request
-    if user_id is None and request:
-        user_id = get_user_id_from_request(request, default=None, db=db)
-    
-    if user_id:
-        query = query.filter(LogEntry.user_id == user_id)
-    
+def list_logs(limit: int = 50, request: Request = None, db: Session = Depends(get_db)):
+    """List recent log entries for the authenticated user only."""
+    # Get authenticated user (middleware ensures this is set)
+    user_id = get_user_id_from_request(request, db=db)
+
+    # ALWAYS filter by user_id - no exceptions
+    query = db.query(LogEntry).filter(LogEntry.user_id == user_id)
     logs = query.order_by(LogEntry.timestamp.desc()).limit(limit).all()
-    
+
     return {
         "logs": [
             {
@@ -1170,7 +1148,7 @@ def github_reconnect(
 ):
     """Handle reconnection by first trying to revoke existing token, then redirecting to authorize."""
     # Get the integration to reconnect
-    user_id = get_user_id_from_request(request, default=1, db=db)
+    user_id = get_user_id_from_request(request, db=db)
     
     # Try to find the integration - first by ID and provider
     integration = db.query(Integration).filter(
@@ -1405,7 +1383,7 @@ def github_connect(config: GithubConfig, request: Request, db: Session = Depends
         raise HTTPException(status_code=400, detail=verification["message"])
     
     # Get user_id from request if available, otherwise default to 1
-    user_id = get_user_id_from_request(request, default=1, db=db)
+    user_id = get_user_id_from_request(request, db=db)
     
     # Encrypt token
     encrypted_token = encrypt_token(config.access_token)
@@ -1452,7 +1430,7 @@ def github_connect(config: GithubConfig, request: Request, db: Session = Depends
 def list_integrations(request: Request, db: Session = Depends(get_db)):
     """List all user integrations."""
     # Get user_id from request if available, otherwise default to 1
-    user_id = get_user_id_from_request(request, default=1, db=db)
+    user_id = get_user_id_from_request(request, db=db)
     
     integrations = db.query(Integration).filter(Integration.user_id == user_id).all()
     
@@ -1482,7 +1460,7 @@ def list_providers():
 def get_integration_config(integration_id: int, request: Request, db: Session = Depends(get_db)):
     """Get integration configuration including service mappings."""
     # Get user_id from request if available, otherwise default to 1
-    user_id = get_user_id_from_request(request, default=1, db=db)
+    user_id = get_user_id_from_request(request, db=db)
     
     integration = db.query(Integration).filter(
         Integration.id == integration_id,
@@ -1507,7 +1485,7 @@ def get_integration_config(integration_id: int, request: Request, db: Session = 
 def add_service_mapping(integration_id: int, mapping: ServiceMappingRequest, request: Request, db: Session = Depends(get_db)):
     """Add or update a service-to-repo mapping."""
     # Get user_id from request if available, otherwise default to 1
-    user_id = get_user_id_from_request(request, default=1, db=db)
+    user_id = get_user_id_from_request(request, db=db)
     
     integration = db.query(Integration).filter(
         Integration.id == integration_id,
@@ -1548,7 +1526,7 @@ def add_service_mapping(integration_id: int, mapping: ServiceMappingRequest, req
 def update_service_mappings(integration_id: int, update: ServiceMappingsUpdateRequest, request: Request, db: Session = Depends(get_db)):
     """Update all service-to-repo mappings at once."""
     # Get user_id from request if available, otherwise default to 1
-    user_id = get_user_id_from_request(request, default=1, db=db)
+    user_id = get_user_id_from_request(request, db=db)
     
     integration = db.query(Integration).filter(
         Integration.id == integration_id,
@@ -1591,7 +1569,7 @@ def update_service_mappings(integration_id: int, update: ServiceMappingsUpdateRe
 def remove_service_mapping(integration_id: int, service_name: str, request: Request, db: Session = Depends(get_db)):
     """Remove a service-to-repo mapping."""
     # Get user_id from request if available, otherwise default to 1
-    user_id = get_user_id_from_request(request, default=1, db=db)
+    user_id = get_user_id_from_request(request, db=db)
     
     integration = db.query(Integration).filter(
         Integration.id == integration_id,
@@ -1623,32 +1601,26 @@ def remove_service_mapping(integration_id: int, service_name: str, request: Requ
     }
 
 @app.get("/services")
-def list_services(user_id: Optional[int] = None, request: Request = None, db: Session = Depends(get_db)):
-    """Get list of unique service names from logs and incidents.
-    If user_id is provided, only returns services for that user.
-    Otherwise returns all services (for backward compatibility).
-    """
+def list_services(request: Request = None, db: Session = Depends(get_db)):
+    """Get list of unique service names from logs and incidents for the authenticated user."""
     try:
-        # If user_id not provided, try to get from request
-        if user_id is None and request:
-            user_id = get_user_id_from_request(request, default=None, db=db)
-        
-        # Get unique service names from logs
+        # Get authenticated user (middleware ensures this is set)
+        user_id = get_user_id_from_request(request, db=db)
+
+        # ALWAYS filter by user_id - get unique service names from logs
         log_query = db.query(LogEntry.service_name).distinct().filter(
             LogEntry.service_name.isnot(None),
-            LogEntry.service_name != ""
+            LogEntry.service_name != "",
+            LogEntry.user_id == user_id
         )
-        if user_id:
-            log_query = log_query.filter(LogEntry.user_id == user_id)
         log_services = log_query.all()
-        
-        # Get unique service names from incidents
+
+        # ALWAYS filter by user_id - get unique service names from incidents
         incident_query = db.query(Incident.service_name).distinct().filter(
             Incident.service_name.isnot(None),
-            Incident.service_name != ""
+            Incident.service_name != "",
+            Incident.user_id == user_id
         )
-        if user_id:
-            incident_query = incident_query.filter(Incident.user_id == user_id)
         incident_services = incident_query.all()
         
         print(f"DEBUG: Found {len(log_services)} log services and {len(incident_services)} incident services")
@@ -1683,7 +1655,7 @@ def list_services(user_id: Optional[int] = None, request: Request = None, db: Se
 def list_repositories(integration_id: int, request: Request, db: Session = Depends(get_db)):
     """Get list of repositories accessible by the GitHub integration."""
     # Get user_id from request if available, otherwise default to 1
-    user_id = get_user_id_from_request(request, default=1, db=db)
+    user_id = get_user_id_from_request(request, db=db)
     
     try:
         integration = db.query(Integration).filter(
@@ -1744,28 +1716,24 @@ def list_repositories(integration_id: int, request: Request, db: Session = Depen
 
 @app.get("/stats")
 def get_system_stats(request: Request = None, db: Session = Depends(get_db)):
-    """Get system overview statistics for the dashboard."""
+    """Get system overview statistics for the authenticated user."""
     try:
-        # Get user_id from request if available
-        user_id = get_user_id_from_request(request, default=None, db=db)
-        
-        # Build base queries with optional user_id filter
-        incident_query = db.query(Incident)
-        log_query = db.query(LogEntry)
+        # Get authenticated user (middleware ensures this is set)
+        user_id = get_user_id_from_request(request, db=db)
+
+        # ALWAYS filter by user_id - build queries for the authenticated user
+        incident_query = db.query(Incident).filter(Incident.user_id == user_id)
+        log_query = db.query(LogEntry).filter(LogEntry.user_id == user_id)
         service_query_logs = db.query(LogEntry.service_name).distinct().filter(
             LogEntry.service_name.isnot(None),
-            LogEntry.service_name != ""
+            LogEntry.service_name != "",
+            LogEntry.user_id == user_id
         )
         service_query_incidents = db.query(Incident.service_name).distinct().filter(
             Incident.service_name.isnot(None),
-            Incident.service_name != ""
+            Incident.service_name != "",
+            Incident.user_id == user_id
         )
-        
-        if user_id:
-            incident_query = incident_query.filter(Incident.user_id == user_id)
-            log_query = log_query.filter(LogEntry.user_id == user_id)
-            service_query_logs = service_query_logs.filter(LogEntry.user_id == user_id)
-            service_query_incidents = service_query_incidents.filter(Incident.user_id == user_id)
         
         # Count incidents by status
         total_incidents = incident_query.count()
@@ -1838,50 +1806,48 @@ def get_system_stats(request: Request = None, db: Session = Depends(get_db)):
 # ============================================================================
 
 @app.get("/incidents")
-def list_incidents(status: Optional[str] = None, user_id: Optional[int] = None, request: Request = None, db: Session = Depends(get_db)):
-    """List incidents with optional status and user_id filter.
-    If user_id is provided, only returns incidents for that user.
-    Otherwise returns all incidents (for backward compatibility).
-    """
-    # If user_id not provided, try to get from request
-    if user_id is None and request:
-        user_id = get_user_id_from_request(request, default=None, db=db)
-    
-    query = db.query(Incident)
+def list_incidents(status: Optional[str] = None, request: Request = None, db: Session = Depends(get_db)):
+    """List incidents for the authenticated user only."""
+    # Get authenticated user (middleware ensures this is set)
+    user_id = get_user_id_from_request(request, db=db)
+
+    # ALWAYS filter by user_id - no exceptions
+    query = db.query(Incident).filter(Incident.user_id == user_id)
+
     if status:
         query = query.filter(Incident.status == status)
-    if user_id:
-        query = query.filter(Incident.user_id == user_id)
-    
+
     incidents = query.order_by(Incident.last_seen_at.desc()).all()
     return incidents
 
 @app.get("/incidents/{incident_id}")
 async def get_incident(incident_id: int, background_tasks: BackgroundTasks, request: Request, db: Session = Depends(get_db)):
     """Get incident details including related logs. Triggers AI analysis if not already done."""
-    # Get user_id from request if available
-    user_id = get_user_id_from_request(request, default=None, db=db)
-    
-    query = db.query(Incident).filter(Incident.id == incident_id)
-    if user_id:
-        query = query.filter(Incident.user_id == user_id)
-    incident = query.first()
+    # Get authenticated user (middleware ensures this is set)
+    user_id = get_user_id_from_request(request, db=db)
+
+    # ALWAYS filter by user_id to prevent cross-user access
+    incident = db.query(Incident).filter(
+        Incident.id == incident_id,
+        Incident.user_id == user_id
+    ).first()
+
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
-    
-    # Fetch related logs (filter by user_id if available)
+
+    # Fetch related logs (ALWAYS filter by user_id)
     logs = []
     if incident.log_ids:
-        log_query = db.query(LogEntry).filter(LogEntry.id.in_(incident.log_ids))
-        if user_id:
-            log_query = log_query.filter(LogEntry.user_id == user_id)
-        logs = log_query.order_by(LogEntry.timestamp.desc()).all()
-    
+        logs = db.query(LogEntry).filter(
+            LogEntry.id.in_(incident.log_ids),
+            LogEntry.user_id == user_id
+        ).order_by(LogEntry.timestamp.desc()).all()
+
     # Trigger AI analysis in background if root_cause is not set
     if not incident.root_cause:
         from ai_analysis import analyze_incident_with_openrouter
         background_tasks.add_task(analyze_incident_async, incident_id)
-    
+
     return {
         "incident": incident,
         "logs": logs
@@ -1890,18 +1856,20 @@ async def get_incident(incident_id: int, background_tasks: BackgroundTasks, requ
 @app.post("/incidents/{incident_id}/analyze")
 async def analyze_incident(incident_id: int, background_tasks: BackgroundTasks, request: Request, db: Session = Depends(get_db)):
     """Manually trigger AI analysis for an incident."""
-    # Get user_id from request if available
-    user_id = get_user_id_from_request(request, default=None, db=db)
-    
-    query = db.query(Incident).filter(Incident.id == incident_id)
-    if user_id:
-        query = query.filter(Incident.user_id == user_id)
-    incident = query.first()
+    # Get authenticated user (middleware ensures this is set)
+    user_id = get_user_id_from_request(request, db=db)
+
+    # ALWAYS filter by user_id to prevent cross-user access
+    incident = db.query(Incident).filter(
+        Incident.id == incident_id,
+        Incident.user_id == user_id
+    ).first()
+
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
-    
+
     background_tasks.add_task(analyze_incident_async, incident_id)
-    
+
     return {"status": "analysis_triggered", "message": "AI analysis started in background"}
 
 async def analyze_incident_async(incident_id: int):
@@ -1985,13 +1953,15 @@ async def analyze_incident_async(incident_id: int):
 @app.patch("/incidents/{incident_id}")
 def update_incident(incident_id: int, update_data: dict, request: Request, db: Session = Depends(get_db)):
     """Update incident status or severity."""
-    # Get user_id from request if available
-    user_id = get_user_id_from_request(request, default=None, db=db)
-    
-    query = db.query(Incident).filter(Incident.id == incident_id)
-    if user_id:
-        query = query.filter(Incident.user_id == user_id)
-    incident = query.first()
+    # Get authenticated user (middleware ensures this is set)
+    user_id = get_user_id_from_request(request, db=db)
+
+    # ALWAYS filter by user_id to prevent cross-user modification
+    incident = db.query(Incident).filter(
+        Incident.id == incident_id,
+        Incident.user_id == user_id
+    ).first()
+
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     
