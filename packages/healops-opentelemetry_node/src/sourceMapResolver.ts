@@ -53,7 +53,9 @@ export function isSourceFile(filePath: string): boolean {
  * Source maps are typically referenced via a comment: //# sourceMappingURL=file.js.map
  */
 async function getSourceMapUrl(fileUrl: string): Promise<string | null> {
-    const DEBUG = typeof process !== 'undefined' && process.env.HEALOPS_DEBUG_SOURCEMAPS === 'true';
+    const DEBUG =
+        typeof process !== 'undefined' &&
+        process.env.HEALOPS_DEBUG_SOURCEMAPS === 'true';
 
     try {
         // Validate input
@@ -65,11 +67,21 @@ async function getSourceMapUrl(fileUrl: string): Promise<string | null> {
         // Check cache first
         if (sourceMapUrlCache.has(fileUrl)) {
             const cached = sourceMapUrlCache.get(fileUrl) || null;
-            if (DEBUG) console.log('[SourceMap] Cache hit for', fileUrl, ':', cached ? 'found' : 'null (failed previously)');
+            if (DEBUG)
+                console.log(
+                    '[SourceMap] Cache hit for',
+                    fileUrl,
+                    ':',
+                    cached ? 'found' : 'null (failed previously)'
+                );
             return cached;
         }
 
-        if (DEBUG) console.log('[SourceMap] Fetching JS file to find source map reference:', fileUrl);
+        if (DEBUG)
+            console.log(
+                '[SourceMap] Fetching JS file to find source map reference:',
+                fileUrl
+            );
 
         // Try to fetch the JavaScript file to find source map reference
         // Use a timeout to avoid hanging
@@ -85,7 +97,13 @@ async function getSourceMapUrl(fileUrl: string): Promise<string | null> {
             clearTimeout(timeoutId);
 
             if (!response.ok) {
-                if (DEBUG) console.warn('[SourceMap] Failed to fetch JS file:', fileUrl, 'Status:', response.status);
+                if (DEBUG)
+                    console.warn(
+                        '[SourceMap] Failed to fetch JS file:',
+                        fileUrl,
+                        'Status:',
+                        response.status
+                    );
                 trimCache(sourceMapUrlCache, MAX_CACHE_SIZE);
                 sourceMapUrlCache.set(fileUrl, null);
                 return null;
@@ -103,9 +121,16 @@ async function getSourceMapUrl(fileUrl: string): Promise<string | null> {
                 // Don't try to construct URLs - this causes 404s
                 // Source maps are likely not available in this production build
                 if (DEBUG) {
-                    console.warn('[SourceMap] ❌ No sourceMappingURL comment found in file:', fileUrl);
-                    console.warn('[SourceMap] This usually means source maps are not deployed to production.');
-                    console.warn('[SourceMap] To fix: Enable source maps in your Next.js config (see docs)');
+                    console.warn(
+                        '[SourceMap] ❌ No sourceMappingURL comment found in file:',
+                        fileUrl
+                    );
+                    console.warn(
+                        '[SourceMap] This usually means source maps are not deployed to production.'
+                    );
+                    console.warn(
+                        '[SourceMap] To fix: Enable source maps in your Next.js config (see docs)'
+                    );
                 }
                 trimCache(sourceMapUrlCache, MAX_CACHE_SIZE);
                 sourceMapUrlCache.set(fileUrl, null);
@@ -113,7 +138,11 @@ async function getSourceMapUrl(fileUrl: string): Promise<string | null> {
             }
 
             let sourceMapUrl = sourceMapMatch[1];
-            if (DEBUG) console.log('[SourceMap] Found sourceMappingURL:', sourceMapUrl);
+            if (DEBUG)
+                console.log(
+                    '[SourceMap] Found sourceMappingURL:',
+                    sourceMapUrl
+                );
 
             // Handle data URLs (inline source maps)
             if (sourceMapUrl.startsWith('data:')) {
@@ -156,7 +185,11 @@ async function getSourceMapUrl(fileUrl: string): Promise<string | null> {
 
             // Cache the source map URL - we'll verify it exists when we actually need it
             // This avoids making unnecessary HEAD requests that show up as 404s
-            if (DEBUG) console.log('[SourceMap] ✓ Resolved source map URL:', sourceMapUrl);
+            if (DEBUG)
+                console.log(
+                    '[SourceMap] ✓ Resolved source map URL:',
+                    sourceMapUrl
+                );
             trimCache(sourceMapUrlCache, MAX_CACHE_SIZE);
             sourceMapUrlCache.set(fileUrl, sourceMapUrl);
             return sourceMapUrl;
@@ -164,14 +197,20 @@ async function getSourceMapUrl(fileUrl: string): Promise<string | null> {
             clearTimeout(timeoutId);
             // If fetch fails, don't try to construct URLs - this causes 404s
             // Source maps are likely not available
-            if (DEBUG) console.warn('[SourceMap] Fetch error for JS file:', fileUrl, fetchError.message);
+            if (DEBUG)
+                console.warn(
+                    '[SourceMap] Fetch error for JS file:',
+                    fileUrl,
+                    fetchError.message
+                );
             trimCache(sourceMapUrlCache, MAX_CACHE_SIZE);
             sourceMapUrlCache.set(fileUrl, null);
             return null;
         }
     } catch (error: any) {
         // Silent fail - source map resolution is best effort
-        if (DEBUG) console.error('[SourceMap] Unexpected error:', error?.message);
+        if (DEBUG)
+            console.error('[SourceMap] Unexpected error:', error?.message);
         trimCache(sourceMapUrlCache, MAX_CACHE_SIZE);
         sourceMapUrlCache.set(fileUrl, null);
         return null;
@@ -184,7 +223,9 @@ async function getSourceMapUrl(fileUrl: string): Promise<string | null> {
 async function getSourceMapConsumer(
     sourceMapUrl: string
 ): Promise<SourceMapConsumer | null> {
-    const DEBUG = typeof process !== 'undefined' && process.env.HEALOPS_DEBUG_SOURCEMAPS === 'true';
+    const DEBUG =
+        typeof process !== 'undefined' &&
+        process.env.HEALOPS_DEBUG_SOURCEMAPS === 'true';
 
     try {
         // Validate input
@@ -200,11 +241,16 @@ async function getSourceMapConsumer(
         // Check cache
         if (sourceMapCache.has(sourceMapUrl)) {
             const cached = sourceMapCache.get(sourceMapUrl) || null;
-            if (DEBUG) console.log('[SourceMap] Consumer cache hit:', cached ? 'found' : 'null');
+            if (DEBUG)
+                console.log(
+                    '[SourceMap] Consumer cache hit:',
+                    cached ? 'found' : 'null'
+                );
             return cached;
         }
 
-        if (DEBUG) console.log('[SourceMap] Fetching source map:', sourceMapUrl);
+        if (DEBUG)
+            console.log('[SourceMap] Fetching source map:', sourceMapUrl);
 
         // Handle inline source maps (data URLs)
         if (sourceMapUrl.startsWith('inline:data:')) {
@@ -244,9 +290,16 @@ async function getSourceMapConsumer(
                 // This prevents repeated 404 errors
                 if (response.status === 404) {
                     if (DEBUG) {
-                        console.warn('[SourceMap] ❌ Source map file not found (404):', sourceMapUrl);
-                        console.warn('[SourceMap] The sourceMappingURL points to a file that was not deployed.');
-                        console.warn('[SourceMap] Make sure to deploy .map files to production or use inline source maps.');
+                        console.warn(
+                            '[SourceMap] ❌ Source map file not found (404):',
+                            sourceMapUrl
+                        );
+                        console.warn(
+                            '[SourceMap] The sourceMappingURL points to a file that was not deployed.'
+                        );
+                        console.warn(
+                            '[SourceMap] Make sure to deploy .map files to production or use inline source maps.'
+                        );
                     }
                     trimCache(sourceMapCache, MAX_CACHE_SIZE);
                     sourceMapCache.set(sourceMapUrl, null);
@@ -262,7 +315,11 @@ async function getSourceMapConsumer(
                 }
 
                 // For other errors, also cache as failed
-                if (DEBUG) console.warn('[SourceMap] Failed to fetch source map:', response.status);
+                if (DEBUG)
+                    console.warn(
+                        '[SourceMap] Failed to fetch source map:',
+                        response.status
+                    );
                 trimCache(sourceMapCache, MAX_CACHE_SIZE);
                 sourceMapCache.set(sourceMapUrl, null);
                 return null;
@@ -270,7 +327,8 @@ async function getSourceMapConsumer(
 
             const sourceMapJson = await response.json();
             const consumer = await new SourceMapConsumer(sourceMapJson);
-            if (DEBUG) console.log('[SourceMap] ✓ Successfully parsed source map');
+            if (DEBUG)
+                console.log('[SourceMap] ✓ Successfully parsed source map');
             trimCache(sourceMapCache, MAX_CACHE_SIZE);
             sourceMapCache.set(sourceMapUrl, consumer);
             return consumer;
@@ -427,17 +485,31 @@ export async function resolveFilePath(
     column?: number,
     returnBundledIfFailed: boolean = true // Default to true - always return a path for traceability
 ): Promise<string | undefined> {
-    const DEBUG = typeof process !== 'undefined' && process.env.HEALOPS_DEBUG_SOURCEMAPS === 'true';
+    const DEBUG =
+        typeof process !== 'undefined' &&
+        process.env.HEALOPS_DEBUG_SOURCEMAPS === 'true';
 
     if (!filePath) return undefined;
 
     // Only resolve if it looks like a bundled file
     if (!isBundledFile(filePath)) {
-        if (DEBUG) console.log('[SourceMap] File is already a source file, no resolution needed:', filePath);
+        if (DEBUG)
+            console.log(
+                '[SourceMap] File is already a source file, no resolution needed:',
+                filePath
+            );
         return filePath;
     }
 
-    if (DEBUG) console.log('[SourceMap] Attempting to resolve bundled file:', filePath, 'at', line || 1, ':', column || 0);
+    if (DEBUG)
+        console.log(
+            '[SourceMap] Attempting to resolve bundled file:',
+            filePath,
+            'at',
+            line || 1,
+            ':',
+            column || 0
+        );
 
     // Try to resolve using source maps
     // If line/column not provided, use line 1, column 0 as default
@@ -445,14 +517,22 @@ export async function resolveFilePath(
 
     // Return resolved source if available
     if (resolved?.source) {
-        if (DEBUG) console.log('[SourceMap] ✓ Successfully resolved to source file:', resolved.source);
+        if (DEBUG)
+            console.log(
+                '[SourceMap] ✓ Successfully resolved to source file:',
+                resolved.source
+            );
         return resolved.source;
     }
 
     // Always return the original path if resolution fails
     // This ensures logs always have a file path for traceability
     // Even if it's a chunk path, it's better than no path at all
-    if (DEBUG) console.warn('[SourceMap] ❌ Failed to resolve source file, returning', returnBundledIfFailed ? 'bundled path' : 'undefined');
+    if (DEBUG)
+        console.warn(
+            '[SourceMap] ❌ Failed to resolve source file, returning',
+            returnBundledIfFailed ? 'bundled path' : 'undefined'
+        );
     return returnBundledIfFailed ? filePath : undefined;
 }
 

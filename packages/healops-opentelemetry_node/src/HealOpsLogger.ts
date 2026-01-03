@@ -162,7 +162,8 @@ export class HealOpsLogger {
                 'meta[name="healops-release"]'
             );
             if (metaRelease) {
-                this.config.release = metaRelease.getAttribute('content') || undefined;
+                this.config.release =
+                    metaRelease.getAttribute('content') || undefined;
             }
         }
 
@@ -172,7 +173,8 @@ export class HealOpsLogger {
                 'meta[name="healops-environment"]'
             );
             if (metaEnv) {
-                this.config.environment = metaEnv.getAttribute('content') || undefined;
+                this.config.environment =
+                    metaEnv.getAttribute('content') || undefined;
             }
         }
 
