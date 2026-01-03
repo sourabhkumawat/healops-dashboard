@@ -18,6 +18,7 @@ from integrations.github_integration import GithubIntegration
 from middleware import APIKeyMiddleware
 from crypto_utils import encrypt_token, decrypt_token
 from datetime import timedelta, datetime
+from partition_manager import ensure_partition_exists_for_timestamp
 import os
 import secrets
 import time
@@ -500,6 +501,22 @@ async def ingest_log(log: LogIngestRequest, request: Request, background_tasks: 
         
         if should_persist:
             try:
+                # Parse timestamp and ensure partition exists
+                log_timestamp = datetime.utcnow()
+                if log.timestamp:
+                    try:
+                        # Try parsing ISO format timestamp
+                        if isinstance(log.timestamp, str):
+                            log_timestamp = datetime.fromisoformat(log.timestamp.replace('Z', '+00:00'))
+                        elif isinstance(log.timestamp, datetime):
+                            log_timestamp = log.timestamp
+                    except (ValueError, AttributeError) as e:
+                        print(f"Warning: Could not parse timestamp {log.timestamp}, using current time: {e}")
+                        log_timestamp = datetime.utcnow()
+                
+                # Ensure partition exists before inserting
+                ensure_partition_exists_for_timestamp(log_timestamp)
+                
                 db_log = LogEntry(
                     service_name=log.service_name,
                     level=log.severity,
@@ -508,7 +525,8 @@ async def ingest_log(log: LogIngestRequest, request: Request, background_tasks: 
                     source=log.source,
                     integration_id=integration_id,
                     user_id=api_key.user_id,  # Store user_id from API key
-                    metadata_json=log.metadata
+                    metadata_json=log.metadata,
+                    timestamp=log_timestamp
                 )
                 db.add(db_log)
                 db.commit()
@@ -605,6 +623,9 @@ async def ingest_otel_errors(payload: OTelErrorPayload, background_tasks: Backgr
     
     # Update last_used timestamp
     valid_key.last_used = datetime.utcnow()
+    
+    # Ensure partition exists for current date (all logs will use current timestamp)
+    ensure_partition_exists_for_timestamp(datetime.utcnow())
     
     # Process each span
     persisted_count = 0
