@@ -1150,20 +1150,18 @@ def github_reconnect(
     # Get the integration to reconnect
     user_id = get_user_id_from_request(request, db=db)
     
-    # Try to find the integration - first by ID and provider
+    # SECURITY: Verify the integration belongs to the authenticated user
     integration = db.query(Integration).filter(
         Integration.id == integration_id,
+        Integration.user_id == user_id,  # SECURITY: Verify integration belongs to user
         Integration.provider == "GITHUB"
     ).first()
     
     if not integration:
         raise HTTPException(
             status_code=404, 
-            detail=f"GitHub integration with ID {integration_id} not found. Please check the integration ID."
+            detail=f"GitHub integration with ID {integration_id} not found or does not belong to your account"
         )
-    
-    # Log for debugging (can be removed in production)
-    print(f"Found integration: ID={integration.id}, user_id={integration.user_id}, requested_user_id={user_id}")
     
     # Try to revoke the existing authorization on GitHub if we have a token
     if integration.access_token:
@@ -1194,6 +1192,7 @@ def github_reconnect(
     import base64
     state_data = {
         "timestamp": int(time.time() * 1000),  # Use milliseconds for uniqueness
+        "user_id": user_id,  # SECURITY: Include user_id to ensure integration is associated with correct user
         "reconnect": True,
         "integration_id": integration_id,
         "nonce": secrets.token_urlsafe(16)  # Add random nonce to force new authorization
@@ -1226,15 +1225,23 @@ def github_reconnect(
     return RedirectResponse(auth_url)
 
 @app.get("/integrations/github/authorize")
-def github_authorize(request: Request, reconnect: Optional[str] = None, integration_id: Optional[int] = None):
-    """Redirect user to GitHub OAuth authorization page."""
+def github_authorize(request: Request, reconnect: Optional[str] = None, integration_id: Optional[int] = None, db: Session = Depends(get_db)):
+    """Redirect user to GitHub OAuth authorization page.
+    
+    SECURITY: This endpoint requires authentication to ensure integrations are
+    created for the correct user. User ID is included in OAuth state parameter.
+    """
     if not GITHUB_CLIENT_ID:
         raise HTTPException(status_code=500, detail="GitHub Client ID not configured")
     
+    # Get authenticated user_id (middleware ensures this is set)
+    user_id = get_user_id_from_request(request, db=db)
+    
     # Generate state parameter for OAuth security
-    # Include integration_id if reconnecting to track which integration is being reconnected
+    # Include user_id, integration_id if reconnecting, and a nonce
     state_data = {
         "timestamp": int(time.time() * 1000),  # Use milliseconds for uniqueness
+        "user_id": user_id,  # SECURITY: Include user_id to associate integration with correct user
         "reconnect": reconnect == "true",
         "nonce": secrets.token_urlsafe(16)  # Add random nonce to ensure uniqueness
     }
@@ -1283,15 +1290,24 @@ def github_callback(code: str, state: Optional[str] = None, db: Session = Depend
     # Decode state parameter if provided
     reconnect = False
     integration_id = None
+    user_id = None
     if state:
         try:
             import base64
             state_data = json.loads(base64.urlsafe_b64decode(state.encode()).decode())
             reconnect = state_data.get("reconnect", False)
             integration_id = state_data.get("integration_id")
-        except Exception:
-            # If state decoding fails, continue without it (backwards compatibility)
-            pass
+            user_id = state_data.get("user_id")  # SECURITY: Extract user_id from state
+        except Exception as e:
+            # If state decoding fails, this is a security issue
+            raise HTTPException(status_code=400, detail=f"Invalid OAuth state parameter: {str(e)}")
+    
+    # SECURITY: user_id is required - if not in state, this is an invalid request
+    if not user_id:
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid OAuth state: user_id not found. Please initiate the OAuth flow from the application."
+        )
         
     # Exchange code for token
     response = requests.post(
@@ -1319,29 +1335,31 @@ def github_callback(code: str, state: Optional[str] = None, db: Session = Depend
     
     if user_info["status"] == "error":
         raise HTTPException(status_code=400, detail="Invalid token obtained")
-        
-    # Get user_id from request if available, otherwise default to 1
-    # NOTE: In production, the state parameter should include user session info
-    user_id = 1  # TODO: Extract from state or session
     
     # Encrypt token
     encrypted_token = encrypt_token(access_token)
     
     # Handle reconnection: if integration_id is provided and reconnecting, update that specific integration
+    # SECURITY: Verify the integration belongs to the user_id from state
     if reconnect and integration_id:
         integration = db.query(Integration).filter(
             Integration.id == integration_id,
+            Integration.user_id == user_id,  # SECURITY: Verify integration belongs to user
             Integration.provider == "GITHUB"
         ).first()
-        if integration:
-            integration.access_token = encrypted_token
-            integration.status = "CONFIGURING"  # Set to CONFIGURING, not ACTIVE
-            integration.last_verified = datetime.utcnow()
-            integration.name = f"GitHub ({user_info['username']})"
-            db.commit()
-            db.refresh(integration)
-            # Redirect to setup page for repository selection
-            return RedirectResponse(f"{FRONTEND_URL}/integrations/github/setup?integration_id={integration.id}&reconnected=true")
+        if not integration:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Integration not found or does not belong to your account"
+            )
+        integration.access_token = encrypted_token
+        integration.status = "CONFIGURING"  # Set to CONFIGURING, not ACTIVE
+        integration.last_verified = datetime.utcnow()
+        integration.name = f"GitHub ({user_info['username']})"
+        db.commit()
+        db.refresh(integration)
+        # Redirect to setup page for repository selection
+        return RedirectResponse(f"{FRONTEND_URL}/integrations/github/setup?integration_id={integration.id}&reconnected=true")
 
     # Check if integration already exists for this user
     integration = db.query(Integration).filter(

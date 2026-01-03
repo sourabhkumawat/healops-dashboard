@@ -36,7 +36,9 @@ import {
     getServices,
     getRepositories,
     listIntegrations,
-    updateIntegration
+    updateIntegration,
+    initiateGitHubOAuth,
+    reconnectGitHubIntegration
 } from '@/actions/integrations';
 import {
     Select,
@@ -65,7 +67,6 @@ type ApiKey = {
     is_active: boolean;
 };
 
-import { API_BASE } from '@/lib/config';
 import {
     getCurrentUser,
     updateUserProfile,
@@ -656,9 +657,26 @@ export default function SettingsPage() {
                                                             code management.
                                                         </p>
                                                         <Button
-                                                            onClick={() =>
-                                                                (window.location.href = `${API_BASE}/integrations/github/authorize`)
-                                                            }
+                                                            onClick={async () => {
+                                                                const result =
+                                                                    await initiateGitHubOAuth();
+                                                                if (
+                                                                    result.error
+                                                                ) {
+                                                                    console.error(
+                                                                        'Failed to initiate OAuth:',
+                                                                        result.error
+                                                                    );
+                                                                    alert(
+                                                                        'Failed to connect GitHub. Please try again.'
+                                                                    );
+                                                                } else if (
+                                                                    result.redirectUrl
+                                                                ) {
+                                                                    window.location.href =
+                                                                        result.redirectUrl;
+                                                                }
+                                                            }}
                                                             className="w-full bg-[#24292F] hover:bg-[#24292F]/90 text-white"
                                                         >
                                                             <Cloud className="h-4 w-4 mr-2" />
@@ -830,10 +848,27 @@ export default function SettingsPage() {
                                                             <Button
                                                                 size="sm"
                                                                 variant="outline"
-                                                                onClick={() => {
-                                                                    // Force reconnection by redirecting to reconnect endpoint
-                                                                    // This will mark integration as disconnected and redirect to GitHub OAuth
-                                                                    window.location.href = `${API_BASE}/integrations/github/reconnect?integration_id=${integration.id}`;
+                                                                onClick={async () => {
+                                                                    const result =
+                                                                        await reconnectGitHubIntegration(
+                                                                            integration.id
+                                                                        );
+                                                                    if (
+                                                                        result.error
+                                                                    ) {
+                                                                        console.error(
+                                                                            'Failed to reconnect:',
+                                                                            result.error
+                                                                        );
+                                                                        alert(
+                                                                            'Failed to reconnect GitHub. Please try again.'
+                                                                        );
+                                                                    } else if (
+                                                                        result.redirectUrl
+                                                                    ) {
+                                                                        window.location.href =
+                                                                            result.redirectUrl;
+                                                                    }
                                                                 }}
                                                                 className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
                                                             >

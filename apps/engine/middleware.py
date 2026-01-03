@@ -86,9 +86,9 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         "/redoc",
         "/auth/register",
         "/auth/login",
-        # GitHub OAuth flow (user is authenticated by GitHub, not us yet)
+        # GitHub OAuth callback (user is authenticated by GitHub, not us yet)
+        # Note: /integrations/github/authorize is now protected - user must be authenticated
         "/integrations/github/callback",
-        "/integrations/github/authorize",
     }
 
     async def dispatch(self, request: Request, call_next):

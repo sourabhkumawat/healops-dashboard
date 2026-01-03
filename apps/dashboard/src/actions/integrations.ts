@@ -329,3 +329,67 @@ export async function getIntegrationDetails(integrationId: number) {
         return { error: 'Failed to fetch integration details' };
     }
 }
+
+export async function initiateGitHubOAuth() {
+    try {
+        const apiUrl = `${API_BASE}/integrations/github/authorize`;
+        console.log('Initiating GitHub OAuth:', apiUrl);
+        const headers = await getAuthHeaders();
+        
+        // Make authenticated request - backend will return a redirect
+        const response = await fetchWithAuth(apiUrl, {
+            method: 'GET',
+            headers,
+            redirect: 'manual' // Don't follow redirect, we want the Location header
+        });
+        
+        console.log('OAuth response status:', response.status);
+        
+        if (response.status === 302 || response.status === 307 || response.status === 308) {
+            const location = response.headers.get('Location');
+            if (location) {
+                return { redirectUrl: location };
+            }
+        }
+        
+        // If not a redirect, something went wrong
+        const errorText = await response.text();
+        console.error('Failed to initiate OAuth:', response.status, errorText);
+        return { error: errorText || 'Failed to initiate GitHub OAuth' };
+    } catch (error) {
+        console.error('Error initiating GitHub OAuth:', error);
+        return { error: 'Failed to initiate GitHub OAuth' };
+    }
+}
+
+export async function reconnectGitHubIntegration(integrationId: number) {
+    try {
+        const apiUrl = `${API_BASE}/integrations/github/reconnect?integration_id=${integrationId}`;
+        console.log('Reconnecting GitHub integration:', apiUrl);
+        const headers = await getAuthHeaders();
+        
+        // Make authenticated request - backend will return a redirect
+        const response = await fetchWithAuth(apiUrl, {
+            method: 'GET',
+            headers,
+            redirect: 'manual' // Don't follow redirect, we want the Location header
+        });
+        
+        console.log('Reconnect response status:', response.status);
+        
+        if (response.status === 302 || response.status === 307 || response.status === 308) {
+            const location = response.headers.get('Location');
+            if (location) {
+                return { redirectUrl: location };
+            }
+        }
+        
+        // If not a redirect, something went wrong
+        const errorText = await response.text();
+        console.error('Failed to reconnect:', response.status, errorText);
+        return { error: errorText || 'Failed to reconnect GitHub integration' };
+    } catch (error) {
+        console.error('Error reconnecting GitHub integration:', error);
+        return { error: 'Failed to reconnect GitHub integration' };
+    }
+}
