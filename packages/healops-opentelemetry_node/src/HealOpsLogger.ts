@@ -1,10 +1,11 @@
 import axios from 'axios';
+import { resolveStackTrace } from './sourceMapResolver';
 
 /**
- * Filter out SDK internal frames and Next.js chunks from stack traces
- * This helps get cleaner stack traces that point to actual source files
+ * Filter out SDK internal frames from stack traces
+ * This is a synchronous operation for immediate filtering
  */
-export function cleanStackTrace(stack: string | undefined): string | undefined {
+function filterSdkFrames(stack: string | undefined): string | undefined {
     if (!stack) return undefined;
 
     const lines = stack.split('\n');
@@ -22,17 +23,7 @@ export function cleanStackTrace(stack: string | undefined): string | undefined {
         /initHealOpsLogger/
     ];
 
-    // Patterns for bundled/minified files that should be filtered
-    const bundledPatterns = [
-        /\/_next\/static\/chunks\//, // Next.js chunks
-        /\/_next\/static\/.*\.js/, // Next.js static files
-        /webpack:\/\//, // Webpack internal
-        /node_modules\/.*\.js$/, // node_modules (unless it's the actual source)
-        /\.min\.js/, // Minified files
-        /chunk-[a-f0-9]+\.js/ // Generic chunk files
-    ];
-
-    // Filter out SDK internal frames and bundled files
+    // Filter out SDK internal frames
     for (const line of lines) {
         // Always keep error message lines (first line usually)
         if (
@@ -49,20 +40,66 @@ export function cleanStackTrace(stack: string | undefined): string | undefined {
         const isSdkFrame = sdkPatterns.some((pattern) => pattern.test(line));
         if (isSdkFrame) continue;
 
-        // Skip bundled/minified file references
-        const isBundled = bundledPatterns.some((pattern) => pattern.test(line));
-        if (isBundled) continue;
-
         filtered.push(line);
     }
 
     // If we filtered everything except the error message, return original stack
-    // (at least the error message is useful)
     if (filtered.length <= 1) {
         return stack;
     }
 
     return filtered.join('\n');
+}
+
+/**
+ * Clean stack trace by filtering SDK frames and resolving source maps
+ * This resolves bundled/minified file paths to original source file paths
+ *
+ * @param stack - The stack trace string
+ * @param timeoutMs - Maximum time to wait for source map resolution (default: 1000ms)
+ * @returns Cleaned stack trace with resolved source file paths
+ */
+export async function cleanStackTrace(
+    stack: string | undefined,
+    timeoutMs: number = 1000
+): Promise<string | undefined> {
+    if (!stack) return undefined;
+
+    // First, filter out SDK internal frames synchronously
+    const filteredStack = filterSdkFrames(stack);
+    if (!filteredStack) return undefined;
+
+    // Check if we're in a browser environment (source map resolution only works in browser)
+    const isBrowser =
+        typeof window !== 'undefined' && typeof fetch !== 'undefined';
+    if (!isBrowser) {
+        // In Node.js, just return filtered stack
+        return filteredStack;
+    }
+
+    // Try to resolve source maps with a timeout
+    try {
+        const resolvedStack = await Promise.race([
+            resolveStackTrace(filteredStack),
+            new Promise<string | undefined>((resolve) =>
+                setTimeout(() => resolve(filteredStack), timeoutMs)
+            )
+        ]);
+        return resolvedStack;
+    } catch (error) {
+        // If resolution fails, return filtered stack
+        return filteredStack;
+    }
+}
+
+/**
+ * Synchronous version that filters SDK frames but doesn't resolve source maps
+ * Use this when you need immediate results and can't wait for async resolution
+ */
+export function cleanStackTraceSync(
+    stack: string | undefined
+): string | undefined {
+    return filterSdkFrames(stack);
 }
 
 export interface HealOpsLoggerConfig {
@@ -309,8 +346,9 @@ export class HealOpsLogger {
             metadata?.exception?.stacktrace || // Exception stacktrace
             callerInfo.fullStack; // Fallback to caller stack
 
-        // Clean the stack trace to remove SDK internal frames and Next.js chunks
-        const cleanedStackTrace = cleanStackTrace(rawStackTrace);
+        // Clean the stack trace to remove SDK internal frames and resolve source maps
+        // This resolves bundled/minified file paths to original source file paths
+        const cleanedStackTrace = await cleanStackTrace(rawStackTrace);
 
         const enrichedMetadata = {
             ...metadata,

@@ -225,8 +225,9 @@ export function initHealOpsLogger(
                         stackTrace = new Error().stack;
                     }
 
-                    // Clean the stack trace to remove SDK internal frames
-                    const cleanedStack = cleanStackTrace(stackTrace);
+                    // Clean the stack trace to remove SDK internal frames and resolve source maps
+                    // This resolves bundled/minified file paths to original source file paths
+                    const cleanedStack = await cleanStackTrace(stackTrace, 1000);
 
                     logger.error(
                         `HTTP Error: ${response.status} ${response.statusText}`,
@@ -236,7 +237,7 @@ export function initHealOpsLogger(
                             statusText: response.statusText,
                             method,
                             type: 'http_error',
-                            stack: cleanedStack, // Include cleaned stack trace
+                            stack: cleanedStack, // Include cleaned stack trace with resolved source paths
                             exception: {
                                 type: 'HTTPError',
                                 message: `${response.status} ${response.statusText}`,
