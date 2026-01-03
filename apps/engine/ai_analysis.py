@@ -16,17 +16,17 @@ from memory import CodeMemory
 # Use cheaper models for simpler tasks, expensive models only when needed
 MODEL_CONFIG = {
     "simple_analysis": {
-        "model": "google/gemini-flash-1.5",  # ~$0.075 per 1M input tokens
+        "model": "xiaomi/mimo-v2-flash:free",  # Free model
         "max_tokens": 500,
         "temperature": 0.3
     },
     "complex_analysis": {
-        "model": "deepseek/deepseek-chat",  # ~$0.14 per 1M input tokens (DeepSeek V3)
+        "model": "x-ai/grok-code-fast-1",  # ~$0.20 per 1M input tokens
         "max_tokens": 1000,
         "temperature": 0.3
     },
     "code_generation": {
-        "model": "deepseek/deepseek-chat",  # ~$0.14 per 1M input tokens (DeepSeek V3 - SOTA Coding)
+        "model": "x-ai/grok-code-fast-1",  # ~$0.20 per 1M input tokens (Specialized for agentic coding)
         "max_tokens": 8000,
         "temperature": 0.2
     }
@@ -1472,7 +1472,14 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
         # Estimate cost (approximate) - safely handle model_config
         try:
             model_name = model_config.get("model", "unknown") if isinstance(model_config, dict) else "unknown"
-            if model_name == "google/gemini-flash-1.5":
+            if "mimo-v2-flash" in model_name and "free" in model_name:
+                estimated_cost = 0.0  # Free model
+            elif "grok-code-fast" in model_name:
+                # Grok Code Fast 1: $0.20/M Input, $1.50/M Output
+                estimated_cost = (input_tokens * 0.20 / 1_000_000) + (output_tokens * 1.50 / 1_000_000)
+            elif "gemini-flash-1.5-8b" in model_name:
+                estimated_cost = (input_tokens * 0.0375 / 1_000_000) + (output_tokens * 0.15 / 1_000_000)
+            elif model_name == "google/gemini-flash-1.5":
                 estimated_cost = (input_tokens * 0.075 / 1_000_000) + (output_tokens * 0.30 / 1_000_000)
             elif "deepseek" in model_name:
                 # Pricing based on OpenRouter screenshot for DeepSeek V3
