@@ -24,3 +24,4 @@ PyGithub
 sib-api-v3-sdk
 PyJWT
 cryptography
+pydantic-settings

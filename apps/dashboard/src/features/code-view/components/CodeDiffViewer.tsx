@@ -10,6 +10,28 @@ interface CodeDiffViewerProps {
   splitView?: boolean;
 }
 
+const MONACO_LANGUAGE_MAP: Record<string, string> = {
+  'js': 'javascript',
+  'jsx': 'javascript',
+  'ts': 'typescript',
+  'tsx': 'typescript',
+  'py': 'python',
+  'rb': 'ruby',
+  'go': 'go',
+  'java': 'java',
+  'cpp': 'cpp',
+  'c': 'c',
+  'html': 'html',
+  'css': 'css',
+  'json': 'json',
+  'md': 'markdown',
+  'yml': 'yaml',
+  'yaml': 'yaml',
+  'sql': 'sql',
+  'sh': 'shell',
+  'bash': 'shell',
+};
+
 const CodeDiffViewer: React.FC<CodeDiffViewerProps> = ({
   oldCode,
   newCode,
@@ -17,33 +39,7 @@ const CodeDiffViewer: React.FC<CodeDiffViewerProps> = ({
   splitView = true,
 }) => {
 
-  // Simple mapping for common extensions to Monaco languages
-  const getMonacoLanguage = (lang: string) => {
-    const map: Record<string, string> = {
-      'js': 'javascript',
-      'jsx': 'javascript',
-      'ts': 'typescript',
-      'tsx': 'typescript',
-      'py': 'python',
-      'rb': 'ruby',
-      'go': 'go',
-      'java': 'java',
-      'cpp': 'cpp',
-      'c': 'c',
-      'html': 'html',
-      'css': 'css',
-      'json': 'json',
-      'md': 'markdown',
-      'yml': 'yaml',
-      'yaml': 'yaml',
-      'sql': 'sql',
-      'sh': 'shell',
-      'bash': 'shell',
-    };
-    return map[lang.toLowerCase()] || lang;
-  };
-
-  const monacoLanguage = getMonacoLanguage(language);
+  const monacoLanguage = MONACO_LANGUAGE_MAP[language.toLowerCase()] || language;
 
   return (
     <div className="h-[500px] w-full border rounded-md bg-[#1e1e1e] overflow-hidden">

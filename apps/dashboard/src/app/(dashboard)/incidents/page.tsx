@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
-import { IncidentTable, Incident } from '@/components/incident-table';
+import { IncidentTable } from '@/features/incidents/components/IncidentTable';
+import { Incident } from '@/features/incidents/types';
 import { Loader2 } from 'lucide-react';
 import { getIncidents } from '@/actions/incidents';
 
