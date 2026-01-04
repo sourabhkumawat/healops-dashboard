@@ -13,11 +13,12 @@ If this repository is **private**, distribution methods differ by language:
 ### Go (Git)
 *   **Challenge:** Go "packages" are just source code fetched directly from the repository. If the repo is private, `go get` will fail for external users.
 *   **Solution A (Recommended for Public Library):** Extract the Go code to a separate **public** repository.
-    ```bash
-    # 1. Create a new public repo: healops-opentelemetry-go
-    # 2. Push the subtree to the new repo
-    git subtree push --prefix packages/healops_opentelemetry_go https://github.com/healops/healops-opentelemetry-go.git main
-    ```
+    *   **Automated:** A workflow `.github/workflows/sync-go-public.yml` has been included.
+    *   **Setup:**
+        1.  Create a public repo: `healops/healops-opentelemetry-go`.
+        2.  Create a Personal Access Token (PAT) with `repo` scope.
+        3.  Add it as a secret `PUBLIC_GO_REPO_TOKEN` in this repository.
+        4.  The workflow will automatically push changes from `packages/healops_opentelemetry_go` to the public repo.
 *   **Solution B (For Internal Use):** Users must authenticate with git to access the private repo.
     1.  Users set `GOPRIVATE` environment variable:
         ```bash
