@@ -2,8 +2,8 @@
 
 import { useEffect, useState, useRef, useMemo, Fragment } from 'react';
 import { getLogs, getServices, LogEntry, LogFilters } from '@/actions/logs';
-import { Input } from '@/components/ui/input';
-import { Button } from '@/components/ui/button';
+import { Input } from '@healops/ui';
+import { Button } from '@healops/ui';
 import {
     Table,
     TableBody,
@@ -11,10 +11,10 @@ import {
     TableHead,
     TableHeader,
     TableRow
-} from '@/components/ui/table';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { Badge } from '@/components/ui/badge';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+} from '@healops/ui';
+import { ScrollArea } from '@healops/ui';
+import { Badge } from '@healops/ui';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@healops/ui';
 import {
     Search,
     Zap,

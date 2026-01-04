@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@healops/ui';
 import { LogEntry } from '@/actions/logs';
 import { getWebSocketUrl } from '@/lib/config';
 

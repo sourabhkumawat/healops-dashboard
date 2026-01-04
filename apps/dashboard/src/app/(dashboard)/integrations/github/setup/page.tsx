@@ -8,17 +8,17 @@ import {
     CardDescription,
     CardHeader,
     CardTitle
-} from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Label } from '@/components/ui/label';
-import { Alert, AlertDescription } from '@/components/ui/alert';
+} from '@healops/ui';
+import { Button } from '@healops/ui';
+import { Label } from '@healops/ui';
+import { Alert, AlertDescription } from '@healops/ui';
 import {
     Select,
     SelectContent,
     SelectItem,
     SelectTrigger,
     SelectValue
-} from '@/components/ui/select';
+} from '@healops/ui';
 import { Loader2, CheckCircle2, Github, ArrowRight } from 'lucide-react';
 import { getRepositories, completeIntegrationSetup } from '@/actions/integrations';
 import { API_BASE } from '@/lib/config';

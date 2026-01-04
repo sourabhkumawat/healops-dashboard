@@ -2,11 +2,11 @@
 
 import { useEffect, useState, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { Card, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Card, CardContent } from '@healops/ui';
+import { Badge } from '@healops/ui';
+import { Button } from '@healops/ui';
+import { ScrollArea } from '@healops/ui';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@healops/ui';
 import {
     Loader2,
     ArrowLeft,

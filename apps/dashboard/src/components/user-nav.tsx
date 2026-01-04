@@ -1,7 +1,7 @@
 'use client';
 
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
-import { Button } from '@/components/ui/button';
+import { Avatar, AvatarFallback, AvatarImage } from '@healops/ui';
+import { Button } from '@healops/ui';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -10,7 +10,7 @@ import {
     DropdownMenuSeparator,
     DropdownMenuShortcut,
     DropdownMenuTrigger
-} from '@/components/ui/dropdown-menu';
+} from '@healops/ui';
 import { logoutAction, type CurrentUser } from '@/actions/auth';
 
 interface UserNavProps {

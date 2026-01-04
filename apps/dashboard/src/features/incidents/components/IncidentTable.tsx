@@ -6,9 +6,9 @@ import {
     TableHead,
     TableHeader,
     TableRow
-} from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+} from '@healops/ui';
+import { Badge } from '@healops/ui';
+import { Button } from '@healops/ui';
 import Link from 'next/link';
 import { Incident } from '../types';
 

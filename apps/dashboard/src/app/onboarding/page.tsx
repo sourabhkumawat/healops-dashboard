@@ -8,11 +8,11 @@ import {
     CardDescription,
     CardHeader,
     CardTitle
-} from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Alert, AlertDescription } from '@/components/ui/alert';
+} from '@healops/ui';
+import { Button } from '@healops/ui';
+import { Input } from '@healops/ui';
+import { Label } from '@healops/ui';
+import { Alert, AlertDescription } from '@healops/ui';
 import {
     Cloud,
     Server,

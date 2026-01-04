@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Button } from '@/components/ui/button';
+import { Button } from '@healops/ui';
 import { ChevronDown, ChevronRight, FileText } from 'lucide-react';
 import CodeDiffViewer from '@/features/code-view/components/CodeDiffViewer';
 
