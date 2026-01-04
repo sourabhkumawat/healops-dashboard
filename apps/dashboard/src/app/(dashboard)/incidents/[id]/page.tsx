@@ -104,9 +104,9 @@ export default function IncidentDetailsPage() {
                     // Check if analysis is available
                     const hasRootCause = !!result.incident?.root_cause;
                     const hasAnalysisError = hasRootCause && (
-                        result.incident.root_cause.includes("Analysis failed") ||
-                        result.incident.root_cause.includes("Analysis error") ||
-                        result.incident.root_cause.includes("not configured")
+                        result.incident?.root_cause?.includes("Analysis failed") ||
+                        result.incident?.root_cause?.includes("Analysis error") ||
+                        result.incident?.root_cause?.includes("not configured")
                     );
 
                     if (hasRootCause) {
@@ -203,9 +203,9 @@ export default function IncidentDetailsPage() {
 
                         const hasRootCause = !!result.incident?.root_cause;
                         const hasAnalysisError = hasRootCause && (
-                            result.incident.root_cause.includes("Analysis failed") ||
-                            result.incident.root_cause.includes("Analysis error") ||
-                            result.incident.root_cause.includes("not configured")
+                            result.incident?.root_cause?.includes("Analysis failed") ||
+                            result.incident?.root_cause?.includes("Analysis error") ||
+                            result.incident?.root_cause?.includes("not configured")
                         );
 
                         if (hasRootCause) {
