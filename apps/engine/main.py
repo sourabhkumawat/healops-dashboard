@@ -1,6 +1,17 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+# Initialize Langtrace before any CrewAI imports
+from langtrace_python_sdk import langtrace
+import os
+
+langtrace_api_key = os.getenv("LANGTRACE_API_KEY")
+if langtrace_api_key:
+    langtrace.init(api_key=langtrace_api_key)
+    print("✅ Langtrace initialized successfully")
+else:
+    print("⚠️  LANGTRACE_API_KEY not found in environment. Langtrace tracing disabled.")
+
 import json
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request, Query
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm

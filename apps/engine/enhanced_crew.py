@@ -9,6 +9,23 @@ Features:
 - Automatic retry (up to 3 attempts per fix)
 - Confidence-based decision making
 """
+# Initialize Langtrace before CrewAI imports (safety measure)
+# Note: This is a safety measure in case main.py hasn't initialized it yet
+try:
+    from langtrace_python_sdk import langtrace
+    import os
+    
+    langtrace_api_key = os.getenv("LANGTRACE_API_KEY")
+    if langtrace_api_key:
+        try:
+            langtrace.init(api_key=langtrace_api_key)
+        except Exception:
+            # Already initialized or initialization failed, continue
+            pass
+except ImportError:
+    # Langtrace not installed, continue without it
+    pass
+
 from crewai import Crew, Task
 from typing import Dict, Any, List, Optional, Tuple
 from enhanced_agents import create_all_enhanced_agents

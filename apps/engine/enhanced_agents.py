@@ -2,6 +2,22 @@
 Enhanced specialized agents for Cursor-like autonomous code fixing.
 Organized by phase: Exploration, Fix Generation, Validation & Decision.
 """
+# Initialize Langtrace before CrewAI imports (safety measure)
+try:
+    from langtrace_python_sdk import langtrace
+    import os
+    
+    langtrace_api_key = os.getenv("LANGTRACE_API_KEY")
+    if langtrace_api_key:
+        try:
+            langtrace.init(api_key=langtrace_api_key)
+        except Exception:
+            # Already initialized or initialization failed, continue
+            pass
+except ImportError:
+    # Langtrace not installed, continue without it
+    pass
+
 from crewai import Agent, LLM
 import os
 from typing import List, Optional

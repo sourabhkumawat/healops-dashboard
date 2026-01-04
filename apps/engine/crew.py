@@ -6,6 +6,23 @@ Note: The enhanced crew (enhanced_crew.py) is now used by default.
 Set USE_OLD_CREW=true to use this crew explicitly, or it will be used
 automatically as a fallback if the enhanced crew fails.
 """
+# Initialize Langtrace before CrewAI imports (safety measure)
+# Note: This is a safety measure in case main.py hasn't initialized it yet
+try:
+    from langtrace_python_sdk import langtrace
+    import os
+    
+    langtrace_api_key = os.getenv("LANGTRACE_API_KEY")
+    if langtrace_api_key:
+        try:
+            langtrace.init(api_key=langtrace_api_key)
+        except Exception:
+            # Already initialized or initialization failed, continue
+            pass
+except ImportError:
+    # Langtrace not installed, continue without it
+    pass
+
 from crewai import Crew, Task
 from agents import create_agents
 from integrations.github_integration import GithubIntegration
