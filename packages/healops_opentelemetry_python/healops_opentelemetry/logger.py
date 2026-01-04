@@ -130,12 +130,13 @@ class HealOpsLogger:
     def _log(self, severity: str, message: str, metadata: Optional[Dict[str, Any]] = None):
         """Internal method to prepare log payload"""
 
-        # Get caller info
-        caller_info = get_caller_info()
-
-        # Enrich metadata
         enriched_metadata = metadata or {}
-        enriched_metadata.update(caller_info)
+
+        # Only fetch caller info if not already present (optimization)
+        # Standard logging handler (HealOpsLogHandler) provides filePath/line, so we skip expensive introspection
+        if "filePath" not in enriched_metadata or "line" not in enriched_metadata:
+             caller_info = get_caller_info()
+             enriched_metadata.update(caller_info)
 
         # Add stack trace for errors if not present
         if severity in ["ERROR", "CRITICAL"]:

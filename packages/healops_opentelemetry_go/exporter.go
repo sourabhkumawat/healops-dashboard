@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/sdk/trace"
@@ -96,10 +99,14 @@ func (e *HealOpsExporter) transformSpans(spans []trace.ReadOnlySpan) []map[strin
 				"time":       event.Time.UnixNano() / 1e6, // ms
 				"attributes": evtAttrs,
 			})
-		}
 
-        // Extract stack trace from events if present (Go OTel uses events for exceptions)
-        // Similar logic to Node/Python SDKs could be added here to extract code info
+			// Check for exception stack trace to extract code info
+			if event.Name == "exception" {
+				if stackTrace, ok := evtAttrs["exception.stacktrace"].(string); ok {
+					e.extractCodeInfo(stackTrace, attributes)
+				}
+			}
+		}
 
 		transformed = append(transformed, map[string]interface{}{
 			"traceId":      span.SpanContext().TraceID().String(),
@@ -116,9 +123,53 @@ func (e *HealOpsExporter) transformSpans(spans []trace.ReadOnlySpan) []map[strin
 				"code":    span.Status().Code,
 				"message": span.Status().Description,
 			},
-            // Resource attributes could also be added
 		})
 	}
 
 	return transformed
+}
+
+// Regex to find file paths in Go stack traces
+// Format: /path/to/file.go:123 +0x...
+var fileLineRegex = regexp.MustCompile(`\s+([^\s]+:\d+)`)
+
+func (e *HealOpsExporter) extractCodeInfo(stackTrace string, attributes map[string]interface{}) {
+	// If code info is already present, don't overwrite
+	if _, ok := attributes["code.file.path"]; ok {
+		return
+	}
+
+	lines := strings.Split(stackTrace, "\n")
+	for _, line := range lines {
+		// Skip standard library or runtime lines if possible (simple heuristic)
+		if strings.Contains(line, "/usr/local/go/src/") || strings.Contains(line, "runtime/") {
+			continue
+		}
+
+		matches := fileLineRegex.FindStringSubmatch(line)
+		if len(matches) > 1 {
+			fullPath := matches[1] // /path/to/file.go:123
+			parts := strings.Split(fullPath, ":")
+			if len(parts) >= 2 {
+				filePath := parts[0]
+				lineNumStr := parts[1]
+
+				// Ensure it looks like a Go source file
+				if !strings.HasSuffix(filePath, ".go") {
+					continue
+				}
+
+				attributes["code.file.path"] = filePath
+				if lineNum, err := strconv.Atoi(lineNumStr); err == nil {
+					attributes["code.line.number"] = lineNum
+				}
+
+				// Try to extract function name from previous line
+				// Go stack traces usually have function name on the line before the file path
+				// This is hard to do reliably without iterating carefully, but we can try simple approach
+				// or just leave it for now.
+				return
+			}
+		}
+	}
 }
