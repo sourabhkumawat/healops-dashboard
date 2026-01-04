@@ -25,3 +25,5 @@ sib-api-v3-sdk
 PyJWT
 cryptography
 pydantic-settings
+python-jose[cryptography]
+passlib[bcrypt]
