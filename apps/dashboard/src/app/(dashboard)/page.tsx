@@ -1,5 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { IncidentTable } from '@/components/incident-table';
+import { IncidentTable } from '@/features/incidents/components/IncidentTable';
 import { LiveLogs } from '@/components/live-logs';
 import { getRecentIncidents } from '@/actions/incidents';
 import { getSystemStats } from '@/actions/stats';

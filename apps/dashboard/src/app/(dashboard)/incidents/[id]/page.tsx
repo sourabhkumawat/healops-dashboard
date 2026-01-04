@@ -17,9 +17,9 @@ import {
     Activity,
     Code
 } from 'lucide-react';
-import { Incident } from '@/components/incident-table';
+import { Incident } from '@/features/incidents/types';
 import { getIncident, updateIncidentStatus } from '@/actions/incidents';
-import FileDiffCard from '@/components/FileDiffCard';
+import FileDiffCard from '@/features/code-view/components/FileDiffCard';
 import { trackIncidentAnalysis, trackIncidentFetchError, analytics } from '@/lib/analytics';
 
 interface LogEntry {

@@ -1,7 +1,7 @@
 'use server';
 
 import { API_BASE } from '@/lib/config';
-import { Incident } from '@/components/incident-table';
+import { Incident } from '@/features/incidents/types';
 import { fetchWithAuth } from '@/lib/api-client';
 
 export async function getIncidents(status?: string): Promise<Incident[]> {

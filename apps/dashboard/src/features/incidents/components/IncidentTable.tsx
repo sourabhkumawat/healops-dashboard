@@ -10,35 +10,17 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import Link from 'next/link';
+import { Incident } from '../types';
 
-export interface Incident {
-    id: number;
-    title: string;
-    status: string;
-    severity: string;
-    service_name: string;
-    source: string;
-    created_at: string;
-    last_seen_at: string;
-    root_cause: string | null;
-    action_taken: string | null;
-    action_result?: {
-        pr_url?: string;
-        pr_number?: number;
-        pr_files_changed?: string[];
-        status?: string;
-        error?: string;
-    };
-    metadata_json?: unknown;
+interface IncidentTableProps {
+    incidents: Incident[];
+    fullHeight?: boolean;
 }
 
 export function IncidentTable({
     incidents,
     fullHeight = false
-}: {
-    incidents: Incident[];
-    fullHeight?: boolean;
-}) {
+}: IncidentTableProps) {
     return (
         <div
             className={`${

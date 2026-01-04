@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { ChevronDown, ChevronRight, FileText } from 'lucide-react';
-import CodeDiffViewer from './CodeDiffViewer';
+import CodeDiffViewer from '@/features/code-view/components/CodeDiffViewer';
 
 interface FileDiffCardProps {
     filename: string;
