@@ -1,6 +1,8 @@
 'use client';
 
 import { useEffect, useState, useRef, useMemo, Fragment } from 'react';
+import { useRouter } from 'next/navigation';
+import { useFlags } from 'launchdarkly-react-client-sdk';
 import { getLogs, getServices, LogEntry, LogFilters } from '@/actions/logs';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -45,18 +47,39 @@ const LOG_LEVELS = [
 ];
 
 export default function LogsPage() {
+    const router = useRouter();
+    const flags = useFlags();
+
+    // Feature flag to control logs tab visibility
+    // This flag should be OFF by default (not available to users)
+    const showLogsTab = flags['show-logs-tab'] ?? false;
+
+    // Redirect to home if flag is off
+    useEffect(() => {
+        if (!showLogsTab) {
+            router.push('/');
+        }
+    }, [showLogsTab, router]);
+
+    // Don't render the page if flag is off
+    if (!showLogsTab) {
+        return null;
+    }
+
     const [logs, setLogs] = useState<LogEntry[]>([]);
     const [filteredLogs, setFilteredLogs] = useState<LogEntry[]>([]);
     const [loading, setLoading] = useState(true);
     const [liveTail, setLiveTail] = useState(false);
     const [selectedLog, setSelectedLog] = useState<LogEntry | null>(null);
     const [isClosing, setIsClosing] = useState(false);
-    const [detailTab, setDetailTab] = useState<'parsed' | 'original' | 'context'>('parsed');
+    const [detailTab, setDetailTab] = useState<
+        'parsed' | 'original' | 'context'
+    >('parsed');
     const [propertyView, setPropertyView] = useState<'flat' | 'nested'>('flat');
     const [propertySearch, setPropertySearch] = useState('');
     const [contextTimeRange, setContextTimeRange] = useState('30s');
     const [groupSimilar, setGroupSimilar] = useState(false);
-    
+
     // Filters
     const [searchQuery, setSearchQuery] = useState('');
     const [eventType, setEventType] = useState<'logs' | 'spans'>('logs');
@@ -64,11 +87,11 @@ export default function LogsPage() {
     const [selectedService, setSelectedService] = useState<string | null>(null);
     const [serviceSearch, setServiceSearch] = useState('');
     const [environmentSearch, setEnvironmentSearch] = useState('');
-    
+
     // Services list
     const [services, setServices] = useState<string[]>([]);
     const [showMoreServices, setShowMoreServices] = useState(false);
-    
+
     const wsRef = useRef<WebSocket | null>(null);
     const chartContainerRef = useRef<HTMLDivElement>(null);
     const fetchingLogsRef = useRef(false);
@@ -145,7 +168,7 @@ export default function LogsPage() {
                 if (!logData.timestamp) {
                     logData.timestamp = new Date().toISOString();
                 }
-                
+
                 setLogs((prev) => {
                     const newLogs = [logData, ...prev];
                     if (newLogs.length > 1000) {
@@ -187,8 +210,10 @@ export default function LogsPage() {
 
         // Service filter
         if (selectedService) {
-            filtered = filtered.filter((log) =>
-                log.service_name?.toLowerCase() === selectedService.toLowerCase()
+            filtered = filtered.filter(
+                (log) =>
+                    log.service_name?.toLowerCase() ===
+                    selectedService.toLowerCase()
             );
         }
 
@@ -236,7 +261,9 @@ export default function LogsPage() {
 
         // Get time range from filtered logs
         const timestamps = filteredLogs
-            .map((log) => (log.timestamp ? new Date(log.timestamp).getTime() : null))
+            .map((log) =>
+                log.timestamp ? new Date(log.timestamp).getTime() : null
+            )
             .filter((ts): ts is number => ts !== null);
 
         if (timestamps.length === 0) {
@@ -246,14 +273,17 @@ export default function LogsPage() {
         const minTime = Math.min(...timestamps);
         const maxTime = Math.max(...timestamps);
         const timeRange = maxTime - minTime;
-        
+
         // Use 1-minute buckets, but adjust if the time range is very large
         const bucketSizeMs = Math.max(60000, Math.floor(timeRange / 15)); // At least 1 min, max 15 buckets
-        
+
         // Create buckets
         const buckets: { [key: number]: number } = {};
-        const bucketCount = Math.min(16, Math.ceil(timeRange / bucketSizeMs) + 1);
-        
+        const bucketCount = Math.min(
+            16,
+            Math.ceil(timeRange / bucketSizeMs) + 1
+        );
+
         for (let i = 0; i < bucketCount; i++) {
             const bucketStart = minTime + i * bucketSizeMs;
             buckets[bucketStart] = 0;
@@ -263,7 +293,10 @@ export default function LogsPage() {
         filteredLogs.forEach((log) => {
             if (log.timestamp) {
                 const logTime = new Date(log.timestamp).getTime();
-                const bucketStart = minTime + Math.floor((logTime - minTime) / bucketSizeMs) * bucketSizeMs;
+                const bucketStart =
+                    minTime +
+                    Math.floor((logTime - minTime) / bucketSizeMs) *
+                        bucketSizeMs;
                 if (buckets[bucketStart] !== undefined) {
                     buckets[bucketStart]++;
                 } else {
@@ -271,7 +304,9 @@ export default function LogsPage() {
                     const closestBucket = Object.keys(buckets)
                         .map(Number)
                         .reduce((prev, curr) =>
-                            Math.abs(curr - logTime) < Math.abs(prev - logTime) ? curr : prev
+                            Math.abs(curr - logTime) < Math.abs(prev - logTime)
+                                ? curr
+                                : prev
                         );
                     buckets[closestBucket]++;
                 }
@@ -304,10 +339,15 @@ export default function LogsPage() {
     const maxCount = Math.max(...chartData.map((d) => d.count), 0);
     // Round up to nearest 6 for cleaner Y-axis (matching reference: 0, 6, 12, 18, 24)
     // But ensure at least 6 for visibility
-    const yAxisMax = maxCount > 0 ? Math.max(6, Math.ceil(maxCount / 6) * 6) : 6;
-    const yAxisTicks = [0, yAxisMax / 4, yAxisMax / 2, (yAxisMax * 3) / 4, yAxisMax].map(
-        (val) => Math.round(val)
-    );
+    const yAxisMax =
+        maxCount > 0 ? Math.max(6, Math.ceil(maxCount / 6) * 6) : 6;
+    const yAxisTicks = [
+        0,
+        yAxisMax / 4,
+        yAxisMax / 2,
+        (yAxisMax * 3) / 4,
+        yAxisMax
+    ].map((val) => Math.round(val));
 
     const selectLog = (log: LogEntry) => {
         setIsClosing(false);
@@ -332,23 +372,27 @@ export default function LogsPage() {
             if (e.key === 'Escape') {
                 closeDetailPanel();
             } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-                const currentIndex = filteredLogs.findIndex((log) => log.id === selectedLog.id);
+                const currentIndex = filteredLogs.findIndex(
+                    (log) => log.id === selectedLog.id
+                );
                 if (currentIndex === -1) return;
 
-                const nextIndex = e.key === 'ArrowRight' 
-                    ? currentIndex + 1 
-                    : currentIndex - 1;
+                const nextIndex =
+                    e.key === 'ArrowRight'
+                        ? currentIndex + 1
+                        : currentIndex - 1;
 
                 if (nextIndex >= 0 && nextIndex < filteredLogs.length) {
                     setSelectedLog(filteredLogs[nextIndex]);
                 }
             } else if (e.key === 'k' || e.key === 'j') {
-                const currentIndex = filteredLogs.findIndex((log) => log.id === selectedLog.id);
+                const currentIndex = filteredLogs.findIndex(
+                    (log) => log.id === selectedLog.id
+                );
                 if (currentIndex === -1) return;
 
-                const nextIndex = e.key === 'j' 
-                    ? currentIndex + 1 
-                    : currentIndex - 1;
+                const nextIndex =
+                    e.key === 'j' ? currentIndex + 1 : currentIndex - 1;
 
                 if (nextIndex >= 0 && nextIndex < filteredLogs.length) {
                     setSelectedLog(filteredLogs[nextIndex]);
@@ -395,12 +439,15 @@ export default function LogsPage() {
         return `${diffDays}d ago`;
     };
 
-    const getSurroundingLogs = (log: LogEntry, timeRange: string): LogEntry[] => {
+    const getSurroundingLogs = (
+        log: LogEntry,
+        timeRange: string
+    ): LogEntry[] => {
         if (!log.timestamp) return [];
-        
+
         const logTime = new Date(log.timestamp).getTime();
         let actualRangeMs = 30000; // Default 30s
-        
+
         if (timeRange.endsWith('ms')) {
             actualRangeMs = parseInt(timeRange) || 100;
         } else if (timeRange.endsWith('s')) {
@@ -411,22 +458,24 @@ export default function LogsPage() {
             actualRangeMs = parseInt(timeRange) * 60 * 60 * 1000;
         }
 
-        return filteredLogs.filter((l) => {
-            if (!l.timestamp) return false;
-            const lTime = new Date(l.timestamp).getTime();
-            return Math.abs(lTime - logTime) <= actualRangeMs;
-        }).sort((a, b) => {
-            const aTime = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-            const bTime = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-            return aTime - bTime;
-        });
+        return filteredLogs
+            .filter((l) => {
+                if (!l.timestamp) return false;
+                const lTime = new Date(l.timestamp).getTime();
+                return Math.abs(lTime - logTime) <= actualRangeMs;
+            })
+            .sort((a, b) => {
+                const aTime = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+                const bTime = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+                return aTime - bTime;
+            });
     };
 
     const getParsedProperties = (log: LogEntry) => {
         const props: Record<string, any> = {
             level: log.level || log.severity || 'info',
             message: log.message || '',
-            'service.name': log.service_name || '',
+            'service.name': log.service_name || ''
         };
 
         if (log.metadata && typeof log.metadata === 'object') {
@@ -530,7 +579,9 @@ export default function LogsPage() {
                                         onChange={() => setEventType('logs')}
                                         className="w-4 h-4 text-blue-500 bg-zinc-800 border-zinc-700 focus:ring-blue-500 focus:ring-2"
                                     />
-                                    <span className="text-sm text-zinc-300">Logs {'{}'}</span>
+                                    <span className="text-sm text-zinc-300">
+                                        Logs {'{}'}
+                                    </span>
                                 </label>
                                 <label className="flex items-center gap-2 cursor-pointer hover:text-zinc-100">
                                     <input
@@ -540,7 +591,9 @@ export default function LogsPage() {
                                         onChange={() => setEventType('spans')}
                                         className="w-4 h-4 text-blue-500 bg-zinc-800 border-zinc-700 focus:ring-blue-500 focus:ring-2"
                                     />
-                                    <span className="text-sm text-zinc-300">Spans =</span>
+                                    <span className="text-sm text-zinc-300">
+                                        Spans =
+                                    </span>
                                 </label>
                             </div>
                         </div>
@@ -563,17 +616,25 @@ export default function LogsPage() {
                                         <input
                                             type="radio"
                                             name="level"
-                                            checked={selectedLevel === level.value}
+                                            checked={
+                                                selectedLevel === level.value
+                                            }
                                             onChange={() =>
                                                 setSelectedLevel(
-                                                    selectedLevel === level.value
+                                                    selectedLevel ===
+                                                        level.value
                                                         ? null
                                                         : level.value
                                                 )
                                             }
                                             className="w-4 h-4 text-blue-500 bg-zinc-800 border-zinc-700 focus:ring-blue-500 focus:ring-2"
                                         />
-                                        <span className={cn('text-sm', level.color)}>
+                                        <span
+                                            className={cn(
+                                                'text-sm',
+                                                level.color
+                                            )}
+                                        >
                                             {level.label}
                                         </span>
                                     </label>
@@ -588,7 +649,9 @@ export default function LogsPage() {
                                 <Input
                                     placeholder="Q Service"
                                     value={serviceSearch}
-                                    onChange={(e) => setServiceSearch(e.target.value)}
+                                    onChange={(e) =>
+                                        setServiceSearch(e.target.value)
+                                    }
                                     className="bg-zinc-800 border-zinc-700 text-zinc-100 h-8 text-xs"
                                 />
                             </div>
@@ -602,10 +665,14 @@ export default function LogsPage() {
                                             >
                                                 <input
                                                     type="checkbox"
-                                                    checked={selectedService === service}
+                                                    checked={
+                                                        selectedService ===
+                                                        service
+                                                    }
                                                     onChange={() =>
                                                         setSelectedService(
-                                                            selectedService === service
+                                                            selectedService ===
+                                                                service
                                                                 ? null
                                                                 : service
                                                         )
@@ -626,10 +693,14 @@ export default function LogsPage() {
                             </ScrollArea>
                             {filteredServices.length > 10 && (
                                 <button
-                                    onClick={() => setShowMoreServices(!showMoreServices)}
+                                    onClick={() =>
+                                        setShowMoreServices(!showMoreServices)
+                                    }
                                     className="text-xs text-blue-500 hover:text-blue-400"
                                 >
-                                    {showMoreServices ? 'Show less' : 'Show more'}
+                                    {showMoreServices
+                                        ? 'Show less'
+                                        : 'Show more'}
                                 </button>
                             )}
                         </div>
@@ -641,11 +712,15 @@ export default function LogsPage() {
                                 <Input
                                     placeholder="Q Environment"
                                     value={environmentSearch}
-                                    onChange={(e) => setEnvironmentSearch(e.target.value)}
+                                    onChange={(e) =>
+                                        setEnvironmentSearch(e.target.value)
+                                    }
                                     className="bg-zinc-800 border-zinc-700 text-zinc-100 h-8 text-xs"
                                 />
                             </div>
-                            <p className="text-xs text-zinc-500">No options found</p>
+                            <p className="text-xs text-zinc-500">
+                                No options found
+                            </p>
                         </div>
                     </div>
                 </div>
@@ -655,7 +730,8 @@ export default function LogsPage() {
                     {/* Results Count */}
                     <div className="px-4 py-2 border-b border-zinc-800">
                         <p className="text-xs text-zinc-400">
-                            {filteredLogs.length} Result{filteredLogs.length !== 1 ? 's' : ''}
+                            {filteredLogs.length} Result
+                            {filteredLogs.length !== 1 ? 's' : ''}
                         </p>
                     </div>
 
@@ -697,11 +773,25 @@ export default function LogsPage() {
                                 <>
                                     {/* Y-axis labels - minimal, only show 2-3 key values */}
                                     <div className="absolute left-0 top-2 bottom-2 flex flex-col justify-between text-[10px] text-zinc-600 pr-1.5">
-                                        {[yAxisTicks[yAxisTicks.length - 1], yAxisTicks[Math.floor(yAxisTicks.length / 2)], yAxisTicks[0]]
-                                            .filter((val, idx, arr) => arr.indexOf(val) === idx)
+                                        {[
+                                            yAxisTicks[yAxisTicks.length - 1],
+                                            yAxisTicks[
+                                                Math.floor(
+                                                    yAxisTicks.length / 2
+                                                )
+                                            ],
+                                            yAxisTicks[0]
+                                        ]
+                                            .filter(
+                                                (val, idx, arr) =>
+                                                    arr.indexOf(val) === idx
+                                            )
                                             .reverse()
                                             .map((tick, idx) => (
-                                                <span key={idx} className="tabular-nums">
+                                                <span
+                                                    key={idx}
+                                                    className="tabular-nums"
+                                                >
                                                     {tick}
                                                 </span>
                                             ))}
@@ -714,7 +804,11 @@ export default function LogsPage() {
                                             {chartData.map((data, index) => {
                                                 const barHeight =
                                                     yAxisMax > 0
-                                                        ? `${(data.count / yAxisMax) * 100}%`
+                                                        ? `${
+                                                              (data.count /
+                                                                  yAxisMax) *
+                                                              100
+                                                          }%`
                                                         : '0%';
                                                 return (
                                                     <div
@@ -729,8 +823,16 @@ export default function LogsPage() {
                                                         >
                                                             {/* Tooltip on hover */}
                                                             <div className="absolute bottom-full mb-1.5 left-1/2 transform -translate-x-1/2 bg-zinc-800 text-zinc-100 text-[10px] px-2 py-1 rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-10 border border-zinc-700 shadow-lg">
-                                                                <div className="text-green-400">{data.timeLabel}</div>
-                                                                <div className="text-zinc-300">Other: {data.count} lines</div>
+                                                                <div className="text-green-400">
+                                                                    {
+                                                                        data.timeLabel
+                                                                    }
+                                                                </div>
+                                                                <div className="text-zinc-300">
+                                                                    Other:{' '}
+                                                                    {data.count}{' '}
+                                                                    lines
+                                                                </div>
                                                             </div>
                                                         </div>
                                                         {/* X-axis labels - show every 4th label */}
@@ -760,19 +862,30 @@ export default function LogsPage() {
                                 <TableHeader className="sticky top-0 bg-zinc-900 z-10">
                                     <TableRow className="border-zinc-800/50 hover:bg-transparent">
                                         <TableHead className="w-6 px-2 py-1"></TableHead>
-                                        <TableHead className="text-zinc-500 text-[10px] font-medium py-1 px-2">Timestamp (Local)</TableHead>
-                                        <TableHead className="text-zinc-500 text-[10px] font-medium py-1 px-2">Level</TableHead>
-                                        <TableHead className="text-zinc-500 text-[10px] font-medium py-1 px-2">Service</TableHead>
+                                        <TableHead className="text-zinc-500 text-[10px] font-medium py-1 px-2">
+                                            Timestamp (Local)
+                                        </TableHead>
+                                        <TableHead className="text-zinc-500 text-[10px] font-medium py-1 px-2">
+                                            Level
+                                        </TableHead>
+                                        <TableHead className="text-zinc-500 text-[10px] font-medium py-1 px-2">
+                                            Service
+                                        </TableHead>
                                         <TableHead className="text-zinc-500 text-[10px] font-medium py-1 px-2">
                                             <div className="flex items-center gap-1.5">
                                                 Message
                                                 <Button
                                                     size="sm"
                                                     variant="ghost"
-                                                    onClick={() => setGroupSimilar(!groupSimilar)}
+                                                    onClick={() =>
+                                                        setGroupSimilar(
+                                                            !groupSimilar
+                                                        )
+                                                    }
                                                     className={cn(
                                                         'h-5 text-[10px] px-1.5',
-                                                        groupSimilar && 'bg-zinc-800'
+                                                        groupSimilar &&
+                                                            'bg-zinc-800'
                                                     )}
                                                 >
                                                     Group Similar Events
@@ -810,32 +923,44 @@ export default function LogsPage() {
                                         </TableRow>
                                     ) : (
                                         filteredLogs.map((log) => {
-                                            const isSelected = selectedLog?.id === log.id;
-                                            const logLevel = log.level || log.severity || 'info';
-                                            const groupedCount = (log as any)._count;
+                                            const isSelected =
+                                                selectedLog?.id === log.id;
+                                            const logLevel =
+                                                log.level ||
+                                                log.severity ||
+                                                'info';
+                                            const groupedCount = (log as any)
+                                                ._count;
 
                                             return (
                                                 <TableRow
                                                     key={log.id}
                                                     className={cn(
-                                                        "border-zinc-800/30 hover:bg-zinc-900/30 cursor-pointer transition-colors",
-                                                        isSelected && "bg-zinc-800/40"
+                                                        'border-zinc-800/30 hover:bg-zinc-900/30 cursor-pointer transition-colors',
+                                                        isSelected &&
+                                                            'bg-zinc-800/40'
                                                     )}
-                                                    onClick={() => selectLog(log)}
+                                                    onClick={() =>
+                                                        selectLog(log)
+                                                    }
                                                 >
                                                     <TableCell className="px-2 py-1">
                                                         <ChevronRight className="h-3 w-3 text-zinc-600" />
                                                     </TableCell>
                                                     <TableCell className="text-zinc-400 text-[11px] font-mono px-2 py-1">
                                                         {log.timestamp
-                                                            ? formatTimestamp(log.timestamp)
+                                                            ? formatTimestamp(
+                                                                  log.timestamp
+                                                              )
                                                             : '--'}
                                                     </TableCell>
                                                     <TableCell className="px-2 py-1">
                                                         <Badge
                                                             className={cn(
                                                                 'text-[10px] px-1.5 py-0.5 font-medium',
-                                                                getLevelColor(logLevel)
+                                                                getLevelColor(
+                                                                    logLevel
+                                                                )
                                                             )}
                                                             variant="outline"
                                                         >
@@ -843,19 +968,24 @@ export default function LogsPage() {
                                                         </Badge>
                                                     </TableCell>
                                                     <TableCell className="text-zinc-400 text-[11px] px-2 py-1">
-                                                        {log.service_name || '--'}
+                                                        {log.service_name ||
+                                                            '--'}
                                                     </TableCell>
                                                     <TableCell className="text-zinc-300 text-[11px] font-mono px-2 py-1">
                                                         <div className="flex items-center gap-2">
                                                             <span className="flex-1 truncate">
-                                                                {log.message || '(empty)'}
+                                                                {log.message ||
+                                                                    '(empty)'}
                                                             </span>
                                                             {groupedCount && (
                                                                 <Badge
                                                                     variant="outline"
                                                                     className="text-[10px] px-1.5 py-0.5 ml-1 flex-shrink-0"
                                                                 >
-                                                                    {groupedCount}x
+                                                                    {
+                                                                        groupedCount
+                                                                    }
+                                                                    x
                                                                 </Badge>
                                                             )}
                                                         </div>
@@ -872,244 +1002,381 @@ export default function LogsPage() {
 
                 {/* Log Detail Panel */}
                 {selectedLog && (
-                    <div className={cn(
-                        "w-[480px] border-l border-zinc-800 bg-zinc-950 flex flex-col h-full flex-shrink-0",
-                        isClosing ? "animate-slide-out-right" : "animate-slide-in-right"
-                    )}>
-                    {/* Header */}
-                    <div className="px-4 py-3 border-b border-zinc-800">
-                        <div className="flex items-center justify-between mb-2">
-                            <div className="flex items-center gap-2">
-                                <Badge
-                                    className={cn(
-                                        'text-[10px] px-1.5 py-0.5',
-                                        getLevelColor(selectedLog.level || selectedLog.severity || 'info')
-                                    )}
-                                    variant="outline"
-                                >
-                                    {(selectedLog.level || selectedLog.severity || 'info').toLowerCase()}
-                                </Badge>
-                                <span className="text-xs text-zinc-500">
-                                    {formatTimestamp(selectedLog.timestamp)} · {formatRelativeTime(selectedLog.timestamp)}
-                                </span>
-                            </div>
-                            <div className="flex items-center gap-1">
-                                <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    className="text-zinc-500 hover:text-zinc-300 h-7 px-2 text-xs"
-                                >
-                                    <Share2 className="h-3 w-3" />
-                                </Button>
-                                <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    onClick={closeDetailPanel}
-                                    className="text-zinc-500 hover:text-zinc-300 h-7 w-7 p-0"
-                                >
-                                    <X className="h-3 w-3" />
-                                </Button>
-                            </div>
-                        </div>
-                        <div className="bg-zinc-900 p-2 rounded border border-zinc-800 mb-2">
-                            <p className="text-zinc-100 text-xs font-mono">
-                                {selectedLog.message || '(empty message)'}
-                            </p>
-                        </div>
-                        {selectedLog.service_name && (
-                            <div className="bg-zinc-900 px-2 py-1 rounded border border-zinc-800 inline-block">
-                                <span className="text-[10px] text-zinc-500">
-                                    service: {selectedLog.service_name}
-                                </span>
-                            </div>
+                    <div
+                        className={cn(
+                            'w-[480px] border-l border-zinc-800 bg-zinc-950 flex flex-col h-full flex-shrink-0',
+                            isClosing
+                                ? 'animate-slide-out-right'
+                                : 'animate-slide-in-right'
                         )}
-                    </div>
-
-                    {/* Tabs */}
-                    <Tabs value={detailTab} onValueChange={(v) => setDetailTab(v as any)} className="flex-1 flex flex-col overflow-hidden">
-                        <div className="border-b border-zinc-800 px-4 py-1">
-                            <TabsList className="bg-transparent">
-                                <TabsTrigger 
-                                    value="parsed" 
-                                    className="data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-green-500 data-[state=active]:text-green-500"
-                                >
-                                    Parsed Properties
-                                </TabsTrigger>
-                                <TabsTrigger 
-                                    value="original"
-                                    className="data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-green-500 data-[state=active]:text-green-500"
-                                >
-                                    Original Line
-                                </TabsTrigger>
-                                <TabsTrigger 
-                                    value="context"
-                                    className="data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-green-500 data-[state=active]:text-green-500"
-                                >
-                                    Surrounding Context
-                                </TabsTrigger>
-                            </TabsList>
+                    >
+                        {/* Header */}
+                        <div className="px-4 py-3 border-b border-zinc-800">
+                            <div className="flex items-center justify-between mb-2">
+                                <div className="flex items-center gap-2">
+                                    <Badge
+                                        className={cn(
+                                            'text-[10px] px-1.5 py-0.5',
+                                            getLevelColor(
+                                                selectedLog.level ||
+                                                    selectedLog.severity ||
+                                                    'info'
+                                            )
+                                        )}
+                                        variant="outline"
+                                    >
+                                        {(
+                                            selectedLog.level ||
+                                            selectedLog.severity ||
+                                            'info'
+                                        ).toLowerCase()}
+                                    </Badge>
+                                    <span className="text-xs text-zinc-500">
+                                        {formatTimestamp(selectedLog.timestamp)}{' '}
+                                        ·{' '}
+                                        {formatRelativeTime(
+                                            selectedLog.timestamp
+                                        )}
+                                    </span>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                    <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        className="text-zinc-500 hover:text-zinc-300 h-7 px-2 text-xs"
+                                    >
+                                        <Share2 className="h-3 w-3" />
+                                    </Button>
+                                    <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        onClick={closeDetailPanel}
+                                        className="text-zinc-500 hover:text-zinc-300 h-7 w-7 p-0"
+                                    >
+                                        <X className="h-3 w-3" />
+                                    </Button>
+                                </div>
+                            </div>
+                            <div className="bg-zinc-900 p-2 rounded border border-zinc-800 mb-2">
+                                <p className="text-zinc-100 text-xs font-mono">
+                                    {selectedLog.message || '(empty message)'}
+                                </p>
+                            </div>
+                            {selectedLog.service_name && (
+                                <div className="bg-zinc-900 px-2 py-1 rounded border border-zinc-800 inline-block">
+                                    <span className="text-[10px] text-zinc-500">
+                                        service: {selectedLog.service_name}
+                                    </span>
+                                </div>
+                            )}
                         </div>
 
-                        <ScrollArea className="flex-1">
-                            <div className="p-3">
-                                {/* Parsed Properties Tab */}
-                                <TabsContent value="parsed" className="mt-0 space-y-3">
-                                    <div>
-                                        <div className="flex items-center justify-between mb-2">
-                                            <h3 className="text-xs font-medium text-zinc-400">Properties</h3>
-                                            <div className="flex items-center gap-2">
-                                                <Button
-                                                    size="sm"
-                                                    variant={propertyView === 'flat' ? 'default' : 'ghost'}
-                                                    onClick={() => setPropertyView('flat')}
-                                                    className="h-7 text-xs"
-                                                >
-                                                    Flat view
-                                                </Button>
-                                                <Button
-                                                    size="sm"
-                                                    variant={propertyView === 'nested' ? 'default' : 'ghost'}
-                                                    onClick={() => setPropertyView('nested')}
-                                                    className="h-7 text-xs"
-                                                >
-                                                    Nested view
-                                                </Button>
-                                            </div>
-                                        </div>
-                                        <div className="relative mb-2">
-                                            <SearchIcon className="absolute left-2 top-1/2 transform -translate-y-1/2 h-3 w-3 text-zinc-500" />
-                                            <Input
-                                                placeholder="Search properties by key or value"
-                                                value={propertySearch}
-                                                onChange={(e) => setPropertySearch(e.target.value)}
-                                                className="pl-8 bg-zinc-900 border-zinc-800 text-zinc-100 text-xs h-7"
-                                            />
-                                        </div>
-                                        <div className="space-y-0.5 font-mono text-xs">
-                                            {Object.entries(getParsedProperties(selectedLog))
-                                                .filter(([key, value]) => {
-                                                    if (!propertySearch) return true;
-                                                    const search = propertySearch.toLowerCase();
-                                                    return key.toLowerCase().includes(search) || 
-                                                           String(value).toLowerCase().includes(search);
-                                                })
-                                                .map(([key, value]) => (
-                                                    <div key={key} className="flex items-start gap-2 py-1 border-b border-zinc-800/50">
-                                                        <span className="text-zinc-500 flex-shrink-0 w-32 text-[10px]">{key}:</span>
-                                                        <span className="text-zinc-300 break-words text-[10px] whitespace-pre-wrap flex-1">
-                                                            {typeof value === 'object' 
-                                                                ? JSON.stringify(value, null, 2)
-                                                                : String(value)
-                                                            }
-                                                        </span>
-                                                    </div>
-                                                ))}
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <h3 className="text-xs font-medium text-zinc-400 mb-2">Event Tags</h3>
-                                        <div className="flex flex-wrap gap-2">
-                                            {getEventTags(selectedLog).map((tag, idx) => (
-                                                <Badge 
-                                                    key={idx}
-                                                    variant="outline"
-                                                    className="text-[10px] px-1.5 py-0.5 bg-zinc-900 border-zinc-700 text-zinc-400"
-                                                >
-                                                    {tag}
-                                                </Badge>
-                                            ))}
-                                        </div>
-                                    </div>
-                                </TabsContent>
+                        {/* Tabs */}
+                        <Tabs
+                            value={detailTab}
+                            onValueChange={(v) => setDetailTab(v as any)}
+                            className="flex-1 flex flex-col overflow-hidden"
+                        >
+                            <div className="border-b border-zinc-800 px-4 py-1">
+                                <TabsList className="bg-transparent">
+                                    <TabsTrigger
+                                        value="parsed"
+                                        className="data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-green-500 data-[state=active]:text-green-500"
+                                    >
+                                        Parsed Properties
+                                    </TabsTrigger>
+                                    <TabsTrigger
+                                        value="original"
+                                        className="data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-green-500 data-[state=active]:text-green-500"
+                                    >
+                                        Original Line
+                                    </TabsTrigger>
+                                    <TabsTrigger
+                                        value="context"
+                                        className="data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-green-500 data-[state=active]:text-green-500"
+                                    >
+                                        Surrounding Context
+                                    </TabsTrigger>
+                                </TabsList>
+                            </div>
 
-                                {/* Original Line Tab */}
-                                <TabsContent value="original" className="mt-0">
-                                    <pre className="text-[10px] font-mono text-zinc-300 bg-zinc-900 p-3 rounded border border-zinc-800 whitespace-pre-wrap break-words overflow-wrap-anywhere">
-                                        {JSON.stringify({
-                                            level: selectedLog.level || selectedLog.severity,
-                                            message: selectedLog.message,
-                                            'service.name': selectedLog.service_name,
-                                            source: selectedLog.source,
-                                            timestamp: selectedLog.timestamp,
-                                            ...(selectedLog.metadata || {})
-                                        }, null, 2)}
-                                    </pre>
-                                </TabsContent>
-
-                                {/* Surrounding Context Tab */}
-                                <TabsContent value="context" className="mt-0 space-y-3">
-                                    <div>
-                                        <div className="flex items-center gap-2 mb-2">
-                                            <span className="text-xs text-zinc-500">Time range:</span>
-                                            <div className="flex gap-1">
-                                                {['100ms', '500ms', '1s', '5s', '30s', '1m', '5m', '15m'].map((range) => (
+                            <ScrollArea className="flex-1">
+                                <div className="p-3">
+                                    {/* Parsed Properties Tab */}
+                                    <TabsContent
+                                        value="parsed"
+                                        className="mt-0 space-y-3"
+                                    >
+                                        <div>
+                                            <div className="flex items-center justify-between mb-2">
+                                                <h3 className="text-xs font-medium text-zinc-400">
+                                                    Properties
+                                                </h3>
+                                                <div className="flex items-center gap-2">
                                                     <Button
-                                                        key={range}
                                                         size="sm"
-                                                        variant={contextTimeRange === range ? 'default' : 'ghost'}
-                                                        onClick={() => setContextTimeRange(range)}
+                                                        variant={
+                                                            propertyView ===
+                                                            'flat'
+                                                                ? 'default'
+                                                                : 'ghost'
+                                                        }
+                                                        onClick={() =>
+                                                            setPropertyView(
+                                                                'flat'
+                                                            )
+                                                        }
                                                         className="h-7 text-xs"
                                                     >
-                                                        {range}
+                                                        Flat view
                                                     </Button>
-                                                ))}
+                                                    <Button
+                                                        size="sm"
+                                                        variant={
+                                                            propertyView ===
+                                                            'nested'
+                                                                ? 'default'
+                                                                : 'ghost'
+                                                        }
+                                                        onClick={() =>
+                                                            setPropertyView(
+                                                                'nested'
+                                                            )
+                                                        }
+                                                        className="h-7 text-xs"
+                                                    >
+                                                        Nested view
+                                                    </Button>
+                                                </div>
+                                            </div>
+                                            <div className="relative mb-2">
+                                                <SearchIcon className="absolute left-2 top-1/2 transform -translate-y-1/2 h-3 w-3 text-zinc-500" />
+                                                <Input
+                                                    placeholder="Search properties by key or value"
+                                                    value={propertySearch}
+                                                    onChange={(e) =>
+                                                        setPropertySearch(
+                                                            e.target.value
+                                                        )
+                                                    }
+                                                    className="pl-8 bg-zinc-900 border-zinc-800 text-zinc-100 text-xs h-7"
+                                                />
+                                            </div>
+                                            <div className="space-y-0.5 font-mono text-xs">
+                                                {Object.entries(
+                                                    getParsedProperties(
+                                                        selectedLog
+                                                    )
+                                                )
+                                                    .filter(([key, value]) => {
+                                                        if (!propertySearch)
+                                                            return true;
+                                                        const search =
+                                                            propertySearch.toLowerCase();
+                                                        return (
+                                                            key
+                                                                .toLowerCase()
+                                                                .includes(
+                                                                    search
+                                                                ) ||
+                                                            String(value)
+                                                                .toLowerCase()
+                                                                .includes(
+                                                                    search
+                                                                )
+                                                        );
+                                                    })
+                                                    .map(([key, value]) => (
+                                                        <div
+                                                            key={key}
+                                                            className="flex items-start gap-2 py-1 border-b border-zinc-800/50"
+                                                        >
+                                                            <span className="text-zinc-500 flex-shrink-0 w-32 text-[10px]">
+                                                                {key}:
+                                                            </span>
+                                                            <span className="text-zinc-300 break-words text-[10px] whitespace-pre-wrap flex-1">
+                                                                {typeof value ===
+                                                                'object'
+                                                                    ? JSON.stringify(
+                                                                          value,
+                                                                          null,
+                                                                          2
+                                                                      )
+                                                                    : String(
+                                                                          value
+                                                                      )}
+                                                            </span>
+                                                        </div>
+                                                    ))}
                                             </div>
                                         </div>
-                                        <div className="space-y-1">
-                                            {getSurroundingLogs(selectedLog, contextTimeRange).map((log) => {
-                                                const isCurrentLog = log.id === selectedLog.id;
-                                                const logLevel = log.level || log.severity || 'info';
-                                                return (
-                                                    <div
-                                                        key={log.id}
-                                                        className={cn(
-                                                            "p-2 rounded border cursor-pointer transition-colors",
-                                                            isCurrentLog 
-                                                                ? "bg-zinc-800 border-zinc-700" 
-                                                                : "bg-zinc-900/50 border-zinc-800 hover:bg-zinc-900"
-                                                        )}
-                                                        onClick={() => setSelectedLog(log)}
-                                                    >
-                                                        <div className="flex items-center justify-between mb-1">
-                                                            <div className="flex items-center gap-2">
-                                                                <Badge
-                                                                    className={cn('text-[10px] px-1.5 py-0.5', getLevelColor(logLevel))}
-                                                                    variant="outline"
-                                                                >
-                                                                    {logLevel.toLowerCase()}
-                                                                </Badge>
-                                                                <span className="text-[10px] text-zinc-500">
-                                                                    {log.timestamp ? formatTimestamp(log.timestamp) : '--'}
-                                                                </span>
-                                                            </div>
-                                                            {log.service_name && (
-                                                                <span className="text-[10px] text-zinc-500">
-                                                                    {log.service_name}
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                        <p className="text-xs text-zinc-300 font-mono">
-                                                            {log.message || '(empty)'}
-                                                        </p>
-                                                    </div>
-                                                );
-                                            })}
+                                        <div>
+                                            <h3 className="text-xs font-medium text-zinc-400 mb-2">
+                                                Event Tags
+                                            </h3>
+                                            <div className="flex flex-wrap gap-2">
+                                                {getEventTags(selectedLog).map(
+                                                    (tag, idx) => (
+                                                        <Badge
+                                                            key={idx}
+                                                            variant="outline"
+                                                            className="text-[10px] px-1.5 py-0.5 bg-zinc-900 border-zinc-700 text-zinc-400"
+                                                        >
+                                                            {tag}
+                                                        </Badge>
+                                                    )
+                                                )}
+                                            </div>
                                         </div>
-                                    </div>
-                                </TabsContent>
-                            </div>
-                        </ScrollArea>
-                    </Tabs>
+                                    </TabsContent>
 
-                    {/* Footer */}
-                    <div className="px-4 py-2 border-t border-zinc-800 text-[10px] text-zinc-600 text-center">
-                        Use ← → arrow keys or k j to move through events · ESC to close
+                                    {/* Original Line Tab */}
+                                    <TabsContent
+                                        value="original"
+                                        className="mt-0"
+                                    >
+                                        <pre className="text-[10px] font-mono text-zinc-300 bg-zinc-900 p-3 rounded border border-zinc-800 whitespace-pre-wrap break-words overflow-wrap-anywhere">
+                                            {JSON.stringify(
+                                                {
+                                                    level:
+                                                        selectedLog.level ||
+                                                        selectedLog.severity,
+                                                    message:
+                                                        selectedLog.message,
+                                                    'service.name':
+                                                        selectedLog.service_name,
+                                                    source: selectedLog.source,
+                                                    timestamp:
+                                                        selectedLog.timestamp,
+                                                    ...(selectedLog.metadata ||
+                                                        {})
+                                                },
+                                                null,
+                                                2
+                                            )}
+                                        </pre>
+                                    </TabsContent>
+
+                                    {/* Surrounding Context Tab */}
+                                    <TabsContent
+                                        value="context"
+                                        className="mt-0 space-y-3"
+                                    >
+                                        <div>
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <span className="text-xs text-zinc-500">
+                                                    Time range:
+                                                </span>
+                                                <div className="flex gap-1">
+                                                    {[
+                                                        '100ms',
+                                                        '500ms',
+                                                        '1s',
+                                                        '5s',
+                                                        '30s',
+                                                        '1m',
+                                                        '5m',
+                                                        '15m'
+                                                    ].map((range) => (
+                                                        <Button
+                                                            key={range}
+                                                            size="sm"
+                                                            variant={
+                                                                contextTimeRange ===
+                                                                range
+                                                                    ? 'default'
+                                                                    : 'ghost'
+                                                            }
+                                                            onClick={() =>
+                                                                setContextTimeRange(
+                                                                    range
+                                                                )
+                                                            }
+                                                            className="h-7 text-xs"
+                                                        >
+                                                            {range}
+                                                        </Button>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                            <div className="space-y-1">
+                                                {getSurroundingLogs(
+                                                    selectedLog,
+                                                    contextTimeRange
+                                                ).map((log) => {
+                                                    const isCurrentLog =
+                                                        log.id ===
+                                                        selectedLog.id;
+                                                    const logLevel =
+                                                        log.level ||
+                                                        log.severity ||
+                                                        'info';
+                                                    return (
+                                                        <div
+                                                            key={log.id}
+                                                            className={cn(
+                                                                'p-2 rounded border cursor-pointer transition-colors',
+                                                                isCurrentLog
+                                                                    ? 'bg-zinc-800 border-zinc-700'
+                                                                    : 'bg-zinc-900/50 border-zinc-800 hover:bg-zinc-900'
+                                                            )}
+                                                            onClick={() =>
+                                                                setSelectedLog(
+                                                                    log
+                                                                )
+                                                            }
+                                                        >
+                                                            <div className="flex items-center justify-between mb-1">
+                                                                <div className="flex items-center gap-2">
+                                                                    <Badge
+                                                                        className={cn(
+                                                                            'text-[10px] px-1.5 py-0.5',
+                                                                            getLevelColor(
+                                                                                logLevel
+                                                                            )
+                                                                        )}
+                                                                        variant="outline"
+                                                                    >
+                                                                        {logLevel.toLowerCase()}
+                                                                    </Badge>
+                                                                    <span className="text-[10px] text-zinc-500">
+                                                                        {log.timestamp
+                                                                            ? formatTimestamp(
+                                                                                  log.timestamp
+                                                                              )
+                                                                            : '--'}
+                                                                    </span>
+                                                                </div>
+                                                                {log.service_name && (
+                                                                    <span className="text-[10px] text-zinc-500">
+                                                                        {
+                                                                            log.service_name
+                                                                        }
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <p className="text-xs text-zinc-300 font-mono">
+                                                                {log.message ||
+                                                                    '(empty)'}
+                                                            </p>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    </TabsContent>
+                                </div>
+                            </ScrollArea>
+                        </Tabs>
+
+                        {/* Footer */}
+                        <div className="px-4 py-2 border-t border-zinc-800 text-[10px] text-zinc-600 text-center">
+                            Use ← → arrow keys or k j to move through events ·
+                            ESC to close
+                        </div>
                     </div>
-                </div>
                 )}
             </div>
         </div>
     );
 }
-
-

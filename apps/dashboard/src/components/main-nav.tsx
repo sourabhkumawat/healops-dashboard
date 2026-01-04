@@ -3,12 +3,18 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { cn } from "@/lib/utils"
+import { useFlags } from "launchdarkly-react-client-sdk"
 
 export function MainNav({
   className,
   ...props
 }: React.HTMLAttributes<HTMLElement>) {
   const pathname = usePathname()
+  const flags = useFlags()
+  
+  // Feature flag to control logs tab visibility
+  // This flag should be OFF by default (not available to users)
+  const showLogsTab = flags['show-logs-tab'] ?? false
 
   return (
     <nav
@@ -33,15 +39,17 @@ export function MainNav({
       >
         Incidents
       </Link>
-      <Link
-        href="/logs"
-        className={cn(
-          "text-sm font-medium transition-colors hover:text-primary",
-          pathname?.startsWith("/logs") ? "text-primary" : "text-muted-foreground"
-        )}
-      >
-        Logs
-      </Link>
+      {showLogsTab && (
+        <Link
+          href="/logs"
+          className={cn(
+            "text-sm font-medium transition-colors hover:text-primary",
+            pathname?.startsWith("/logs") ? "text-primary" : "text-muted-foreground"
+          )}
+        >
+          Logs
+        </Link>
+      )}
       <Link
         href="/settings"
         className={cn(
