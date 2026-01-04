@@ -2,6 +2,34 @@
 
 This repository contains packages for multiple languages. Here is how to publish/deploy them.
 
+## Handling Private Repositories
+
+If this repository is **private**, distribution methods differ by language:
+
+### Python (PyPI) & Node.js (npm)
+*   **Public Access:** If you publish to the public PyPI or npm registries, the package becomes **publicly available** to everyone, even if the source code repository remains private.
+*   **Action:** Simply follow the publishing steps below. The CI/CD pipelines will upload the artifacts to the public registries.
+
+### Go (Git)
+*   **Challenge:** Go "packages" are just source code fetched directly from the repository. If the repo is private, `go get` will fail for external users.
+*   **Solution A (Recommended for Public Library):** Extract the Go code to a separate **public** repository.
+    ```bash
+    # 1. Create a new public repo: healops-opentelemetry-go
+    # 2. Push the subtree to the new repo
+    git subtree push --prefix packages/healops_opentelemetry_go https://github.com/healops/healops-opentelemetry-go.git main
+    ```
+*   **Solution B (For Internal Use):** Users must authenticate with git to access the private repo.
+    1.  Users set `GOPRIVATE` environment variable:
+        ```bash
+        export GOPRIVATE=github.com/healops/*
+        ```
+    2.  Users configure git to use SSH or Personal Access Token:
+        ```bash
+        git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
+        ```
+
+---
+
 ## Python Package (`packages/healops_opentelemetry_python`)
 
 The Python package is published to **PyPI**.
@@ -30,7 +58,7 @@ Go packages are distributed via **source control** (Git). There is no central re
 1.  Ensure the `module` name in `packages/healops_opentelemetry_go/go.mod` matches the GitHub repository URL + path.
     *   *Example:* If your repo is `github.com/myorg/monorepo`, the module line should be:
         `module github.com/myorg/monorepo/packages/healops_opentelemetry_go`
-    *   *Note:* If you intend to move this code to a standalone repository named `healops-opentelemetry-go`, leave the module name as `github.com/healops/healops-opentelemetry-go`.
+    *   *Note:* If you use **Solution A** (Split Repo) above, the module name should be just `github.com/healops/healops-opentelemetry-go`.
 
 ### How to Publish
 1.  Update your code and commit changes.
