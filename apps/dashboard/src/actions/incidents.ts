@@ -36,18 +36,29 @@ export async function getIncidents(filters?: {
         });
 
         if (!response.ok) {
-            console.error(
-                'Failed to fetch incidents:',
-                response.status,
-                await response.text()
-            );
+            const errorText = await response.text();
+            // Use a try-catch to prevent error logging from causing recursive issues
+            try {
+                console.error(
+                    'Failed to fetch incidents:',
+                    response.status,
+                    errorText
+                );
+            } catch {
+                // Silently fail if error logging itself fails
+            }
             return [];
         }
 
         const data = await response.json();
         return Array.isArray(data) ? data : [];
     } catch (error) {
-        console.error('Error fetching incidents:', error);
+        // Use a try-catch to prevent error logging from causing recursive issues
+        try {
+            console.error('Error fetching incidents:', error);
+        } catch {
+            // Silently fail if error logging itself fails
+        }
         return [];
     }
 }
@@ -73,17 +84,28 @@ export async function getIncident(incidentId: number): Promise<{
         );
 
         if (!response.ok) {
-            console.error(
-                'Failed to fetch incident:',
-                response.status,
-                await response.text()
-            );
+            const errorText = await response.text();
+            // Use a try-catch to prevent error logging from causing recursive issues
+            try {
+                console.error(
+                    'Failed to fetch incident:',
+                    response.status,
+                    errorText
+                );
+            } catch {
+                // Silently fail if error logging itself fails
+            }
             return null;
         }
 
         return await response.json();
     } catch (error) {
-        console.error('Error fetching incident:', error);
+        // Use a try-catch to prevent error logging from causing recursive issues
+        try {
+            console.error('Error fetching incident:', error);
+        } catch {
+            // Silently fail if error logging itself fails
+        }
         return null;
     }
 }
@@ -111,7 +133,12 @@ export async function triggerIncidentAnalysis(incidentId: number): Promise<{
 
         return await response.json();
     } catch (error) {
-        console.error('Error triggering analysis:', error);
+        // Use a try-catch to prevent error logging from causing recursive issues
+        try {
+            console.error('Error triggering analysis:', error);
+        } catch {
+            // Silently fail if error logging itself fails
+        }
         return {
             status: 'error',
             message: 'Failed to trigger analysis'
@@ -137,17 +164,28 @@ export async function updateIncidentStatus(
         );
 
         if (!response.ok) {
-            console.error(
-                'Failed to update incident:',
-                response.status,
-                await response.text()
-            );
+            const errorText = await response.text();
+            // Use a try-catch to prevent error logging from causing recursive issues
+            try {
+                console.error(
+                    'Failed to update incident:',
+                    response.status,
+                    errorText
+                );
+            } catch {
+                // Silently fail if error logging itself fails
+            }
             return null;
         }
 
         return await response.json();
     } catch (error) {
-        console.error('Error updating incident:', error);
+        // Use a try-catch to prevent error logging from causing recursive issues
+        try {
+            console.error('Error updating incident:', error);
+        } catch {
+            // Silently fail if error logging itself fails
+        }
         return null;
     }
 }
