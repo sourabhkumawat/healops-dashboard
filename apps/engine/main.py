@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import func
 from database import engine, Base, get_db, SessionLocal
-from models import Incident, LogEntry, User, Integration, ApiKey, IntegrationStatus, SourceMap
+from models import Incident, LogEntry, User, Integration, ApiKey, IntegrationStatus, SourceMap, IncidentStatus, IncidentSeverity
 import memory_models  # Ensure memory tables are created
 from auth import verify_password, get_password_hash, create_access_token, verify_token
 from integrations import generate_api_key
@@ -2090,19 +2090,59 @@ def get_system_stats(request: Request = None, db: Session = Depends(get_db)):
 # ============================================================================
 
 @app.get("/incidents")
-def list_incidents(status: Optional[str] = None, request: Request = None, db: Session = Depends(get_db)):
+def list_incidents(
+    status: Optional[str] = None,
+    severity: Optional[str] = None,
+    source: Optional[str] = None,
+    service: Optional[str] = None,
+    request: Request = None,
+    db: Session = Depends(get_db)
+):
     """List incidents for the authenticated user only."""
-    # Get authenticated user (middleware ensures this is set)
-    user_id = get_user_id_from_request(request, db=db)
+    try:
+        # Get authenticated user (middleware ensures this is set)
+        user_id = get_user_id_from_request(request, db=db)
 
-    # ALWAYS filter by user_id - no exceptions
-    query = db.query(Incident).filter(Incident.user_id == user_id)
+        # ALWAYS filter by user_id - no exceptions
+        query = db.query(Incident).filter(Incident.user_id == user_id)
 
-    if status:
-        query = query.filter(Incident.status == status)
+        # Validate and apply status filter
+        if status:
+            valid_statuses = [s.value for s in IncidentStatus]
+            if status not in valid_statuses:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+                )
+            query = query.filter(Incident.status == status)
 
-    incidents = query.order_by(Incident.last_seen_at.desc()).all()
-    return incidents
+        # Validate and apply severity filter
+        if severity:
+            valid_severities = [s.value for s in IncidentSeverity]
+            if severity not in valid_severities:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid severity. Must be one of: {', '.join(valid_severities)}"
+                )
+            query = query.filter(Incident.severity == severity)
+
+        # Apply source filter (no validation needed - can be any string)
+        if source:
+            query = query.filter(Incident.source == source)
+
+        # Apply service filter (no validation needed - can be any string)
+        if service:
+            query = query.filter(Incident.service_name == service)
+
+        incidents = query.order_by(Incident.last_seen_at.desc()).all()
+        return incidents
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch incidents: {str(e)}"
+        )
 
 @app.get("/incidents/{incident_id}")
 async def get_incident(incident_id: int, background_tasks: BackgroundTasks, request: Request, db: Session = Depends(get_db)):

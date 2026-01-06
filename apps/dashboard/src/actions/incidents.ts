@@ -4,13 +4,27 @@ import { API_BASE } from '@/lib/config';
 import { Incident } from '@/components/incident-table';
 import { fetchWithAuth } from '@/lib/api-client';
 
-export async function getIncidents(status?: string): Promise<Incident[]> {
+export async function getIncidents(filters?: {
+    status?: string;
+    severity?: string;
+    source?: string;
+    service?: string;
+}): Promise<Incident[]> {
     try {
         let url = `${API_BASE}/incidents`;
         const params = new URLSearchParams();
 
-        if (status) {
-            params.append('status', status);
+        if (filters?.status) {
+            params.append('status', filters.status);
+        }
+        if (filters?.severity) {
+            params.append('severity', filters.severity);
+        }
+        if (filters?.source) {
+            params.append('source', filters.source);
+        }
+        if (filters?.service) {
+            params.append('service', filters.service);
         }
 
         if (params.toString()) {
