@@ -1565,10 +1565,18 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
             # COST OPTIMIZATION: Only create PR if action_taken suggests code changes
             # Skip expensive code generation for simple fixes like "restart service"
             should_generate_code = False
+
+            # 1. Check action_taken for keywords
             if action_taken:
-                code_action_keywords = ["fix", "update", "change", "modify", "add", "remove", "patch", "bug", "code"]
+                code_action_keywords = ["fix", "update", "change", "modify", "add", "remove", "patch", "bug", "code", "revert", "rollback", "optimize", "refactor", "correct", "resolve", "handle", "implement"]
                 should_generate_code = any(keyword in action_taken.lower() for keyword in code_action_keywords)
             
+            # 2. Also check root_cause if action didn't trigger it, as the root cause might clearly indicate a code issue
+            # even if the action is generic like "investigate"
+            if not should_generate_code and root_cause:
+                root_cause_keywords = ["exception", "error", "traceback", "stack", "undefined", "null", "crash", "fail", "broken", "bug", "syntax", "implementation", "deployment"]
+                should_generate_code = any(keyword in root_cause.lower() for keyword in root_cause_keywords)
+
             # If GitHub integration is available and code changes are needed, try to analyze repo and create PR
             if incident.integration_id and should_generate_code:
                 try:
