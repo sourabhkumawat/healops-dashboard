@@ -275,10 +275,28 @@ export class HealOpsLogger {
         this.isGettingCallerInfo = true;
 
         try {
-            const stack = new Error().stack;
-            if (!stack) return {};
+            // Safely get stack trace - wrap in try-catch in case Error().stack throws
+            let stack: string | undefined;
+            try {
+                const error = new Error();
+                stack = error.stack;
+            } catch {
+                // If creating Error or accessing stack fails, return empty
+                return {};
+            }
 
-            const stackLines = stack.split('\n');
+            if (!stack) {
+                return {};
+            }
+
+            // Safely split stack into lines
+            let stackLines: string[] = [];
+            try {
+                stackLines = stack.split('\n');
+            } catch {
+                // If split fails, return what we have
+                return { fullStack: stack };
+            }
 
             // Patterns to identify SDK/internal frames that should be skipped
             const skipPatterns = [
@@ -302,144 +320,247 @@ export class HealOpsLogger {
             // Find the first stack line that's not from our SDK or known interceptors
             let callerLine: string | undefined = undefined;
 
-            for (let i = 0; i < stackLines.length; i++) {
-                const line = stackLines[i];
-                if (!line || line.trim().length === 0) continue;
+            try {
+                for (let i = 0; i < stackLines.length; i++) {
+                    const line = stackLines[i];
+                    if (!line || typeof line !== 'string') continue;
 
-                // Skip error message lines
-                if (
-                    line.trim().startsWith('Error:') ||
-                    line.trim().startsWith('TypeError:') ||
-                    line.trim().startsWith('ReferenceError:') ||
-                    line.trim().startsWith('SyntaxError:')
-                ) {
-                    continue;
-                }
+                    let trimmedLine: string;
+                    try {
+                        trimmedLine = line.trim();
+                        if (trimmedLine.length === 0) continue;
+                    } catch {
+                        continue; // Skip if trim fails
+                    }
 
-                // Check if this line should be skipped
-                const shouldSkip = skipPatterns.some((pattern) =>
-                    pattern.test(line)
-                );
-                if (shouldSkip) {
-                    continue;
-                }
+                    // Skip error message lines
+                    try {
+                        if (
+                            trimmedLine.startsWith('Error:') ||
+                            trimmedLine.startsWith('TypeError:') ||
+                            trimmedLine.startsWith('ReferenceError:') ||
+                            trimmedLine.startsWith('SyntaxError:')
+                        ) {
+                            continue;
+                        }
+                    } catch {
+                        continue; // Skip if startsWith fails
+                    }
 
-                // Found a potential caller line - check if it has file path info
-                if (
-                    line.includes(':') &&
-                    (line.match(/:\d+:\d+/) || line.match(/:\d+\)/))
-                ) {
-                    callerLine = line;
-                    break;
+                    // Check if this line should be skipped
+                    try {
+                        const shouldSkip = skipPatterns.some((pattern) => {
+                            try {
+                                return pattern.test(line);
+                            } catch {
+                                return false; // If regex test fails, don't skip
+                            }
+                        });
+                        if (shouldSkip) {
+                            continue;
+                        }
+                    } catch {
+                        // If pattern matching fails, continue to next line
+                        continue;
+                    }
+
+                    // Found a potential caller line - check if it has file path info
+                    try {
+                        if (
+                            line.includes(':') &&
+                            (line.match(/:\d+:\d+/) || line.match(/:\d+\)/))
+                        ) {
+                            callerLine = line;
+                            break;
+                        }
+                    } catch {
+                        // If match fails, continue to next line
+                        continue;
+                    }
                 }
+            } catch {
+                // If loop fails, use fallback
+                callerLine = undefined;
             }
 
             // Fallback: if we didn't find a caller, try the old approach with fixed indices
             if (!callerLine) {
-                callerLine = stackLines[4] || stackLines[3] || stackLines[2];
-            }
-
-            if (!callerLine) return { fullStack: stack };
-
-            // Chrome/Edge format: "at functionName (file:line:column)" or "at file:line:column"
-            const chromeMatchWithFunction = callerLine.match(
-                /at\s+([^(]+)\s+\(([^)]+):(\d+):(\d+)\)/
-            );
-            if (chromeMatchWithFunction) {
-                const filePath = chromeMatchWithFunction[2].trim();
-                const lineNum = parseInt(chromeMatchWithFunction[3], 10);
-                const colNum = parseInt(chromeMatchWithFunction[4], 10);
-
-                // Validate parsed values
-                if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
-                    return {
-                        functionName: chromeMatchWithFunction[1].trim(),
-                        filePath,
-                        line: lineNum,
-                        column: colNum,
-                        fullStack: stack
-                    };
+                try {
+                    callerLine =
+                        stackLines[4] || stackLines[3] || stackLines[2];
+                } catch {
+                    // If accessing array fails, just use undefined
+                    callerLine = undefined;
                 }
             }
 
-            const chromeMatch =
-                callerLine.match(/\(([^)]+):(\d+):(\d+)\)/) ||
-                callerLine.match(/at\s+([^:]+):(\d+):(\d+)/);
-            if (chromeMatch) {
-                const filePath = chromeMatch[1].trim();
-                const lineNum = parseInt(chromeMatch[2], 10);
-                const colNum = parseInt(chromeMatch[3], 10);
-
-                // Validate parsed values
-                if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
-                    return {
-                        filePath,
-                        line: lineNum,
-                        column: colNum,
-                        fullStack: stack
-                    };
-                }
+            if (!callerLine || typeof callerLine !== 'string') {
+                return { fullStack: stack };
             }
 
-            // Firefox format: "functionName@file:line:column"
-            const firefoxMatch = callerLine.match(
-                /([^@]+)@([^:]+):(\d+):(\d+)/
-            );
-            if (firefoxMatch) {
-                const filePath = firefoxMatch[2].trim();
-                const lineNum = parseInt(firefoxMatch[3], 10);
-                const colNum = parseInt(firefoxMatch[4], 10);
+            // Try to parse caller line with various formats - wrap each in try-catch
+            try {
+                // Chrome/Edge format: "at functionName (file:line:column)" or "at file:line:column"
+                const chromeMatchWithFunction = callerLine.match(
+                    /at\s+([^(]+)\s+\(([^)]+):(\d+):(\d+)\)/
+                );
+                if (
+                    chromeMatchWithFunction &&
+                    chromeMatchWithFunction.length >= 5
+                ) {
+                    try {
+                        const filePath = chromeMatchWithFunction[2]?.trim();
+                        const lineNum = parseInt(
+                            chromeMatchWithFunction[3] || '',
+                            10
+                        );
+                        const colNum = parseInt(
+                            chromeMatchWithFunction[4] || '',
+                            10
+                        );
 
-                // Validate parsed values
-                if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
-                    return {
-                        functionName: firefoxMatch[1].trim(),
-                        filePath,
-                        line: lineNum,
-                        column: colNum,
-                        fullStack: stack
-                    };
+                        // Validate parsed values
+                        if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
+                            return {
+                                functionName:
+                                    chromeMatchWithFunction[1]?.trim() ||
+                                    undefined,
+                                filePath,
+                                line: lineNum,
+                                column: colNum,
+                                fullStack: stack
+                            };
+                        }
+                    } catch {
+                        // Continue to next format
+                    }
                 }
+            } catch {
+                // Continue to next format
             }
 
-            // Node.js format: "at functionName (file:line:column)" or "at file:line:column"
-            const nodeMatchWithFunction = callerLine.match(
-                /at\s+([^(]+)\s+\(([^:)]+):(\d+):(\d+)\)/
-            );
-            if (nodeMatchWithFunction) {
-                const filePath = nodeMatchWithFunction[2].trim();
-                const lineNum = parseInt(nodeMatchWithFunction[3], 10);
-                const colNum = parseInt(nodeMatchWithFunction[4], 10);
+            try {
+                const chromeMatch =
+                    callerLine.match(/\(([^)]+):(\d+):(\d+)\)/) ||
+                    callerLine.match(/at\s+([^:]+):(\d+):(\d+)/);
+                if (chromeMatch && chromeMatch.length >= 4) {
+                    try {
+                        const filePath = chromeMatch[1]?.trim();
+                        const lineNum = parseInt(chromeMatch[2] || '', 10);
+                        const colNum = parseInt(chromeMatch[3] || '', 10);
 
-                // Validate parsed values
-                if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
-                    return {
-                        functionName: nodeMatchWithFunction[1].trim(),
-                        filePath,
-                        line: lineNum,
-                        column: colNum,
-                        fullStack: stack
-                    };
+                        // Validate parsed values
+                        if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
+                            return {
+                                filePath,
+                                line: lineNum,
+                                column: colNum,
+                                fullStack: stack
+                            };
+                        }
+                    } catch {
+                        // Continue to next format
+                    }
                 }
+            } catch {
+                // Continue to next format
             }
 
-            const nodeMatch = callerLine.match(
-                /at\s+(?:[^(]+)?\(?([^:)]+):(\d+):(\d+)\)?/
-            );
-            if (nodeMatch) {
-                const filePath = nodeMatch[1].trim();
-                const lineNum = parseInt(nodeMatch[2], 10);
-                const colNum = parseInt(nodeMatch[3], 10);
+            try {
+                // Firefox format: "functionName@file:line:column"
+                const firefoxMatch = callerLine.match(
+                    /([^@]+)@([^:]+):(\d+):(\d+)/
+                );
+                if (firefoxMatch && firefoxMatch.length >= 5) {
+                    try {
+                        const filePath = firefoxMatch[2]?.trim();
+                        const lineNum = parseInt(firefoxMatch[3] || '', 10);
+                        const colNum = parseInt(firefoxMatch[4] || '', 10);
 
-                // Validate parsed values
-                if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
-                    return {
-                        filePath,
-                        line: lineNum,
-                        column: colNum,
-                        fullStack: stack
-                    };
+                        // Validate parsed values
+                        if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
+                            return {
+                                functionName:
+                                    firefoxMatch[1]?.trim() || undefined,
+                                filePath,
+                                line: lineNum,
+                                column: colNum,
+                                fullStack: stack
+                            };
+                        }
+                    } catch {
+                        // Continue to next format
+                    }
                 }
+            } catch {
+                // Continue to next format
+            }
+
+            try {
+                // Node.js format: "at functionName (file:line:column)" or "at file:line:column"
+                const nodeMatchWithFunction = callerLine.match(
+                    /at\s+([^(]+)\s+\(([^:)]+):(\d+):(\d+)\)/
+                );
+                if (
+                    nodeMatchWithFunction &&
+                    nodeMatchWithFunction.length >= 5
+                ) {
+                    try {
+                        const filePath = nodeMatchWithFunction[2]?.trim();
+                        const lineNum = parseInt(
+                            nodeMatchWithFunction[3] || '',
+                            10
+                        );
+                        const colNum = parseInt(
+                            nodeMatchWithFunction[4] || '',
+                            10
+                        );
+
+                        // Validate parsed values
+                        if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
+                            return {
+                                functionName:
+                                    nodeMatchWithFunction[1]?.trim() ||
+                                    undefined,
+                                filePath,
+                                line: lineNum,
+                                column: colNum,
+                                fullStack: stack
+                            };
+                        }
+                    } catch {
+                        // Continue to next format
+                    }
+                }
+            } catch {
+                // Continue to next format
+            }
+
+            try {
+                const nodeMatch = callerLine.match(
+                    /at\s+(?:[^(]+)?\(?([^:)]+):(\d+):(\d+)\)?/
+                );
+                if (nodeMatch && nodeMatch.length >= 4) {
+                    try {
+                        const filePath = nodeMatch[1]?.trim();
+                        const lineNum = parseInt(nodeMatch[2] || '', 10);
+                        const colNum = parseInt(nodeMatch[3] || '', 10);
+
+                        // Validate parsed values
+                        if (filePath && !isNaN(lineNum) && !isNaN(colNum)) {
+                            return {
+                                filePath,
+                                line: lineNum,
+                                column: colNum,
+                                fullStack: stack
+                            };
+                        }
+                    } catch {
+                        // Return with just stack
+                    }
+                }
+            } catch {
+                // Return with just stack
             }
 
             return { fullStack: stack };
