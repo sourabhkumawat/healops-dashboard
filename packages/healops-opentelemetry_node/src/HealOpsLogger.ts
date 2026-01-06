@@ -145,6 +145,9 @@ export class HealOpsLogger {
     private isFlushing: boolean = false;
     private isDestroyed: boolean = false;
 
+    // Guard flag to prevent recursive calls to getCallerInfo
+    private isGettingCallerInfo: boolean = false;
+
     // Shutdown handlers (stored for cleanup)
     private shutdownHandlers: {
         beforeExit?: () => void;
@@ -264,6 +267,13 @@ export class HealOpsLogger {
         functionName?: string;
         fullStack?: string;
     } {
+        // Prevent recursive calls - if we're already getting caller info, return empty
+        if (this.isGettingCallerInfo) {
+            return {};
+        }
+
+        this.isGettingCallerInfo = true;
+
         try {
             const stack = new Error().stack;
             if (!stack) return {};
@@ -435,17 +445,23 @@ export class HealOpsLogger {
             return { fullStack: stack };
         } catch (e) {
             // Silent fail - don't break logging if stack parsing fails
-            // Log to original console if available to avoid recursion
+            // Use process.stderr.write directly to avoid console interception recursion
             if (typeof process !== 'undefined' && process.env.HEALOPS_DEBUG) {
                 try {
-                    const originalConsole =
-                        (console as any)._originalConsole || console;
-                    originalConsole.error('HealOps getCallerInfo error:', e);
+                    // Use process.stderr.write directly to bypass console interception
+                    process.stderr.write(
+                        `HealOps getCallerInfo error: ${
+                            e instanceof Error ? e.message : String(e)
+                        }\n`
+                    );
                 } catch {
-                    // Ignore errors in error handling
+                    // Ignore errors in error handling - completely silent
                 }
             }
             return {};
+        } finally {
+            // Always reset the flag, even if an error occurred
+            this.isGettingCallerInfo = false;
         }
     }
 
