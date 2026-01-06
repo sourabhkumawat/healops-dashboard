@@ -20,7 +20,12 @@ import {
 import { Incident } from '@/components/incident-table';
 import { getIncident, updateIncidentStatus } from '@/actions/incidents';
 import FileDiffCard from '@/components/FileDiffCard';
-import { trackIncidentAnalysis, trackIncidentFetchError, analytics } from '@/lib/analytics';
+import { AgentThinkingView } from '@/components/AgentThinkingView';
+import {
+    trackIncidentAnalysis,
+    trackIncidentFetchError,
+    analytics
+} from '@/lib/analytics';
 
 interface LogEntry {
     id: number;
@@ -58,12 +63,12 @@ export default function IncidentDetailsPage() {
 
     const pollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const fetchingIncidentRef = useRef(false);
-    
+
     // Validate incident ID
     // params.id can be string or string[] in Next.js, ensure we handle both
     const incidentIdParam = Array.isArray(params.id) ? params.id[0] : params.id;
     const incidentId = incidentIdParam ? Number(incidentIdParam) : NaN;
-    
+
     // Early return for invalid ID (after hooks, which is correct React pattern)
     if (!incidentIdParam || isNaN(incidentId) || incidentId <= 0) {
         return (
@@ -90,12 +95,12 @@ export default function IncidentDetailsPage() {
             fetchingIncidentRef.current = true;
             try {
                 const result = await getIncident(incidentId);
-                
+
                 // Check if component is still mounted before setting state
                 if (!isMounted) {
                     return false;
                 }
-                
+
                 if (result) {
                     setData(result);
                     setLoading(false);
@@ -104,11 +109,12 @@ export default function IncidentDetailsPage() {
                     // Check if analysis is available
                     const rootCause = result.incident?.root_cause;
                     const hasRootCause = !!rootCause;
-                    const hasAnalysisError = hasRootCause && rootCause && (
-                        rootCause.includes("Analysis failed") ||
-                        rootCause.includes("Analysis error") ||
-                        rootCause.includes("not configured")
-                    );
+                    const hasAnalysisError =
+                        hasRootCause &&
+                        rootCause &&
+                        (rootCause.includes('Analysis failed') ||
+                            rootCause.includes('Analysis error') ||
+                            rootCause.includes('not configured'));
 
                     if (hasRootCause) {
                         // Analysis complete - stop polling
@@ -117,12 +123,12 @@ export default function IncidentDetailsPage() {
                             pollTimeoutRef.current = null;
                         }
                         setAnalyzing(false);
-                        
+
                         // Set error state if analysis failed
                         if (hasAnalysisError && rootCause) {
                             setError(rootCause);
                         }
-                        
+
                         return false; // Don't poll
                     } else {
                         // Still analyzing
@@ -130,7 +136,7 @@ export default function IncidentDetailsPage() {
                         return true; // Continue polling
                     }
                 } else {
-                    setError("Incident not found");
+                    setError('Incident not found');
                     setLoading(false);
                 }
             } catch (error) {
@@ -138,15 +144,19 @@ export default function IncidentDetailsPage() {
                 if (!isMounted) {
                     return false;
                 }
-                
+
                 console.error('Failed to fetch incident:', error);
-                setError("Failed to load incident. Please try again.");
+                setError('Failed to load incident. Please try again.');
                 setLoading(false);
-                
+
                 // Track error analytics
-                const errorObj = error instanceof Error ? error : new Error(String(error));
+                const errorObj =
+                    error instanceof Error ? error : new Error(String(error));
                 trackIncidentFetchError(incidentId, errorObj);
-                analytics.error(errorObj, { incident_id: incidentId, context: 'initial_fetch' });
+                analytics.error(errorObj, {
+                    incident_id: incidentId,
+                    context: 'initial_fetch'
+                });
             } finally {
                 fetchingIncidentRef.current = false;
             }
@@ -159,12 +169,16 @@ export default function IncidentDetailsPage() {
             if (!isMounted) {
                 return;
             }
-            
+
             if (!shouldPoll || pollCount >= MAX_POLL_ATTEMPTS) {
                 if (pollCount >= MAX_POLL_ATTEMPTS && isMounted) {
-                    console.warn('Max polling attempts reached. Stopping polling.');
+                    console.warn(
+                        'Max polling attempts reached. Stopping polling.'
+                    );
                     setAnalyzing(false);
-                    setError("Analysis is taking longer than expected. Please refresh the page.");
+                    setError(
+                        'Analysis is taking longer than expected. Please refresh the page.'
+                    );
                 }
                 return;
             }
@@ -180,48 +194,54 @@ export default function IncidentDetailsPage() {
                 if (!isMounted) {
                     return;
                 }
-                
+
                 if (fetchingIncidentRef.current) {
                     // If still fetching, reschedule
                     scheduleNextPoll(true);
                     return;
                 }
-                
+
                 fetchingIncidentRef.current = true;
                 pollCount++;
 
                 try {
                     const result = await getIncident(incidentId);
-                    
+
                     // Check again after async operation
                     if (!isMounted) {
                         return;
                     }
-                    
+
                     if (result) {
                         setData(result);
                         setError(null);
 
                         const rootCause = result.incident?.root_cause;
                         const hasRootCause = !!rootCause;
-                        const hasAnalysisError = hasRootCause && rootCause && (
-                            rootCause.includes("Analysis failed") ||
-                            rootCause.includes("Analysis error") ||
-                            rootCause.includes("not configured")
-                        );
+                        const hasAnalysisError =
+                            hasRootCause &&
+                            rootCause &&
+                            (rootCause.includes('Analysis failed') ||
+                                rootCause.includes('Analysis error') ||
+                                rootCause.includes('not configured'));
 
                         if (hasRootCause) {
                             // Analysis complete!
                             // Log only in development
-                            if (typeof process !== 'undefined' && process.env?.NODE_ENV === 'development') {
-                                console.log(`AI analysis completed after ${pollCount} polls`);
+                            if (
+                                typeof process !== 'undefined' &&
+                                process.env?.NODE_ENV === 'development'
+                            ) {
+                                console.log(
+                                    `AI analysis completed after ${pollCount} polls`
+                                );
                             }
                             setAnalyzing(false);
-                            
+
                             if (hasAnalysisError && rootCause) {
                                 setError(rootCause);
                             }
-                            
+
                             // Track analytics
                             trackIncidentAnalysis(
                                 incidentId,
@@ -229,7 +249,7 @@ export default function IncidentDetailsPage() {
                                 pollCount,
                                 pollCount * currentPollInterval
                             );
-                            
+
                             return; // Stop polling
                         } else {
                             // Still analyzing, continue polling
@@ -244,10 +264,13 @@ export default function IncidentDetailsPage() {
                     if (!isMounted) {
                         return;
                     }
-                    
+
                     console.error('Failed to fetch incident:', error);
                     // On error, continue polling but with longer interval
-                    currentPollInterval = Math.min(currentPollInterval * 1.5, MAX_POLL_INTERVAL);
+                    currentPollInterval = Math.min(
+                        currentPollInterval * 1.5,
+                        MAX_POLL_INTERVAL
+                    );
                     scheduleNextPoll(true);
                 } finally {
                     fetchingIncidentRef.current = false;
@@ -259,7 +282,10 @@ export default function IncidentDetailsPage() {
         fetchIncident().then((shouldPoll) => {
             if (shouldPoll) {
                 // Log only in development
-                if (typeof process !== 'undefined' && process.env?.NODE_ENV === 'development') {
+                if (
+                    typeof process !== 'undefined' &&
+                    process.env?.NODE_ENV === 'development'
+                ) {
                     console.log('Starting adaptive polling for AI analysis...');
                 }
                 scheduleNextPoll(true);
@@ -269,13 +295,13 @@ export default function IncidentDetailsPage() {
         return () => {
             // Mark component as unmounted
             isMounted = false;
-            
+
             // Clear any pending timeouts
             if (pollTimeoutRef.current) {
                 clearTimeout(pollTimeoutRef.current);
                 pollTimeoutRef.current = null;
             }
-            
+
             // Reset fetching flag
             fetchingIncidentRef.current = false;
         };
@@ -294,11 +320,11 @@ export default function IncidentDetailsPage() {
                     prev ? { ...prev, incident: updatedIncident } : null
                 );
             } else {
-                setError("Failed to resolve incident. Please try again.");
+                setError('Failed to resolve incident. Please try again.');
             }
         } catch (error) {
             console.error('Failed to resolve incident:', error);
-            setError("Failed to resolve incident. Please try again.");
+            setError('Failed to resolve incident. Please try again.');
         } finally {
             setResolving(false);
         }
@@ -330,7 +356,9 @@ export default function IncidentDetailsPage() {
     const hasChanges =
         incident.action_result?.changes &&
         Object.keys(incident.action_result.changes).length > 0 &&
-        Object.values(incident.action_result.changes).some(v => v && v.trim().length > 0); // Ensure not empty
+        Object.values(incident.action_result.changes).some(
+            (v) => v && v.trim().length > 0
+        ); // Ensure not empty
     const showRightPane = analyzing || hasFilesChanged || hasChanges;
 
     return (
@@ -471,6 +499,27 @@ export default function IncidentDetailsPage() {
                                                 <p className="text-sm text-zinc-300">
                                                     {incident.action_taken}
                                                 </p>
+                                            </div>
+                                        )}
+
+                                        {/* Agent Thinking Process - Show when code diff is available */}
+                                        {hasFilesChanged && (
+                                            <div className="rounded-lg border bg-zinc-900/50 border-zinc-800 mb-4">
+                                                <div className="p-4 border-b border-zinc-800">
+                                                    <h3 className="text-sm font-semibold text-zinc-100 mb-2">
+                                                        Agent Thinking Process
+                                                    </h3>
+                                                    <p className="text-xs text-zinc-400">
+                                                        See how the agent solved
+                                                        this problem
+                                                    </p>
+                                                </div>
+                                                <div className="h-64 overflow-hidden">
+                                                    <AgentThinkingView
+                                                        incidentId={incidentId}
+                                                        isAnalyzing={false}
+                                                    />
+                                                </div>
                                             </div>
                                         )}
 
@@ -651,51 +700,12 @@ export default function IncidentDetailsPage() {
                     </div>
 
                     {analyzing && !hasFilesChanged && !hasChanges ? (
-                        // Loading state while agents are working
-                        <div className="flex-1 flex flex-col items-center justify-center p-8 bg-zinc-950/30">
-                            <div className="flex flex-col items-center gap-4 text-center">
-                                <Loader2 className="h-8 w-8 animate-spin text-blue-400" />
-                                <div className="space-y-2">
-                                    <h3 className="text-sm font-semibold text-zinc-200">
-                                        Agents are analyzing and fixing...
-                                    </h3>
-                                    <p className="text-xs text-zinc-400 max-w-sm">
-                                        Our AI agents are exploring the
-                                        codebase, generating fixes, and
-                                        validating changes. Code differences
-                                        will appear here once ready.
-                                    </p>
-                                </div>
-                                <div className="flex flex-col gap-2 mt-4 text-xs text-zinc-500">
-                                    <div className="flex items-center gap-2">
-                                        <div className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
-                                        <span>
-                                            Exploring codebase structure
-                                        </span>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <div
-                                            className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse"
-                                            style={{ animationDelay: '0.2s' }}
-                                        />
-                                        <span>Analyzing dependencies</span>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <div
-                                            className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse"
-                                            style={{ animationDelay: '0.4s' }}
-                                        />
-                                        <span>Generating code fixes</span>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <div
-                                            className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse"
-                                            style={{ animationDelay: '0.6s' }}
-                                        />
-                                        <span>Validating changes</span>
-                                    </div>
-                                </div>
-                            </div>
+                        // Show AgentThinkingView while analyzing (before code diff available)
+                        <div className="flex-1 overflow-hidden">
+                            <AgentThinkingView
+                                incidentId={incidentId}
+                                isAnalyzing={analyzing}
+                            />
                         </div>
                     ) : (
                         // Show file diffs when available

@@ -1034,18 +1034,47 @@ Only include files that need changes. Provide the COMPLETE file content for each
                 pr_url = pr_result.get("pr_url")
                 pr_number = pr_result.get("pr_number")
                 
-                # MEMORY: Store the successful fix to learn from it
+                # MEMORY: Store the successful fix with workspace context for learning
                 try:
-                    print(f"🧠 Storing fix in CodeMemory for future learning...")
+                    print(f"🧠 Storing fix in CodeMemory with workspace context for future learning...")
                     code_memory = CodeMemory()
                     fingerprint = get_incident_fingerprint(incident, logs)
-                    # Store the files changed and the explanation
+                    
+                    # Try to get workspace context from database
+                    workspace_context = {
+                        "files_read": [],
+                        "files_modified": list(changes.keys()),
+                        "changes": changes,
+                        "pr_url": pr_url
+                    }
+                    
+                    try:
+                        from memory_models import AgentWorkspace
+                        saved_workspace = db.query(AgentWorkspace).filter(
+                            AgentWorkspace.incident_id == incident.id
+                        ).order_by(AgentWorkspace.created_at.desc()).first()
+                        
+                        if saved_workspace:
+                            workspace_context["files_read"] = saved_workspace.files_read or []
+                            workspace_context["context_files"] = list(
+                                set(saved_workspace.files_read or []) - 
+                                set(saved_workspace.files_modified or [])
+                            )
+                    except Exception:
+                        pass
+                    
                     fix_data = json.dumps({
                         "changes": changes,
                         "pr_url": pr_url
                     })
-                    code_memory.store_fix(fingerprint, explanation, fix_data)
-                    print(f"✅ Fix stored in memory for fingerprint: {fingerprint}")
+                    code_memory.store_fix_with_workspace(
+                        error_signature=fingerprint,
+                        fix_description=explanation,
+                        code_patch=fix_data,
+                        workspace_context=workspace_context,
+                        incident_id=incident.id
+                    )
+                    print(f"✅ Fix stored with workspace context for fingerprint: {fingerprint}")
                 except Exception as mem_err:
                     print(f"⚠️ Failed to store fix in memory: {mem_err}")
 
@@ -1565,11 +1594,11 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                             use_old_crew = os.getenv("USE_OLD_CREW", "false").lower() == "true"
                             
                             if not use_old_crew:
-                                # Try enhanced crew first (default)
+                                # Try robust crew first (default) - Manus-style architecture
                                 try:
-                                    print("🚀 Using enhanced multi-agent crew system")
-                                    from enhanced_crew import run_enhanced_crew
-                                    enhanced_result = run_enhanced_crew(
+                                    print("🚀 Using robust multi-agent crew system (Manus-style)")
+                                    from agent_orchestrator import run_robust_crew
+                                    enhanced_result = run_robust_crew(
                                         incident=incident,
                                         logs=logs,
                                         root_cause=root_cause,
@@ -1578,23 +1607,37 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                                         db=db
                                     )
                                     
-                                    # Process enhanced result - handle all decision actions
-                                    decision_action = enhanced_result.get("decision", {}).get("action")
-                                    best_fix = enhanced_result.get("best_fix", {})
-                                    fix_data = best_fix.get("fix_data", {})
+                                    # Process robust crew result - adapt format
+                                    # Robust crew returns: status, fixes, events, plan_progress
+                                    fixes = enhanced_result.get("fixes", {})
                                     
-                                    # Convert to PR format
+                                    # Convert fixes to PR format
                                     changes = {}
-                                    if isinstance(fix_data, dict):
-                                        for file_path, file_info in fix_data.items():
-                                            if isinstance(file_info, dict):
-                                                changes[file_path] = file_info.get("content", "")
-                                            else:
-                                                changes[file_path] = str(file_info)
+                                    for file_path, file_info in fixes.items():
+                                        if isinstance(file_info, dict):
+                                            changes[file_path] = file_info.get("content", "")
+                                        else:
+                                            changes[file_path] = str(file_info)
                                     
-                                    # Determine if draft PR
+                                    # Determine decision based on result
+                                    if enhanced_result.get("status") == "success" and changes:
+                                        decision_action = "CREATE_PR"
+                                        confidence_score = 85  # Default confidence for robust crew
+                                    elif enhanced_result.get("status") == "partial" and changes:
+                                        decision_action = "CREATE_DRAFT_PR"
+                                        confidence_score = 70
+                                    else:
+                                        decision_action = "SKIP_PR"
+                                        confidence_score = 0
+                                    
                                     is_draft = decision_action == "CREATE_DRAFT_PR"
-                                    confidence_score = best_fix.get("confidence", {}).get("overall_confidence", 0)
+                                    
+                                    # Create decision object for compatibility
+                                    decision = {
+                                        "action": decision_action,
+                                        "reasoning": f"Robust crew completed with {len(changes)} files changed. Status: {enhanced_result.get('status')}",
+                                        "warnings": [] if decision_action == "CREATE_PR" else ["Partial completion - review recommended"]
+                                    }
                                     
                                     if changes and decision_action in ["CREATE_PR", "CREATE_PR_WITH_WARNINGS", "CREATE_DRAFT_PR"]:
                                         # Build PR body with appropriate warnings
@@ -1627,7 +1670,7 @@ This PR was generated using the enhanced multi-agent system with:
 
 {warnings_text}
 ### Decision
-{enhanced_result.get('decision', {}).get('reasoning', 'N/A')}
+{decision.get('reasoning', 'N/A')}
 
 ### Files Changed
 {chr(10).join(f"- `{path}`" for path in changes.keys())}

@@ -2,9 +2,11 @@ import json
 import os
 import redis
 from typing import Dict, Any, List, Optional
+from datetime import datetime
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
 from database import SessionLocal
-from memory_models import AgentMemoryError, AgentMemoryFix, AgentRepoContext
+from memory_models import AgentMemoryError, AgentMemoryFix, AgentRepoContext, AgentLearningPattern
 
 # Redis Configuration
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -214,3 +216,183 @@ class CodeMemory:
             "best_match": best_match,
             "total_past_fixes": len(known_fixes)
         }
+    
+    def store_fix_with_workspace(
+        self,
+        error_signature: str,
+        fix_description: str,
+        code_patch: str,
+        workspace_context: Dict[str, Any],
+        incident_id: int,
+        structured_data: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Store a successful fix with workspace context for learning.
+        
+        Args:
+            error_signature: Error signature/fingerprint
+            fix_description: Description of the fix
+            code_patch: Code patch
+            workspace_context: Workspace context with files_read, files_modified, etc.
+            incident_id: Incident ID
+            structured_data: Optional structured fix data
+        """
+        # Store the fix normally
+        self.store_fix(error_signature, fix_description, code_patch, structured_data)
+        
+        # Learn from workspace context
+        try:
+            self._learn_from_workspace(error_signature, workspace_context, fix_description)
+        except Exception as e:
+            print(f"Warning: Failed to learn from workspace: {e}")
+    
+    def _learn_from_workspace(
+        self,
+        error_signature: str,
+        workspace_context: Dict[str, Any],
+        fix_description: str
+    ):
+        """
+        Extract and store learning patterns from workspace context.
+        
+        Args:
+            error_signature: Error signature
+            workspace_context: Workspace context dict
+            fix_description: Fix description
+        """
+        # Extract error type
+        error_type = self._extract_error_type(error_signature, fix_description)
+        
+        # Extract patterns
+        files_read = workspace_context.get("files_read", [])
+        files_modified = workspace_context.get("files_modified", [])
+        context_files = workspace_context.get("context_files", [])
+        
+        # Find or create learning pattern
+        pattern = self.db.query(AgentLearningPattern).filter(
+            AgentLearningPattern.error_type == error_type
+        ).first()
+        
+        if pattern:
+            # Update existing pattern
+            # Merge file lists (keep unique)
+            existing_read = set(pattern.typical_files_read or [])
+            existing_modified = set(pattern.typical_files_modified or [])
+            existing_context = set(pattern.context_files or [])
+            
+            pattern.typical_files_read = list(existing_read.union(set(files_read)))
+            pattern.typical_files_modified = list(existing_modified.union(set(files_modified)))
+            pattern.context_files = list(existing_context.union(set(context_files)))
+            
+            pattern.total_attempts += 1
+            pattern.success_count += 1  # This is called after successful fix
+            pattern.last_used = datetime.utcnow()
+        else:
+            # Create new pattern
+            pattern = AgentLearningPattern(
+                error_type=error_type,
+                error_signature_pattern=error_signature[:200],  # Store pattern
+                typical_files_read=files_read,
+                typical_files_modified=files_modified,
+                context_files=context_files,
+                total_attempts=1,
+                success_count=1,
+                last_used=datetime.utcnow()
+            )
+            self.db.add(pattern)
+        
+        # Update confidence score (success rate as percentage)
+        if pattern.total_attempts > 0:
+            pattern.confidence_score = int((pattern.success_count / pattern.total_attempts) * 100)
+        
+        self.db.commit()
+    
+    def _extract_error_type(self, error_signature: str, fix_description: str) -> str:
+        """
+        Extract error type from signature and description.
+        
+        Args:
+            error_signature: Error signature
+            fix_description: Fix description
+            
+        Returns:
+            Error type string
+        """
+        # Simple categorization logic
+        signature_lower = error_signature.lower()
+        description_lower = fix_description.lower()
+        
+        if any(keyword in signature_lower or keyword in description_lower for keyword in ["import", "module", "cannot import"]):
+            return "import_error"
+        elif any(keyword in signature_lower or keyword in description_lower for keyword in ["syntax", "parse", "invalid syntax"]):
+            return "syntax_error"
+        elif any(keyword in signature_lower or keyword in description_lower for keyword in ["type", "attribute", "has no attribute"]):
+            return "type_error"
+        elif any(keyword in signature_lower or keyword in description_lower for keyword in ["key", "keyerror", "missing key"]):
+            return "key_error"
+        elif any(keyword in signature_lower or keyword in description_lower for keyword in ["index", "indexerror", "out of range"]):
+            return "index_error"
+        elif any(keyword in signature_lower or keyword in description_lower for keyword in ["null", "none", "nullpointer"]):
+            return "null_error"
+        elif any(keyword in signature_lower or keyword in description_lower for keyword in ["timeout", "timed out"]):
+            return "timeout_error"
+        elif any(keyword in signature_lower or keyword in description_lower for keyword in ["network", "connection", "refused"]):
+            return "network_error"
+        else:
+            return "general_error"
+    
+    def get_learning_pattern(self, error_type: str) -> Optional[Dict[str, Any]]:
+        """
+        Get learning pattern for a specific error type.
+        
+        Args:
+            error_type: Error type string
+            
+        Returns:
+            Learning pattern dict or None
+        """
+        try:
+            # Get most confident pattern for this error type
+            pattern = self.db.query(AgentLearningPattern).filter(
+                AgentLearningPattern.error_type == error_type
+            ).order_by(AgentLearningPattern.confidence_score.desc()).first()
+            
+            if pattern:
+                return {
+                    "error_type": pattern.error_type,
+                    "typical_files_read": pattern.typical_files_read or [],
+                    "typical_files_modified": pattern.typical_files_modified or [],
+                    "context_files": pattern.context_files or [],
+                    "confidence_score": pattern.confidence_score,
+                    "success_count": pattern.success_count,
+                    "total_attempts": pattern.total_attempts
+                }
+        except Exception as e:
+            print(f"Error retrieving learning pattern: {e}")
+        
+        return None
+    
+    def update_fix_success_rate(self, error_signature: str, success: bool):
+        """
+        Update success rate for a fix.
+        
+        Args:
+            error_signature: Error signature
+            success: Whether the fix was successful
+        """
+        try:
+            fixes = self.db.query(AgentMemoryFix).filter(
+                AgentMemoryFix.error_signature == error_signature
+            ).all()
+            
+            for fix in fixes:
+                # Update success rate (simple increment/decrement)
+                if success:
+                    fix.success_rate = min(100, fix.success_rate + 1)
+                else:
+                    fix.success_rate = max(0, fix.success_rate - 1)
+            
+            self.db.commit()
+        except Exception as e:
+            self.db.rollback()
+            print(f"Error updating fix success rate: {e}")

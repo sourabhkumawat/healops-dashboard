@@ -453,6 +453,60 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
+
+# Agent Events WebSocket Manager
+class AgentEventManager:
+    """Manages WebSocket connections for agent events."""
+    
+    def __init__(self):
+        self.active_connections: Dict[int, List[WebSocket]] = {}
+    
+    async def connect(self, websocket: WebSocket, incident_id: int):
+        """Connect a WebSocket for a specific incident."""
+        await websocket.accept()
+        if incident_id not in self.active_connections:
+            self.active_connections[incident_id] = []
+        self.active_connections[incident_id].append(websocket)
+    
+    def disconnect(self, websocket: WebSocket, incident_id: int):
+        """Disconnect a WebSocket."""
+        if incident_id in self.active_connections:
+            if websocket in self.active_connections[incident_id]:
+                self.active_connections[incident_id].remove(websocket)
+            if not self.active_connections[incident_id]:
+                del self.active_connections[incident_id]
+    
+    async def broadcast(self, incident_id: int, event: Dict[str, Any]):
+        """Broadcast event to all connected clients for an incident."""
+        if incident_id in self.active_connections:
+            message = json.dumps(event)
+            disconnected = []
+            for websocket in self.active_connections[incident_id]:
+                try:
+                    await websocket.send_text(message)
+                except Exception:
+                    disconnected.append(websocket)
+            
+            # Remove disconnected websockets
+            for ws in disconnected:
+                self.disconnect(ws, incident_id)
+
+agent_event_manager = AgentEventManager()
+
+# Export for use in agent_orchestrator
+__all__ = ['agent_event_manager']
+
+@app.websocket("/ws/agent-events/{incident_id}")
+async def agent_events_websocket(websocket: WebSocket, incident_id: int):
+    """WebSocket endpoint for streaming agent thinking events in real-time."""
+    await agent_event_manager.connect(websocket, incident_id)
+    try:
+        while True:
+            # Keep connection alive
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        agent_event_manager.disconnect(websocket, incident_id)
+
 # ============================================================================
 # Log Ingestion
 # ============================================================================

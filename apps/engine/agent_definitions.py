@@ -21,7 +21,7 @@ except ImportError:
 from crewai import Agent, LLM
 import os
 from typing import List, Optional
-from enhanced_prompts import (
+from agent_prompts import (
     CODEBASE_EXPLORER_PROMPT,
     DEPENDENCY_ANALYZER_PROMPT,
     PATTERN_MATCHER_PROMPT,

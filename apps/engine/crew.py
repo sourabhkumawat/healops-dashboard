@@ -2,7 +2,7 @@
 Original crew workflow for incident diagnosis.
 Kept for backward compatibility and as a fallback option.
 
-Note: The enhanced crew (enhanced_crew.py) is now used by default.
+Note: The agent orchestrator (agent_orchestrator.py) is now used by default.
 Set USE_OLD_CREW=true to use this crew explicitly, or it will be used
 automatically as a fallback if the enhanced crew fails.
 """

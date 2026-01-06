@@ -1,0 +1,566 @@
+"""
+Task Planner Module for explicit task decomposition (Manus-style planning).
+Breaks high-level goals into numbered, executable steps.
+"""
+from typing import List, Dict, Any, Optional
+from enum import Enum
+import json
+import copy
+import os
+from datetime import datetime
+
+class StepStatus(Enum):
+    """Status of a plan step."""
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class TaskPlanner:
+    """
+    Manus-style planner that breaks high-level goals into ordered steps.
+    
+    Each step has a description, expected output, and status tracking.
+    Supports dynamic re-planning when requirements change or steps fail.
+    """
+    
+    def __init__(self, incident_id: int, github_integration, repo_name: str):
+        """
+        Initialize task planner.
+        
+        Args:
+            incident_id: ID of the incident
+            github_integration: GitHub integration instance
+            repo_name: Repository name in format "owner/repo"
+        """
+        self.incident_id = incident_id
+        self.gh = github_integration
+        self.repo_name = repo_name
+        self.plan: List[Dict[str, Any]] = []
+        self.current_step_index = 0
+        self.plan_history: List[Dict[str, Any]] = []
+        self.replan_count = 0
+        self.max_replans = int(os.getenv("MAX_REPLANS", "3"))
+    
+    def create_plan(
+        self, 
+        root_cause: str, 
+        affected_files: List[str], 
+        llm,
+        knowledge_context: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate a plan using LLM.
+        
+        Args:
+            root_cause: Root cause analysis
+            affected_files: List of affected file paths
+            llm: LLM instance for plan generation
+            knowledge_context: Optional knowledge context from RAG
+            
+        Returns:
+            List of plan steps
+        """
+        planning_prompt = f"""
+You are a planning assistant. Break down the following incident fix into ordered steps.
+
+Root Cause: {root_cause}
+Affected Files: {', '.join(affected_files) if affected_files else 'None'}
+
+{f'Relevant Knowledge: {knowledge_context}' if knowledge_context else ''}
+
+Generate a numbered list of steps. Each step should:
+1. Be specific and actionable
+2. Have a clear completion criterion
+3. List any files that need to be read/modified
+4. Have an expected output description
+
+Format as JSON array:
+[
+    {{
+        "step_number": 1,
+        "description": "Read and analyze affected files",
+        "files_to_read": ["file1.py", "file2.py"],
+        "expected_output": "Understanding of current code structure and error location"
+    }},
+    {{
+        "step_number": 2,
+        "description": "Analyze dependencies and find root cause",
+        "files_to_read": [],
+        "expected_output": "Identified root cause with specific code location"
+    }},
+    ...
+]
+
+Return ONLY the JSON array, no other text.
+"""
+        
+        try:
+            # Call LLM to generate plan
+            if hasattr(llm, 'invoke'):
+                response = llm.invoke(planning_prompt)
+                response_text = response.content if hasattr(response, 'content') else str(response)
+            else:
+                # Fallback for different LLM interfaces
+                response_text = str(llm(planning_prompt))
+            
+            # Extract JSON from response
+            plan_json = self._extract_json(response_text)
+            plan_data = json.loads(plan_json)
+            
+            # Initialize plan with status
+            self.plan = []
+            for step_data in plan_data:
+                step = {
+                    "step_number": step_data.get("step_number", len(self.plan) + 1),
+                    "description": step_data.get("description", ""),
+                    "files_to_read": step_data.get("files_to_read", []),
+                    "expected_output": step_data.get("expected_output", ""),
+                    "status": StepStatus.PENDING.value,
+                    "result": None,
+                    "errors": [],
+                    "retry_count": 0,
+                    "started_at": None,
+                    "completed_at": None
+                }
+                self.plan.append(step)
+            
+            return self.plan
+            
+        except Exception as e:
+            print(f"Error creating plan: {e}")
+            # Fallback to simple plan
+            self.plan = self._create_fallback_plan(affected_files, root_cause)
+            return self.plan
+    
+    def get_current_step(self) -> Optional[Dict[str, Any]]:
+        """
+        Get the current step to execute.
+        
+        Returns:
+            Current step dictionary or None if all steps complete
+        """
+        if self.current_step_index < len(self.plan):
+            return self.plan[self.current_step_index]
+        return None
+    
+    def mark_step_completed(self, step_number: int, result: Any):
+        """
+        Mark a step as completed.
+        
+        Args:
+            step_number: Step number to mark
+            result: Result of the step execution
+        """
+        for step in self.plan:
+            if step["step_number"] == step_number:
+                step["status"] = StepStatus.COMPLETED.value
+                step["result"] = str(result)[:500] if result else None  # Truncate long results
+                step["completed_at"] = datetime.utcnow().isoformat()
+                break
+    
+    def mark_step_failed(self, step_number: int, error: str):
+        """
+        Mark a step as failed.
+        
+        Args:
+            step_number: Step number to mark
+            error: Error message
+        """
+        for step in self.plan:
+            if step["step_number"] == step_number:
+                step["status"] = StepStatus.FAILED.value
+                step["errors"].append(error)
+                break
+    
+    def mark_step_in_progress(self, step_number: int):
+        """
+        Mark a step as in progress.
+        
+        Args:
+            step_number: Step number to mark
+        """
+        for step in self.plan:
+            if step["step_number"] == step_number:
+                step["status"] = StepStatus.IN_PROGRESS.value
+                step["started_at"] = datetime.utcnow().isoformat()
+                break
+    
+    def advance_to_next_step(self):
+        """Move to next step."""
+        if self.current_step_index < len(self.plan):
+            self.plan[self.current_step_index]["status"] = StepStatus.IN_PROGRESS.value
+        self.current_step_index += 1
+    
+    def is_complete(self) -> bool:
+        """
+        Check if all steps are completed.
+        
+        Returns:
+            True if all steps are completed or skipped
+        """
+        return all(
+            step["status"] in [StepStatus.COMPLETED.value, StepStatus.SKIPPED.value]
+            for step in self.plan
+        )
+    
+    def get_progress(self) -> Dict[str, Any]:
+        """
+        Get plan progress summary.
+        
+        Returns:
+            Dictionary with progress statistics
+        """
+        total = len(self.plan)
+        completed = sum(1 for s in self.plan if s["status"] == StepStatus.COMPLETED.value)
+        failed = sum(1 for s in self.plan if s["status"] == StepStatus.FAILED.value)
+        in_progress = sum(1 for s in self.plan if s["status"] == StepStatus.IN_PROGRESS.value)
+        pending = sum(1 for s in self.plan if s["status"] == StepStatus.PENDING.value)
+        
+        return {
+            "total_steps": total,
+            "completed": completed,
+            "failed": failed,
+            "in_progress": in_progress,
+            "pending": pending,
+            "completion_percentage": (completed / total * 100) if total > 0 else 0
+        }
+    
+    def to_todo_md(self) -> str:
+        """
+        Generate todo.md format for file-based tracking.
+        
+        Returns:
+            Markdown string with plan and progress
+        """
+        lines = ["# Fix Plan", "", f"Incident ID: {self.incident_id}", ""]
+        
+        progress = self.get_progress()
+        lines.append(f"Progress: {progress['completed']}/{progress['total_steps']} steps completed ({progress['completion_percentage']:.1f}%)")
+        lines.append("")
+        lines.append("## Steps")
+        lines.append("")
+        
+        for step in self.plan:
+            status_icon = {
+                StepStatus.PENDING.value: "⬜",
+                StepStatus.IN_PROGRESS.value: "🔄",
+                StepStatus.COMPLETED.value: "✅",
+                StepStatus.FAILED.value: "❌",
+                StepStatus.SKIPPED.value: "⏭️"
+            }.get(step["status"], "⬜")
+            
+            lines.append(f"{status_icon} **Step {step['step_number']}**: {step['description']}")
+            
+            if step.get("files_to_read"):
+                lines.append(f"   📁 Files: {', '.join(step['files_to_read'])}")
+            
+            if step.get("result"):
+                result_preview = str(step["result"])[:200]
+                lines.append(f"   📝 Result: {result_preview}...")
+            
+            if step.get("errors"):
+                for error in step["errors"][:3]:  # Show max 3 errors
+                    error_preview = str(error)[:150]
+                    lines.append(f"   ❌ Error: {error_preview}...")
+            
+            if step.get("started_at"):
+                lines.append(f"   ⏰ Started: {step['started_at']}")
+            
+            if step.get("completed_at"):
+                lines.append(f"   ✅ Completed: {step['completed_at']}")
+            
+            lines.append("")
+        
+        return "\n".join(lines)
+    
+    def replan(
+        self, 
+        reason: str, 
+        new_context: Dict[str, Any], 
+        llm,
+        knowledge_context: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Regenerate plan based on new information or failures.
+        
+        Args:
+            reason: Why replanning is needed (e.g., "multiple_failures", "user_change", "new_info")
+            new_context: Updated context (root cause, affected files, failures)
+            llm: LLM instance for plan generation
+            knowledge_context: Optional knowledge context from RAG
+            
+        Returns:
+            New plan with steps
+        """
+        if self.replan_count >= self.max_replans:
+            raise Exception(f"Max replan attempts ({self.max_replans}) reached")
+        
+        # Store current plan in history
+        self.plan_history.append({
+            "version": len(self.plan_history) + 1,
+            "plan": copy.deepcopy(self.plan),
+            "reason": reason,
+            "timestamp": datetime.utcnow().isoformat(),
+            "current_step_index": self.current_step_index
+        })
+        
+        # Build replanning prompt
+        completed_steps = [s for s in self.plan if s["status"] == StepStatus.COMPLETED.value]
+        failed_steps = [s for s in self.plan if s["status"] == StepStatus.FAILED.value]
+        
+        replan_prompt = f"""
+Previous plan failed or needs adjustment.
+
+Reason for replanning: {reason}
+
+Original Root Cause: {new_context.get('root_cause', 'Unknown')}
+Affected Files: {', '.join(new_context.get('affected_files', []))}
+
+Completed Steps ({len(completed_steps)}):
+{self._format_steps_for_prompt(completed_steps)}
+
+Failed Steps ({len(failed_steps)}):
+{self._format_steps_for_prompt(failed_steps)}
+
+{f'Relevant Knowledge: {knowledge_context}' if knowledge_context else ''}
+
+Generate a NEW plan that:
+1. Preserves completed steps (don't redo them)
+2. Addresses the failures with different approaches
+3. Continues from where we left off
+
+Format as JSON array (same format as before).
+Return ONLY the JSON array.
+"""
+        
+        try:
+            # Generate new plan
+            if hasattr(llm, 'invoke'):
+                response = llm.invoke(replan_prompt)
+                response_text = response.content if hasattr(response, 'content') else str(response)
+            else:
+                response_text = str(llm(replan_prompt))
+            
+            plan_json = self._extract_json(response_text)
+            new_plan_data = json.loads(plan_json)
+            
+            # Convert to plan format
+            new_plan = []
+            for step_data in new_plan_data:
+                step = {
+                    "step_number": step_data.get("step_number", len(new_plan) + 1),
+                    "description": step_data.get("description", ""),
+                    "files_to_read": step_data.get("files_to_read", []),
+                    "expected_output": step_data.get("expected_output", ""),
+                    "status": StepStatus.PENDING.value,
+                    "result": None,
+                    "errors": [],
+                    "retry_count": 0,
+                    "started_at": None,
+                    "completed_at": None
+                }
+                new_plan.append(step)
+            
+            # Merge with completed steps from old plan
+            self._merge_plans(self.plan, new_plan)
+            
+            self.replan_count += 1
+            return self.plan
+            
+        except Exception as e:
+            print(f"Error during replanning: {e}")
+            # Keep current plan but mark as needing attention
+            return self.plan
+    
+    def update_plan(self, step_number: int, updates: Dict[str, Any]):
+        """
+        Update specific plan step without full replanning.
+        
+        Args:
+            step_number: Step number to update
+            updates: Dictionary of fields to update
+        """
+        for step in self.plan:
+            if step["step_number"] == step_number:
+                step.update(updates)
+                break
+    
+    def _merge_plans(self, old_plan: List[Dict], new_plan: List[Dict]):
+        """
+        Merge old and new plans, preserving completed steps.
+        
+        Args:
+            old_plan: Previous plan
+            new_plan: Newly generated plan
+        """
+        completed_steps = [s for s in old_plan if s["status"] == StepStatus.COMPLETED.value]
+        
+        # Add completed steps at the beginning of new plan
+        merged_plan = []
+        step_numbers_used = set()
+        
+        # Add completed steps first
+        for completed in completed_steps:
+            merged_plan.append(completed)
+            step_numbers_used.add(completed["step_number"])
+        
+        # Add new plan steps, adjusting step numbers if needed
+        next_step_num = max(step_numbers_used) + 1 if step_numbers_used else 1
+        for new_step in new_plan:
+            # Check if equivalent step exists
+            equivalent = self._find_equivalent_step(new_step, completed_steps)
+            if not equivalent:
+                new_step["step_number"] = next_step_num
+                next_step_num += 1
+                merged_plan.append(new_step)
+        
+        self.plan = merged_plan
+        # Reset current step index to first incomplete step
+        for i, step in enumerate(self.plan):
+            if step["status"] == StepStatus.PENDING.value:
+                self.current_step_index = i
+                break
+    
+    def _find_equivalent_step(self, step: Dict, completed_steps: List[Dict]) -> Optional[Dict]:
+        """
+        Find if a step is equivalent to a completed step.
+        
+        Args:
+            step: Step to check
+            completed_steps: List of completed steps
+            
+        Returns:
+            Equivalent completed step or None
+        """
+        step_desc_lower = step.get("description", "").lower()
+        for completed in completed_steps:
+            completed_desc_lower = completed.get("description", "").lower()
+            # Simple similarity check - could be enhanced
+            if step_desc_lower == completed_desc_lower:
+                return completed
+        return None
+    
+    def _format_steps_for_prompt(self, steps: List[Dict]) -> str:
+        """Format steps for inclusion in prompt."""
+        if not steps:
+            return "None"
+        
+        formatted = []
+        for step in steps:
+            formatted.append(f"Step {step['step_number']}: {step['description']}")
+            if step.get("errors"):
+                formatted.append(f"  Errors: {', '.join(step['errors'][:2])}")
+        return "\n".join(formatted)
+    
+    def _extract_json(self, text: str) -> str:
+        """
+        Extract JSON array from LLM response.
+        
+        Args:
+            text: LLM response text
+            
+        Returns:
+            JSON string
+        """
+        import re
+        # Try to find JSON array
+        json_match = re.search(r'\[.*\]', text, re.DOTALL)
+        if json_match:
+            return json_match.group(0)
+        
+        # Try to find JSON wrapped in code blocks
+        code_block_match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', text, re.DOTALL)
+        if code_block_match:
+            return code_block_match.group(1)
+        
+        # Return as-is and hope it's valid JSON
+        return text.strip()
+    
+    def _create_fallback_plan(self, affected_files: List[str], root_cause: str) -> List[Dict[str, Any]]:
+        """
+        Create a simple fallback plan if LLM planning fails.
+        
+        Args:
+            affected_files: List of affected files
+            root_cause: Root cause description
+            
+        Returns:
+            Simple plan with basic steps
+        """
+        return [
+            {
+                "step_number": 1,
+                "description": f"Read affected files: {', '.join(affected_files[:3]) if affected_files else 'None'}",
+                "files_to_read": affected_files[:5] if affected_files else [],
+                "expected_output": "File contents and understanding of code structure",
+                "status": StepStatus.PENDING.value,
+                "result": None,
+                "errors": [],
+                "retry_count": 0,
+                "started_at": None,
+                "completed_at": None
+            },
+            {
+                "step_number": 2,
+                "description": f"Analyze root cause: {root_cause[:100]}",
+                "files_to_read": [],
+                "expected_output": "Root cause analysis with specific code location",
+                "status": StepStatus.PENDING.value,
+                "result": None,
+                "errors": [],
+                "retry_count": 0,
+                "started_at": None,
+                "completed_at": None
+            },
+            {
+                "step_number": 3,
+                "description": "Generate code fix",
+                "files_to_read": affected_files[:5] if affected_files else [],
+                "expected_output": "Fixed code with incremental edits",
+                "status": StepStatus.PENDING.value,
+                "result": None,
+                "errors": [],
+                "retry_count": 0,
+                "started_at": None,
+                "completed_at": None
+            },
+            {
+                "step_number": 4,
+                "description": "Validate fix (syntax and impact)",
+                "files_to_read": [],
+                "expected_output": "Validation results confirming fix is correct",
+                "status": StepStatus.PENDING.value,
+                "result": None,
+                "errors": [],
+                "retry_count": 0,
+                "started_at": None,
+                "completed_at": None
+            }
+        ]
+    
+    def summarize_completed_steps(self) -> str:
+        """
+        Summarize completed steps to save context.
+        
+        Returns:
+            Summary string of completed steps
+        """
+        completed = [s for s in self.plan if s["status"] == StepStatus.COMPLETED.value]
+        
+        if not completed:
+            return ""
+        
+        summary = f"Completed {len(completed)}/{len(self.plan)} steps:\n"
+        for step in completed:
+            summary += f"- Step {step['step_number']}: {step['description']}\n"
+            if step.get('result'):
+                result_preview = str(step['result'])[:100]
+                summary += f"  Result: {result_preview}...\n"
+        
+        return summary
+
+import os
+
