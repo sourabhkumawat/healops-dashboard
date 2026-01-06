@@ -993,7 +993,8 @@ Only include files that need changes. Provide the COMPLETE file content for each
             if not changes:
                 return {
                     "status": "skipped",
-                    "message": "AI determined no code changes are needed"
+                    "message": "AI determined no code changes are needed",
+                    "code_fix_explanation": "The AI analyzed the codebase and error context but determined that no code changes are required. This may be an infrastructure, configuration, or external dependency issue that requires manual intervention."
                 }
             
             # Create PR with the fixes
@@ -1565,12 +1566,17 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
             # COST OPTIMIZATION: Only create PR if action_taken suggests code changes
             # Skip expensive code generation for simple fixes like "restart service"
             should_generate_code = False
+            code_fix_explanation = None
             if action_taken:
                 code_action_keywords = ["fix", "update", "change", "modify", "add", "remove", "patch", "bug", "code"]
                 should_generate_code = any(keyword in action_taken.lower() for keyword in code_action_keywords)
             
             # If GitHub integration is available and code changes are needed, try to analyze repo and create PR
-            if incident.integration_id and should_generate_code:
+            if not incident.integration_id:
+                code_fix_explanation = "No GitHub integration configured for this incident. Please set up a GitHub integration to enable automatic code fixes."
+            elif not should_generate_code:
+                code_fix_explanation = f"The recommended action '{action_taken}' does not require code changes. This appears to be an infrastructure or operational issue that needs manual intervention (e.g., restart service, check configuration, verify external dependencies)."
+            elif incident.integration_id and should_generate_code:
                 try:
                     integration = db.query(Integration).filter(Integration.id == incident.integration_id).first()
                     if integration and integration.provider == "GITHUB":
@@ -1709,16 +1715,25 @@ This PR was generated using the enhanced multi-agent system with:
                                         else:
                                             print(f"⚠️  Enhanced crew PR creation failed: {pr_result.get('message')}")
                                             result["pr_error"] = pr_result.get("message")
+                                            result["code_fix_explanation"] = f"Agent attempted to create a pull request but encountered an error: {pr_result.get('message')}. The code changes were generated but could not be submitted to GitHub."
                                     elif not changes:
                                         print("⚠️  Enhanced crew generated no changes")
                                         result["enhanced_crew"] = True
                                         result["decision"] = enhanced_result.get("decision")
+                                        # Capture explanation for why no changes were generated
+                                        decision_info = enhanced_result.get("decision", {})
+                                        reasoning = decision_info.get("reasoning", "The agent analyzed the codebase but determined no code changes are needed.")
+                                        result["code_fix_explanation"] = f"Agent attempted to generate code fixes but found no changes necessary. {reasoning}"
                                     else:
                                         # SKIP_PR or other action - still store decision and changes for UI
                                         print(f"⚠️  Enhanced crew decision: {decision_action}")
                                         result["enhanced_crew"] = True
                                         result["decision"] = enhanced_result.get("decision")
                                         result["confidence_score"] = confidence_score
+                                        # Capture explanation for why PR was skipped
+                                        decision_info = enhanced_result.get("decision", {})
+                                        reasoning = decision_info.get("reasoning", f"Agent determined that creating a PR is not appropriate. Status: {enhanced_result.get('status')}")
+                                        result["code_fix_explanation"] = f"Agent analyzed the incident and attempted to generate fixes. {reasoning}"
                                         if changes:
                                             result["changes"] = changes
                                             # Store original contents for UI display
@@ -1792,11 +1807,16 @@ This PR was generated using the enhanced multi-agent system with:
                                 result["pr_error"] = pr_result.get("message")
                         else:
                             print(f"⚠️  No repository name found for incident {incident.id} (integration {integration.id})")
+                            code_fix_explanation = f"No repository name configured for this service ({incident.service_name}). Please configure the repository name in the GitHub integration settings (service mappings or default repo_name)."
                 except Exception as e:
                     import traceback
                     print(f"⚠️  Error during GitHub analysis: {e}")
                     print(traceback.format_exc())
                     # Don't fail the whole analysis if PR creation fails
+            
+            # Store code fix explanation if available
+            if code_fix_explanation:
+                result["code_fix_explanation"] = code_fix_explanation
             
             return result
         except json.JSONDecodeError:

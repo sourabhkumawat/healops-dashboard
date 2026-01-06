@@ -502,6 +502,21 @@ export default function IncidentDetailsPage() {
                                             </div>
                                         )}
 
+                                        {/* Code Fix Explanation - Show when code fixes are not possible */}
+                                        {incident.action_result?.code_fix_explanation && (
+                                            <div className="rounded-lg p-4 border bg-amber-900/10 border-amber-900/30">
+                                                <div className="flex items-center mb-2">
+                                                    <Code className="h-4 w-4 text-amber-500 mr-2" />
+                                                    <h3 className="text-sm font-semibold text-amber-500">
+                                                        Code Fix Analysis
+                                                    </h3>
+                                                </div>
+                                                <p className="text-sm text-zinc-300 whitespace-pre-wrap">
+                                                    {incident.action_result.code_fix_explanation}
+                                                </p>
+                                            </div>
+                                        )}
+
                                         {/* Agent Thinking Process - Show when code diff is available */}
                                         {hasFilesChanged && (
                                             <div className="rounded-lg border bg-zinc-900/50 border-zinc-800 mb-4">
@@ -523,7 +538,11 @@ export default function IncidentDetailsPage() {
                                             </div>
                                         )}
 
-                                        {incident.action_result && (
+                                        {/* Code Fix Section - Only show when there's a PR or changes */}
+                                        {incident.action_result && 
+                                         (incident.action_result.pr_url || 
+                                          incident.action_result.changes || 
+                                          incident.action_result.pr_files_changed) && (
                                             <div className="rounded-lg p-4 border bg-blue-900/10 border-blue-900/30">
                                                 <div className="flex items-center mb-3">
                                                     <GitPullRequest className="h-4 w-4 text-blue-400 mr-2" />

@@ -3,6 +3,31 @@ from models import LogEntry, Incident, IncidentSeverity, IntegrationStatus, Inte
 from sqlalchemy import func
 from datetime import datetime, timedelta
 import json
+import asyncio
+import threading
+
+def trigger_incident_analysis_async(incident_id: int, user_id: int):
+    """
+    Helper function to trigger incident analysis in a thread-safe way.
+    This avoids circular import issues and handles event loop properly.
+    """
+    def run_analysis():
+        try:
+            # Import here to avoid circular dependencies
+            from main import analyze_incident_async
+            # Create new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(analyze_incident_async(incident_id, user_id))
+            finally:
+                loop.close()
+        except Exception as e:
+            print(f"⚠️  Error in background analysis thread for incident {incident_id}: {e}")
+    
+    # Run in a separate thread to avoid blocking
+    thread = threading.Thread(target=run_analysis, daemon=True)
+    thread.start()
 
 def get_available_integration_for_user(db, user_id: int, service_name: str = None):
     """
@@ -180,6 +205,12 @@ async def process_log_entry(log_id: int):
                     existing_incident.severity = "CRITICAL"
                     
                 db.commit()
+                
+                # Automatically trigger analysis if root_cause is not set
+                if not existing_incident.root_cause:
+                    print(f"🤖 Auto-triggering analysis for incident {existing_incident.id}")
+                    trigger_incident_analysis_async(existing_incident.id, existing_incident.user_id)
+                
                 return f"Updated incident: {existing_incident.id}"
             
             else:
@@ -227,6 +258,10 @@ async def process_log_entry(log_id: int):
                 db.commit()
                 
                 print(f"Incident created: {incident.id}")
+                
+                # Automatically trigger analysis for new incidents
+                print(f"🤖 Auto-triggering analysis for new incident {incident.id}")
+                trigger_incident_analysis_async(incident.id, incident.user_id)
                 
                 return f"Incident created: {incident.id}"
                 

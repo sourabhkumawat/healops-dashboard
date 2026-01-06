@@ -2284,7 +2284,8 @@ async def analyze_incident_async(incident_id: int, user_id: Optional[int] = None
             # Store PR error if creation failed
             incident.action_result = {
                 "status": "pr_failed",
-                "error": analysis.get("pr_error")
+                "error": analysis.get("pr_error"),
+                "code_fix_explanation": analysis.get("code_fix_explanation", f"Failed to create pull request: {analysis.get('pr_error')}")
             }
         elif analysis.get("changes"):
             # Store changes even if PR wasn't created (for UI display)
@@ -2303,9 +2304,17 @@ async def analyze_incident_async(incident_id: int, user_id: Optional[int] = None
                 "pr_files_changed": list(changes.keys()),  # Set file list for UI display
                 "confidence_score": analysis.get("confidence_score"),
                 "decision": analysis.get("decision", {}),
-                "status": "changes_generated"
+                "status": "changes_generated",
+                "code_fix_explanation": analysis.get("code_fix_explanation")
             }
             print(f"📝 Changes generated for incident {incident_id} (no PR created)")
+        
+        # Store explanation if no code fixes were attempted
+        elif analysis.get("code_fix_explanation"):
+            incident.action_result = {
+                "status": "no_code_fix",
+                "code_fix_explanation": analysis.get("code_fix_explanation")
+            }
         
         # Ensure we always set something to stop infinite loading
         if not incident.root_cause:
