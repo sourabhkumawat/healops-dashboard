@@ -43,6 +43,7 @@ interface ActionResult {
     pr_files_changed?: string[];
     changes?: Record<string, string>; // Filename -> New Content
     original_contents?: Record<string, string>; // Filename -> Original Content
+    code_fix_explanation?: string;
 }
 
 interface IncidentWithAction extends Incident {
@@ -503,7 +504,8 @@ export default function IncidentDetailsPage() {
                                         )}
 
                                         {/* Code Fix Explanation - Show when code fixes are not possible */}
-                                        {incident.action_result?.code_fix_explanation && (
+                                        {incident.action_result
+                                            ?.code_fix_explanation && (
                                             <div className="rounded-lg p-4 border bg-amber-900/10 border-amber-900/30">
                                                 <div className="flex items-center mb-2">
                                                     <Code className="h-4 w-4 text-amber-500 mr-2" />
@@ -512,7 +514,10 @@ export default function IncidentDetailsPage() {
                                                     </h3>
                                                 </div>
                                                 <p className="text-sm text-zinc-300 whitespace-pre-wrap">
-                                                    {incident.action_result.code_fix_explanation}
+                                                    {
+                                                        incident.action_result
+                                                            .code_fix_explanation
+                                                    }
                                                 </p>
                                             </div>
                                         )}
@@ -539,48 +544,51 @@ export default function IncidentDetailsPage() {
                                         )}
 
                                         {/* Code Fix Section - Only show when there's a PR or changes */}
-                                        {incident.action_result && 
-                                         (incident.action_result.pr_url || 
-                                          incident.action_result.changes || 
-                                          incident.action_result.pr_files_changed) && (
-                                            <div className="rounded-lg p-4 border bg-blue-900/10 border-blue-900/30">
-                                                <div className="flex items-center mb-3">
-                                                    <GitPullRequest className="h-4 w-4 text-blue-400 mr-2" />
-                                                    <h3 className="text-sm font-semibold text-blue-400">
-                                                        Code Fix
-                                                    </h3>
-                                                </div>
+                                        {incident.action_result &&
+                                            (incident.action_result.pr_url ||
+                                                incident.action_result
+                                                    .changes ||
+                                                incident.action_result
+                                                    .pr_files_changed) && (
+                                                <div className="rounded-lg p-4 border bg-blue-900/10 border-blue-900/30">
+                                                    <div className="flex items-center mb-3">
+                                                        <GitPullRequest className="h-4 w-4 text-blue-400 mr-2" />
+                                                        <h3 className="text-sm font-semibold text-blue-400">
+                                                            Code Fix
+                                                        </h3>
+                                                    </div>
 
-                                                <div className="space-y-3">
-                                                    {/* We removed the individual file list here because it's now in the right panel */}
+                                                    <div className="space-y-3">
+                                                        {/* We removed the individual file list here because it's now in the right panel */}
 
-                                                    {incident.action_result
-                                                        .pr_url && (
-                                                        <Button
-                                                            size="sm"
-                                                            variant="secondary"
-                                                            className="w-full mt-2"
-                                                            onClick={() =>
-                                                                window.open(
+                                                        {incident.action_result
+                                                            .pr_url && (
+                                                            <Button
+                                                                size="sm"
+                                                                variant="secondary"
+                                                                className="w-full mt-2"
+                                                                onClick={() =>
+                                                                    window.open(
+                                                                        incident
+                                                                            .action_result
+                                                                            ?.pr_url,
+                                                                        '_blank'
+                                                                    )
+                                                                }
+                                                            >
+                                                                <ExternalLink className="mr-2 h-3 w-3" />
+                                                                View Pull
+                                                                Request #
+                                                                {
                                                                     incident
                                                                         .action_result
-                                                                        ?.pr_url,
-                                                                    '_blank'
-                                                                )
-                                                            }
-                                                        >
-                                                            <ExternalLink className="mr-2 h-3 w-3" />
-                                                            View Pull Request #
-                                                            {
-                                                                incident
-                                                                    .action_result
-                                                                    .pr_number
-                                                            }
-                                                        </Button>
-                                                    )}
+                                                                        .pr_number
+                                                                }
+                                                            </Button>
+                                                        )}
+                                                    </div>
                                                 </div>
-                                            </div>
-                                        )}
+                                            )}
                                     </CardContent>
                                 </Card>
                             </TabsContent>
