@@ -9,6 +9,7 @@ import {
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Loader2 } from 'lucide-react';
 import Link from 'next/link';
 
 export interface Incident {
@@ -34,17 +35,29 @@ export interface Incident {
 
 export function IncidentTable({
     incidents,
-    fullHeight = false
+    fullHeight = false,
+    isLoading = false
 }: {
     incidents: Incident[];
     fullHeight?: boolean;
+    isLoading?: boolean;
 }) {
     return (
         <div
             className={`${
                 fullHeight ? 'h-full' : 'h-[400px]'
-            } border rounded-md overflow-hidden flex flex-col`}
+            } border rounded-md overflow-hidden flex flex-col relative`}
         >
+            {isLoading && (
+                <div className="absolute inset-0 bg-background/80 backdrop-blur-sm z-20 flex items-center justify-center">
+                    <div className="flex flex-col items-center gap-2">
+                        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                        <p className="text-sm text-muted-foreground">
+                            Refreshing...
+                        </p>
+                    </div>
+                </div>
+            )}
             <div className="overflow-y-auto overflow-x-auto flex-1">
                 <Table>
                     <TableCaption className="sr-only">

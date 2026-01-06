@@ -17,7 +17,9 @@ import { X } from 'lucide-react';
 export default function IncidentsPage() {
     const [incidents, setIncidents] = useState<Incident[]>([]);
     const [loading, setLoading] = useState(true);
+    const [isRefreshing, setIsRefreshing] = useState(false);
     const fetchingRef = useRef(false);
+    const hasLoadedRef = useRef(false);
     const [filters, setFilters] = useState<{
         status?: string;
         severity?: string;
@@ -34,6 +36,12 @@ export default function IncidentsPage() {
         const fetchIncidents = async () => {
             if (fetchingRef.current) return; // Prevent duplicate calls
             fetchingRef.current = true;
+
+            // Show refreshing state if we've already loaded data at least once
+            if (hasLoadedRef.current) {
+                setIsRefreshing(true);
+            }
+
             try {
                 // Fetch all incidents for filter options (only on initial load or when filters change)
                 const allData = await getIncidents();
@@ -42,12 +50,16 @@ export default function IncidentsPage() {
                 // Fetch filtered incidents
                 const data = await getIncidents(filters);
                 setIncidents(data);
+
+                // Mark that we've loaded data at least once
+                hasLoadedRef.current = true;
             } catch (error) {
                 console.error('Failed to fetch incidents:', error);
                 // Set empty arrays on error to prevent stale data
                 setIncidents([]);
             } finally {
                 setLoading(false);
+                setIsRefreshing(false);
                 fetchingRef.current = false;
             }
         };
@@ -228,7 +240,11 @@ export default function IncidentsPage() {
                         </div>
                     </div>
                 ) : (
-                    <IncidentTable incidents={incidents} fullHeight={true} />
+                    <IncidentTable
+                        incidents={incidents}
+                        fullHeight={true}
+                        isLoading={isRefreshing}
+                    />
                 )}
             </div>
         </div>
