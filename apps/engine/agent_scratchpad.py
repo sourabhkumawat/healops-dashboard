@@ -57,7 +57,8 @@ class Scratchpad:
             
             def to_todo_md(self):
                 lines = ["# Fix Plan", "", f"Incident ID: {self.incident_id}", ""]
-                lines.append("## Steps", "")
+                lines.append("## Steps")
+                lines.append("")
                 for step in self.plan:
                     status_icon = {
                         "pending": "⬜",

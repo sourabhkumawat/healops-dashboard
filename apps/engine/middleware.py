@@ -166,6 +166,11 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             request.url.path.startswith("/api/sourcemaps")):
             return await call_next(request)
 
+        # Skip /incidents/{id}/test-agent - test endpoint, no auth required
+        import re
+        if re.match(r"/incidents/\d+/test-agent", request.url.path):
+            return await call_next(request)
+
         # Check if user_id was already set by APIKeyMiddleware
         # (for /ingest/logs and /api/sourcemaps endpoints)
         if hasattr(request.state, 'user_id') and request.state.user_id:

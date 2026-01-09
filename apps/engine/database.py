@@ -13,12 +13,13 @@ DATABASE_URL = os.getenv(
 if "sqlite" in DATABASE_URL:
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 else:
-    # PostgreSQL configuration with improved connection management
+    # PostgreSQL configuration optimized for 2 vCPUs and 4GB RAM
+    # Reduced pool size to prevent memory exhaustion
     engine = create_engine(
         DATABASE_URL,
         pool_pre_ping=True,  # Verify connections before using them
-        pool_size=10,
-        max_overflow=20,
+        pool_size=5,  # Reduced from 10 to 5 for lower memory usage
+        max_overflow=10,  # Reduced from 20 to 10
         pool_recycle=3600,  # Recycle connections after 1 hour (prevents stale connections)
         pool_timeout=30,  # Timeout for getting connection from pool
         connect_args={

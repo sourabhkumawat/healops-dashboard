@@ -44,10 +44,14 @@ def generate_jwt_token() -> Optional[str]:
         JWT token string, or None if configuration is invalid
     """
     if not GITHUB_APP_ID or not GITHUB_APP_PRIVATE_KEY:
+        print(f"      [generate_jwt_token] ❌ Missing environment variables")
+        print(f"         GITHUB_APP_ID: {'set' if GITHUB_APP_ID else 'NOT SET'}")
+        print(f"         GITHUB_APP_PRIVATE_KEY: {'set' if GITHUB_APP_PRIVATE_KEY else 'NOT SET'}")
         return None
     
     private_key = get_private_key()
     if not private_key:
+        print(f"      [generate_jwt_token] ❌ Failed to get private key")
         return None
     
     try:
@@ -65,9 +69,12 @@ def generate_jwt_token() -> Optional[str]:
         }
         
         token = jwt.encode(payload, private_key, algorithm='RS256')
+        print(f"      [generate_jwt_token] ✅ JWT token generated successfully")
         return token
     except Exception as e:
-        print(f"Error generating JWT token: {e}")
+        print(f"      [generate_jwt_token] ❌ Error generating JWT token: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -84,9 +91,25 @@ def get_installation_token(installation_id: int) -> Optional[Dict[str, Any]]:
     Returns:
         Dict with 'token' and 'expires_at', or None if error
     """
+    print(f"      [get_installation_token] Starting for installation_id: {installation_id}")
+    
+    # Check if required environment variables are set
+    if not GITHUB_APP_ID:
+        print(f"      [get_installation_token] ❌ GITHUB_APP_ID not set")
+        return None
+    if not GITHUB_APP_PRIVATE_KEY:
+        print(f"      [get_installation_token] ❌ GITHUB_APP_PRIVATE_KEY not set")
+        return None
+    
+    print(f"      [get_installation_token] ✅ Environment variables present")
+    print(f"      [get_installation_token] GITHUB_APP_ID: {GITHUB_APP_ID}")
+    
     jwt_token = generate_jwt_token()
     if not jwt_token:
+        print(f"      [get_installation_token] ❌ Failed to generate JWT token")
         return None
+    
+    print(f"      [get_installation_token] ✅ JWT token generated")
     
     try:
         # GitHub API endpoint for installation tokens
@@ -96,17 +119,23 @@ def get_installation_token(installation_id: int) -> Optional[Dict[str, Any]]:
             "Accept": "application/vnd.github.v3+json"
         }
         
+        print(f"      [get_installation_token] Making API request to: {url}")
         response = requests.post(url, headers=headers)
         
         if response.status_code != 201:
-            print(f"Error getting installation token: {response.status_code} - {response.text}")
+            print(f"      [get_installation_token] ❌ API request failed")
+            print(f"         Status code: {response.status_code}")
+            print(f"         Response: {response.text[:500]}")
             return None
         
+        print(f"      [get_installation_token] ✅ API request successful (status: {response.status_code})")
         data = response.json()
         token = data.get("token")
         expires_at_str = data.get("expires_at")
         
         if not token:
+            print(f"      [get_installation_token] ❌ Token not found in response")
+            print(f"         Response data: {data}")
             return None
         
         # Parse expires_at to datetime
@@ -117,12 +146,15 @@ def get_installation_token(installation_id: int) -> Optional[Dict[str, Any]]:
             except:
                 pass
         
+        print(f"      [get_installation_token] ✅ Installation token obtained successfully")
         return {
             "token": token,
             "expires_at": expires_at
         }
     except Exception as e:
-        print(f"Error requesting installation token: {e}")
+        print(f"      [get_installation_token] ❌ Exception: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 

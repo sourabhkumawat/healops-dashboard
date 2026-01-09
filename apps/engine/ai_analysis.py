@@ -394,8 +394,8 @@ def get_trace_logs(logs: list[LogEntry], db: Session, user_id: Optional[int] = N
             (LogEntry.timestamp >= one_hour_ago) | (LogEntry.timestamp.is_(None))
         )
         
-        # Limit query results to prevent memory issues (max 10,000 logs)
-        query = query.limit(10000)
+        # Limit query results to prevent memory issues (reduced from 10,000 to 5,000 for 4GB RAM)
+        query = query.limit(5000)
         
         all_logs = query.all()
         
@@ -421,10 +421,10 @@ def get_trace_logs(logs: list[LogEntry], db: Session, user_id: Optional[int] = N
         # Sort by timestamp (handle None timestamps)
         trace_logs.sort(key=lambda x: x.timestamp if x.timestamp else datetime.min, reverse=False)
         
-        # Limit final result to prevent context overflow (max 500 logs)
-        if len(trace_logs) > 500:
-            print(f"⚠️  Trace has {len(trace_logs)} logs, limiting to 500 most recent")
-            trace_logs = trace_logs[-500:]
+        # Limit final result to prevent context overflow (reduced from 500 to 300 for 4GB RAM)
+        if len(trace_logs) > 300:
+            print(f"⚠️  Trace has {len(trace_logs)} logs, limiting to 300 most recent")
+            trace_logs = trace_logs[-300:]
         
         print(f"✅ Found {len(trace_logs)} total logs from trace(s) (including {len(logs)} original)")
         return trace_logs

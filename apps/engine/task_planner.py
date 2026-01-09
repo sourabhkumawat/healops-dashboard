@@ -98,21 +98,38 @@ Return ONLY the JSON array, no other text.
 """
         
         try:
+            # Check if LLM is available
+            if llm is None:
+                raise ValueError("LLM is not available. Cannot create plan.")
+            
             # Call LLM to generate plan
             if hasattr(llm, 'invoke'):
                 response = llm.invoke(planning_prompt)
                 response_text = response.content if hasattr(response, 'content') else str(response)
+            elif hasattr(llm, 'call'):
+                # Some LLM interfaces use 'call' method
+                response = llm.call(planning_prompt)
+                response_text = response.content if hasattr(response, 'content') else str(response)
             else:
-                # Fallback for different LLM interfaces
-                response_text = str(llm(planning_prompt))
+                # Last resort: try to use it as callable (but this will fail for CrewAI LLMs)
+                raise AttributeError("LLM object does not have 'invoke' or 'call' method. Cannot generate plan.")
             
             # Extract JSON from response
             plan_json = self._extract_json(response_text)
             plan_data = json.loads(plan_json)
             
+            # Ensure plan_data is a list
+            if not isinstance(plan_data, list):
+                raise ValueError(f"Expected plan_data to be a list, got {type(plan_data)}: {plan_data}")
+            
             # Initialize plan with status
             self.plan = []
             for step_data in plan_data:
+                # Ensure step_data is a dict
+                if not isinstance(step_data, dict):
+                    print(f"Warning: Skipping invalid step_data (not a dict): {step_data}")
+                    continue
+                
                 step = {
                     "step_number": step_data.get("step_number", len(self.plan) + 1),
                     "description": step_data.get("description", ""),
@@ -337,12 +354,21 @@ Return ONLY the JSON array.
 """
         
         try:
+            # Check if LLM is available
+            if llm is None:
+                raise ValueError("LLM is not available. Cannot replan.")
+            
             # Generate new plan
             if hasattr(llm, 'invoke'):
                 response = llm.invoke(replan_prompt)
                 response_text = response.content if hasattr(response, 'content') else str(response)
+            elif hasattr(llm, 'call'):
+                # Some LLM interfaces use 'call' method
+                response = llm.call(replan_prompt)
+                response_text = response.content if hasattr(response, 'content') else str(response)
             else:
-                response_text = str(llm(replan_prompt))
+                # Last resort: try to use it as callable (but this will fail for CrewAI LLMs)
+                raise AttributeError("LLM object does not have 'invoke' or 'call' method. Cannot replan.")
             
             plan_json = self._extract_json(response_text)
             new_plan_data = json.loads(plan_json)

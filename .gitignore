@@ -46,3 +46,6 @@ next-env.d.ts
 # Database
 *.db
 *.sqlite
+apps/engine/venv
+apps/engine/.deps_installed
+.vscode

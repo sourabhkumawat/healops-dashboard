@@ -50,17 +50,38 @@ api_key = os.getenv("OPENCOUNCIL_API")
 base_url = "https://openrouter.ai/api/v1"
 
 # Cost-optimized LLMs
-flash_llm = LLM(
-    model="openai/xiaomi/mimo-v2-flash:free",
-    base_url=base_url,
-    api_key=api_key
-)
-
-coding_llm = LLM(
-    model="openai/x-ai/grok-code-fast-1",
-    base_url=base_url,
-    api_key=api_key
-)
+# Initialize with error handling to avoid import-time failures
+try:
+    if not api_key:
+        print("⚠️  Warning: OPENCOUNCIL_API not set. LLMs will not be initialized.")
+        flash_llm = None
+        coding_llm = None
+    else:
+        flash_llm = LLM(
+            model="openai/xiaomi/mimo-v2-flash:free",
+            base_url=base_url,
+            api_key=api_key
+        )
+        coding_llm = LLM(
+            model="openai/x-ai/grok-code-fast-1",
+            base_url=base_url,
+            api_key=api_key
+        )
+        print("✅ LLMs initialized successfully in agent_definitions")
+except ImportError as import_err:
+    if "LiteLLM" in str(import_err) or "litellm" in str(import_err).lower():
+        print(f"❌ Error: LiteLLM is required but not available. Please install it: pip install litellm")
+        print(f"   Error details: {import_err}")
+        flash_llm = None
+        coding_llm = None
+    else:
+        raise
+except Exception as e:
+    print(f"⚠️  Warning: Failed to initialize LLMs in agent_definitions: {e}")
+    import traceback
+    traceback.print_exc()
+    flash_llm = None
+    coding_llm = None
 
 # ============================================================================
 # Exploration Phase Agents

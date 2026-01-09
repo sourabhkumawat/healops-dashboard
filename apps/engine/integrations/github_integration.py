@@ -49,31 +49,56 @@ class GithubIntegration:
         if self.client:
             return
         
+        print(f"   🔧 Initializing GitHub client...")
+        print(f"      installation_id: {self.installation_id}")
+        print(f"      access_token: {'***' if self.access_token else None}")
+        
         if self.installation_id:
             # Generate or use cached installation token
+            print(f"      Attempting to get installation token for ID: {self.installation_id}")
             token = self._get_installation_token()
             if token:
+                print(f"      ✅ Installation token obtained")
                 self.client = Github(token)
+                print(f"      ✅ GitHub client initialized with installation token")
+            else:
+                print(f"      ❌ Failed to get installation token")
         elif self.access_token:
             # Use OAuth token (legacy)
+            print(f"      Using OAuth token (legacy)")
             self.client = Github(self.access_token)
+            print(f"      ✅ GitHub client initialized with OAuth token")
+        else:
+            print(f"      ❌ No installation_id or access_token available")
     
     def _get_installation_token(self) -> Optional[str]:
         """Get installation token, using cache if valid."""
         # Check if we have a valid cached token
         if self._cached_token and self._token_expires_at:
             if datetime.utcnow() < self._token_expires_at - timedelta(minutes=5):  # Refresh 5 min before expiry
+                print(f"         Using cached installation token")
                 return self._cached_token
         
         # Generate new installation token
         if not self.installation_id:
+            print(f"         ❌ No installation_id set")
             return None
         
-        token_data = get_installation_token(self.installation_id)
-        if token_data and token_data.get("token"):
-            self._cached_token = token_data["token"]
-            self._token_expires_at = token_data.get("expires_at")
-            return self._cached_token
+        print(f"         Generating new installation token...")
+        try:
+            token_data = get_installation_token(self.installation_id)
+            if token_data and token_data.get("token"):
+                self._cached_token = token_data["token"]
+                self._token_expires_at = token_data.get("expires_at")
+                print(f"         ✅ Installation token generated successfully")
+                return self._cached_token
+            else:
+                print(f"         ❌ Token data is None or missing token field")
+                print(f"            token_data: {token_data}")
+        except Exception as e:
+            print(f"         ❌ Exception getting installation token: {e}")
+            import traceback
+            traceback.print_exc()
         
         return None
     
@@ -135,6 +160,43 @@ class GithubIntegration:
                 "description": repo.description,
                 "url": repo.html_url
             }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def create_or_update_file(self, repo_name: str, file_path: str, content: str, commit_message: str, branch: str = "main") -> Dict[str, Any]:
+        """
+        Create or update a file in the repository.
+        
+        Args:
+            repo_name: Repository name in format "owner/repo"
+            file_path: Path to the file
+            content: File content
+            commit_message: Commit message
+            branch: Branch name (default: "main")
+            
+        Returns:
+            Dictionary with status and message
+        """
+        if not self.client:
+            return {"status": "error", "message": "Not authenticated"}
+        
+        try:
+            self._ensure_client()
+            repo = self.client.get_repo(repo_name)
+            
+            try:
+                # Try to get existing file
+                contents = repo.get_contents(file_path, ref=branch)
+                # File exists, update it
+                repo.update_file(contents.path, commit_message, content, contents.sha, branch=branch)
+                return {"status": "success", "message": f"Updated {file_path}", "action": "updated"}
+            except GithubException as e:
+                if e.status == 404:
+                    # File doesn't exist, create it
+                    repo.create_file(file_path, commit_message, content, branch=branch)
+                    return {"status": "success", "message": f"Created {file_path}", "action": "created"}
+                else:
+                    return {"status": "error", "message": str(e)}
         except Exception as e:
             return {"status": "error", "message": str(e)}
     
@@ -219,28 +281,46 @@ class GithubIntegration:
         Returns:
             List of file paths
         """
-        if not self.client or max_depth <= 0:
+        if not self.client:
+            print(f"Error: GitHub client not initialized in get_repo_structure")
+            return []
+        
+        if max_depth <= 0:
             return []
             
         try:
             repo = self.client.get_repo(repo_name)
+            print(f"   Getting contents for path: '{path}' (ref: {ref}, depth: {max_depth})")
             contents = repo.get_contents(path, ref=ref)
             files = []
             
             if isinstance(contents, list):
+                print(f"   Found {len(contents)} items in '{path}'")
                 for item in contents:
                     if item.type == "file":
                         files.append(item.path)
-                    elif item.type == "dir":
+                    elif item.type == "dir" and max_depth > 1:
                         # Recursively get subdirectory contents
-                        files.extend(self.get_repo_structure(repo_name, item.path, ref, max_depth - 1))
+                        sub_files = self.get_repo_structure(repo_name, item.path, ref, max_depth - 1)
+                        files.extend(sub_files)
             else:
                 if contents.type == "file":
                     files.append(contents.path)
+                elif contents.type == "dir" and max_depth > 1:
+                    # Single directory, get its contents
+                    sub_files = self.get_repo_structure(repo_name, contents.path, ref, max_depth - 1)
+                    files.extend(sub_files)
             
             return files
+        except GithubException as e:
+            print(f"Error getting repo structure: {e} (status: {e.status})")
+            if e.status == 404:
+                print(f"   Path '{path}' not found in repository '{repo_name}' on branch '{ref}'")
+            return []
         except Exception as e:
             print(f"Error getting repo structure: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
     def create_pr(self, repo_name: str, title: str, body: str, head_branch: str, base_branch: str = "main", changes: Dict[str, str] = None, draft: bool = False) -> Dict[str, Any]:

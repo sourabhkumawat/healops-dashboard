@@ -147,6 +147,26 @@ class AgentLoop:
                     }
                 )
             else:
+                # Check for repeated file path errors
+                error = observation.get("error", "")
+                if "File not found" in error and current_step.get("retry_count", 0) >= 2:
+                    # Same file path error 3+ times - mark as failed and add helpful error
+                    self.planner.mark_step_failed(
+                        current_step["step_number"],
+                        f"{error}\n\nStopped after multiple attempts. Please check the file path format - use relative paths from repository root (e.g., 'dist/src/package.json' not '/app/dist/src/package.json')."
+                    )
+                    self.event_stream.add_event(
+                        EventType.PLAN_STEP_FAILED,
+                        {
+                            "step_number": current_step["step_number"],
+                            "error": error,
+                            "message": "Failed after multiple retries with file path error",
+                            "iteration": self.current_iteration
+                        }
+                    )
+                    self.planner.advance_to_next_step()
+                    continue
+                
                 # Check if should retry
                 if self._should_retry(current_step, observation):
                     current_step["retry_count"] = current_step.get("retry_count", 0) + 1
@@ -155,6 +175,7 @@ class AgentLoop:
                         {
                             "message": f"Retrying step {current_step['step_number']} (attempt {current_step['retry_count']})",
                             "error": observation.get("error", ""),
+                            "error_hints": observation.get("error_hints"),
                             "iteration": self.current_iteration
                         }
                     )
@@ -306,10 +327,16 @@ class AgentLoop:
         error = action_result.get("error", "Unknown error")
         error_type = self._classify_error(error)
         
+        # Include error hints if available
+        error_hints = action_result.get("error_hints")
+        if error_hints:
+            error = f"{error}\n\nHints:\n" + "\n".join(f"- {hint}" for hint in error_hints)
+        
         return {
             "success": False,
             "error": error,
             "error_type": error_type,
+            "error_hints": error_hints,
             "data": action_result
         }
     

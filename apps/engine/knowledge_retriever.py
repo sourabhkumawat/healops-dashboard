@@ -45,8 +45,9 @@ class KnowledgeRetriever:
         self.repo_name = repo_name
         self.vectorstore = None
         self.indexed = False
+        self.has_faiss = HAS_FAISS  # Store module-level flag as instance variable
         
-        if HAS_FAISS:
+        if self.has_faiss:
             try:
                 self.embeddings = HuggingFaceEmbeddings(
                     model_name="sentence-transformers/all-MiniLM-L6-v2"
@@ -57,10 +58,10 @@ class KnowledgeRetriever:
                 )
             except Exception as e:
                 print(f"Warning: Failed to initialize embeddings: {e}")
-                HAS_FAISS = False
+                self.has_faiss = False
         
         # Fallback storage
-        if not HAS_FAISS:
+        if not self.has_faiss:
             self.documents: List[Dict[str, Any]] = []
     
     def index_codebase_patterns(self, file_paths: List[str]):
@@ -81,7 +82,7 @@ class KnowledgeRetriever:
                 if not content:
                     continue
                 
-                if HAS_FAISS:
+                if self.has_faiss:
                     # Split into chunks
                     chunks = self.text_splitter.create_documents(
                         [content],
@@ -98,7 +99,7 @@ class KnowledgeRetriever:
                 print(f"Warning: Failed to index file {file_path}: {e}")
                 continue
         
-        if HAS_FAISS and documents:
+        if self.has_faiss and documents:
             try:
                 if self.vectorstore:
                     # Add to existing store
@@ -109,7 +110,7 @@ class KnowledgeRetriever:
                 self.indexed = True
             except Exception as e:
                 print(f"Warning: Failed to create vector store: {e}")
-                HAS_FAISS = False
+                self.has_faiss = False
     
     def index_past_fixes(self, fixes: List[Dict[str, Any]]):
         """
@@ -132,7 +133,7 @@ Code Patch: {fix.get('patch', '')[:1000]}
 Error Signature: {fix.get('error_signature', '')}
 """
                 
-                if HAS_FAISS:
+                if self.has_faiss:
                     doc = Document(
                         page_content=fix_text,
                         metadata={
@@ -155,7 +156,7 @@ Error Signature: {fix.get('error_signature', '')}
                 print(f"Warning: Failed to index fix: {e}")
                 continue
         
-        if HAS_FAISS and documents:
+        if self.has_faiss and documents:
             try:
                 if self.vectorstore:
                     self.vectorstore.add_documents(documents)
@@ -185,7 +186,7 @@ Error Signature: {fix.get('error_signature', '')}
         if not self.indexed and not self.documents:
             return []
         
-        if HAS_FAISS and self.vectorstore:
+        if self.has_faiss and self.vectorstore:
             try:
                 # Semantic search
                 docs_with_scores = self.vectorstore.similarity_search_with_score(query, k=k)

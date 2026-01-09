@@ -2493,3 +2493,243 @@ def update_incident(incident_id: int, update_data: dict, request: Request, db: S
             traceback.print_exc()
     
     return incident
+
+@app.post("/incidents/{incident_id}/test-agent")
+async def test_agent_endpoint(
+    incident_id: int, 
+    request: Request, 
+    db: Session = Depends(get_db)
+):
+    """
+    Test endpoint to run the agent synchronously and see detailed thinking process.
+    
+    This endpoint runs the agent directly and returns all events, steps, and thinking
+    in the response. Useful for debugging and understanding agent behavior.
+    
+    NOTE: This endpoint does NOT require authentication - it's for testing only.
+    It will work with any incident ID without checking user permissions.
+    
+    Args:
+        incident_id: ID of the incident to test
+    
+    Returns:
+        Detailed response with agent execution, events, thinking, and results
+    """
+    # No authentication required for testing endpoint
+    # Get incident without user filtering
+    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+    
+    if not incident:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Incident {incident_id} not found"
+        )
+    
+    print(f"\n{'='*60}")
+    print(f"🧪 TEST AGENT ENDPOINT - Incident {incident_id}")
+    print(f"{'='*60}")
+    print(f"Incident: {incident.title}")
+    print(f"Status: {incident.status}")
+    print(f"Root cause: {incident.root_cause[:100] if incident.root_cause else 'Not set'}")
+    print(f"{'='*60}\n")
+    
+    try:
+        # Get logs
+        logs = []
+        if incident.log_ids:
+            log_id_list = incident.log_ids if isinstance(incident.log_ids, list) else []
+            if log_id_list:
+                logs = db.query(LogEntry).filter(LogEntry.id.in_(log_id_list)).order_by(LogEntry.timestamp.desc()).all()
+        
+        # Get GitHub integration
+        github_integration = None
+        if incident.integration_id:
+            try:
+                print(f"🔧 Loading GitHub integration (ID: {incident.integration_id})...")
+                github_integration = GithubIntegration(integration_id=incident.integration_id)
+                print(f"✅ GitHub integration loaded (ID: {incident.integration_id})")
+                
+                # Verify connection
+                if github_integration.client:
+                    verification = github_integration.verify_connection()
+                    if verification.get("status") == "verified":
+                        print(f"✅ GitHub connection verified: {verification.get('username', 'N/A')}")
+                    else:
+                        print(f"⚠️  GitHub connection verification failed: {verification.get('message', 'Unknown error')}")
+                else:
+                    print(f"⚠️  GitHub client not initialized after loading integration")
+            except Exception as e:
+                print(f"⚠️  Warning: Failed to load GitHub integration: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        repo_name = incident.repo_name or "owner/repo"
+        root_cause = incident.root_cause or "Test root cause - agent testing"
+        
+        if not incident.root_cause:
+            print(f"⚠️  Root cause not set, using placeholder: {root_cause}")
+        
+        # Import agent orchestrator
+        from agent_orchestrator import run_robust_crew
+        
+        print(f"\n🚀 Starting agent execution...")
+        print(f"   Repository: {repo_name}")
+        print(f"   Logs: {len(logs)} entries")
+        print(f"   Root cause: {root_cause[:100]}\n")
+        
+        # Run agent synchronously
+        start_time = time.time()
+        result = run_robust_crew(
+            incident=incident,
+            logs=logs,
+            root_cause=root_cause,
+            github_integration=github_integration,
+            repo_name=repo_name,
+            db=db
+        )
+        execution_time = time.time() - start_time
+        
+        print(f"\n✅ Agent execution completed in {execution_time:.2f}s")
+        
+        # Format response with detailed information
+        response = {
+            "success": result.get("success", False),
+            "status": result.get("status", "unknown"),
+            "execution_time_seconds": round(execution_time, 2),
+            "incident_id": incident_id,
+            "incident_info": {
+                "title": incident.title,
+                "status": incident.status,
+                "severity": incident.severity,
+                "service_name": incident.service_name,
+                "root_cause": incident.root_cause,
+                "repo_name": repo_name,
+                "has_integration": github_integration is not None
+            },
+            "agent_execution": {
+                "iterations": result.get("iterations", 0),
+                "plan_progress": result.get("plan_progress", {}),
+                "workspace_state": result.get("workspace_state", {})
+            },
+            "events": result.get("events", []),
+            "fixes": result.get("fixes", {}),
+            "error_signature": result.get("error_signature"),
+            "thinking_summary": _extract_thinking_summary(result.get("events", [])),
+            "steps_taken": _extract_steps_taken(result.get("events", [])),
+            "error": result.get("error")
+        }
+        
+        return response
+        
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"\n❌ Error in test agent endpoint: {e}")
+        print(f"Full traceback:\n{error_trace}")
+        
+        return {
+            "success": False,
+            "status": "error",
+            "incident_id": incident_id,
+            "error": str(e),
+            "error_trace": error_trace,
+            "message": "Agent execution failed. Check error details."
+        }
+
+
+def _extract_thinking_summary(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Extract a summary of agent thinking from events."""
+    thinking = {
+        "total_events": len(events),
+        "event_types": {},
+        "agent_actions": [],
+        "observations": [],
+        "plan_changes": [],
+        "errors": []
+    }
+    
+    for event in events:
+        event_type = event.get("type", "unknown")
+        thinking["event_types"][event_type] = thinking["event_types"].get(event_type, 0) + 1
+        
+        data = event.get("data", {})
+        
+        if event_type == "agent_action":
+            thinking["agent_actions"].append({
+                "agent": event.get("agent"),
+                "action": data.get("action", ""),
+                "timestamp": event.get("timestamp")
+            })
+        elif event_type == "observation":
+            thinking["observations"].append({
+                "observation": data.get("observation", "")[:200],
+                "timestamp": event.get("timestamp")
+            })
+        elif event_type in ["plan_created", "plan_updated"]:
+            thinking["plan_changes"].append({
+                "type": event_type,
+                "steps_count": len(data.get("plan", [])),
+                "timestamp": event.get("timestamp")
+            })
+        elif event_type == "error":
+            thinking["errors"].append({
+                "message": data.get("message", ""),
+                "timestamp": event.get("timestamp")
+            })
+    
+    return thinking
+
+
+def _extract_steps_taken(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Extract chronological steps taken by the agent."""
+    steps = []
+    
+    for event in events:
+        event_type = event.get("type", "unknown")
+        data = event.get("data", {})
+        
+        if event_type == "plan_step_started":
+            steps.append({
+                "step_number": data.get("step_number"),
+                "description": data.get("description", ""),
+                "status": "started",
+                "timestamp": event.get("timestamp")
+            })
+        elif event_type == "plan_step_completed":
+            # Update existing step or add new
+            step_found = False
+            for step in steps:
+                if step.get("step_number") == data.get("step_number"):
+                    step["status"] = "completed"
+                    step["result"] = data.get("result", "")
+                    step["completed_at"] = event.get("timestamp")
+                    step_found = True
+                    break
+            if not step_found:
+                steps.append({
+                    "step_number": data.get("step_number"),
+                    "description": data.get("description", ""),
+                    "status": "completed",
+                    "result": data.get("result", ""),
+                    "timestamp": event.get("timestamp")
+                })
+        elif event_type == "plan_step_failed":
+            # Update existing step or add new
+            step_found = False
+            for step in steps:
+                if step.get("step_number") == data.get("step_number"):
+                    step["status"] = "failed"
+                    step["error"] = data.get("error", "")
+                    step["failed_at"] = event.get("timestamp")
+                    step_found = True
+                    break
+            if not step_found:
+                steps.append({
+                    "step_number": data.get("step_number"),
+                    "description": data.get("description", ""),
+                    "status": "failed",
+                    "error": data.get("error", ""),
+                    "timestamp": event.get("timestamp")
+                })
+    
+    return steps

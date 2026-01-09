@@ -34,10 +34,10 @@ def read_file(file_path: str) -> Dict[str, Any]:
     Read a file from the repository.
     
     Args:
-        file_path: Path to the file
+        file_path: Path to the file (relative from repo root, or absolute path will be converted)
         
     Returns:
-        Dictionary with success, content, error
+        Dictionary with success, content, file_path, lines, error
     """
     try:
         ctx = get_context()
@@ -49,20 +49,42 @@ def read_file(file_path: str) -> Dict[str, Any]:
         if not gh or not repo_name:
             return {"success": False, "error": "GitHub integration not available"}
         
-        # Read file
-        content = gh.get_file_contents(repo_name, file_path, ref)
+        # Convert absolute paths to relative paths
+        # Remove leading slashes and common absolute path prefixes
+        normalized_path = file_path
+        if normalized_path.startswith("/"):
+            normalized_path = normalized_path.lstrip("/")
+            # Remove common absolute path prefixes like /app/, /workspace/, /code/
+            for prefix in ["app/", "workspace/", "code/", "dist/"]:
+                if normalized_path.startswith(prefix):
+                    normalized_path = normalized_path[len(prefix):]
+                    break
+        
+        # Try reading with normalized path first
+        content = gh.get_file_contents(repo_name, normalized_path, ref)
+        
+        # If that fails and original was different, try original path
+        if content is None and normalized_path != file_path:
+            content = gh.get_file_contents(repo_name, file_path, ref)
+            if content:
+                normalized_path = file_path  # Use original if it works
         
         if content is None:
-            return {"success": False, "error": f"File not found: {file_path}"}
+            # Provide helpful error message with suggestions
+            error_msg = f"File not found: {file_path}"
+            if file_path.startswith("/"):
+                error_msg += f"\nNote: Absolute paths are converted to relative paths. Tried: {normalized_path}"
+                error_msg += "\nTip: Use relative paths from repository root (e.g., 'dist/src/package.json' instead of '/app/dist/src/package.json')"
+            return {"success": False, "error": error_msg, "tried_path": normalized_path}
         
-        # Cache in workspace
+        # Cache in workspace with normalized path
         if workspace:
-            workspace.set_file(file_path, content)
+            workspace.set_file(normalized_path, content)
         
         return {
             "success": True,
             "content": content,
-            "file_path": file_path,
+            "file_path": normalized_path,
             "lines": len(content.split("\n"))
         }
     except Exception as e:
@@ -307,6 +329,38 @@ def retrieve_memory(error_signature: str) -> Dict[str, Any]:
             "success": True,
             "past_errors": result.get("past_errors", []),
             "known_fixes": result.get("known_fixes", [])
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def list_files(directory: str = "", max_depth: int = 2) -> Dict[str, Any]:
+    """
+    List files in the repository.
+    
+    Args:
+        directory: Directory path (empty string for root)
+        max_depth: Maximum depth to traverse (default: 2)
+        
+    Returns:
+        Dictionary with success, files (list of file paths), error
+    """
+    try:
+        ctx = get_context()
+        gh = ctx.get("github_integration")
+        repo_name = ctx.get("repo_name")
+        ref = ctx.get("ref", "main")
+        
+        if not gh or not repo_name:
+            return {"success": False, "error": "GitHub integration not available"}
+        
+        # Get repository structure
+        files = gh.get_repo_structure(repo_name, path=directory, ref=ref, max_depth=max_depth)
+        
+        return {
+            "success": True,
+            "files": files,
+            "directory": directory,
+            "count": len(files)
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
