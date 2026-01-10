@@ -589,10 +589,21 @@ async def slack_events(request: Request):
                 await handle_slack_dm(event, data.get("team_id"))
                 return {"status": "ok"}
             
-            # Handle channel messages (if subscribed)
+            # Handle channel messages in threads (when user replies to bot's message)
             if event_type == "message" and event.get("channel_type") == "channel":
-                # You can handle channel messages here if needed
-                print(f"📢 Channel message (not handling): {event.get('text', '')[:100]}...")
+                thread_ts = event.get("thread_ts")
+                # Only handle if it's a reply in a thread (has thread_ts) and bot is not the sender
+                if thread_ts and event.get("subtype") != "bot_message":
+                    # Check if this thread has bot messages (conversation context exists)
+                    thread_id = thread_ts
+                    if thread_id in _conversation_contexts:
+                        print(f"💬 Thread reply detected: {event.get('text', '')[:100]}...")
+                        await handle_thread_reply(event, data.get("team_id"), thread_id)
+                        return {"status": "ok"}
+                    else:
+                        print(f"📢 Channel message in thread (no bot context): {event.get('text', '')[:100]}...")
+                else:
+                    print(f"📢 Channel message (not in thread): {event.get('text', '')[:100]}...")
                 pass
         
         # Log if we receive an unexpected event type
@@ -799,8 +810,11 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
             
             slack_service = SlackService(bot_token)
             
-            # Generate response based on query
-            response_text = generate_agent_response(agent_name_match, query)
+            # Use thread_ts as conversation context ID
+            thread_id = event.get("thread_ts") or ts  # Use existing thread or create new one
+            
+            # Generate LLM-powered response with conversation context
+            response_text = generate_agent_response(agent_name_match, query, thread_id=thread_id)
             
             # Post response in thread (reply to the mention)
             slack_service.client.chat_postMessage(
@@ -845,9 +859,203 @@ async def handle_slack_dm(event: Dict[str, Any], team_id: Optional[str]):
         traceback.print_exc()
 
 
-def generate_agent_response(agent: Any, query: str) -> str:
+async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thread_id: str):
     """
-    Generate a response from an agent based on a query.
+    Handle when a user replies to the bot's message in a thread.
+    
+    Args:
+        event: Slack event data
+        team_id: Slack workspace team ID
+        thread_id: Thread timestamp (used as conversation context ID)
+    """
+    try:
+        from slack_service import SlackService
+        from models import AgentEmployee
+        from database import SessionLocal
+        
+        channel_id = event.get("channel")
+        user_id = event.get("user")
+        text = event.get("text", "")
+        ts = event.get("ts")
+        thread_ts = event.get("thread_ts")
+        
+        print(f"💬 Thread reply received: {text[:100]}...")
+        
+        # Find agent for this channel
+        db = SessionLocal()
+        try:
+            # Get agent for this channel
+            agents = db.query(AgentEmployee).filter(
+                AgentEmployee.slack_channel_id == channel_id
+            ).all()
+            
+            if not agents:
+                # Try to find any agent
+                agents = db.query(AgentEmployee).all()
+            
+            if not agents:
+                print(f"⚠️  No agent found for thread reply")
+                return
+            
+            agent = agents[0]  # Use first available agent
+            
+            # Get bot token
+            from crypto_utils import decrypt_token
+            bot_token = None
+            
+            if agent.slack_bot_token:
+                try:
+                    decrypted = decrypt_token(agent.slack_bot_token)
+                    if decrypted:
+                        bot_token = decrypted
+                except:
+                    pass
+            
+            if not bot_token:
+                bot_token = os.getenv("SLACK_BOT_TOKEN")
+            
+            if not bot_token:
+                print("⚠️  No Slack bot token available for thread reply")
+                return
+            
+            slack_service = SlackService(bot_token)
+            
+            # Generate LLM-powered response with conversation context
+            response_text = generate_agent_response(agent, text, thread_id=thread_id)
+            
+            # Post response in the same thread
+            slack_service.client.chat_postMessage(
+                channel=channel_id,
+                text=response_text,
+                thread_ts=thread_ts  # Reply in the same thread
+            )
+            
+            print(f"✅ Sent thread reply")
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        print(f"❌ Error handling thread reply: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+# Conversation context storage (in-memory, can be moved to Redis for production)
+_conversation_contexts: Dict[str, List[Dict[str, str]]] = {}
+
+def get_conversation_context(thread_id: str, max_messages: int = 10) -> List[Dict[str, str]]:
+    """Get conversation history for a thread."""
+    if thread_id not in _conversation_contexts:
+        _conversation_contexts[thread_id] = []
+    # Return last N messages
+    return _conversation_contexts[thread_id][-max_messages:]
+
+def add_to_conversation_context(thread_id: str, role: str, content: str):
+    """Add a message to conversation context."""
+    if thread_id not in _conversation_contexts:
+        _conversation_contexts[thread_id] = []
+    _conversation_contexts[thread_id].append({"role": role, "content": content})
+    # Keep only last 20 messages to prevent memory issues
+    if len(_conversation_contexts[thread_id]) > 20:
+        _conversation_contexts[thread_id] = _conversation_contexts[thread_id][-20:]
+
+def generate_agent_response_llm(agent: Any, query: str, thread_id: str = None, conversation_history: List[Dict[str, str]] = None) -> str:
+    """
+    Generate an LLM-powered response from an agent.
+    
+    Args:
+        agent: AgentEmployee object
+        query: User's query text
+        thread_id: Thread ID for conversation context
+        conversation_history: Previous messages in the conversation
+    
+    Returns:
+        Response text
+    """
+    api_key = os.getenv("OPENCOUNCIL_API")
+    if not api_key:
+        # Fallback to simple responses if LLM not configured
+        return generate_agent_response_simple(agent, query)
+    
+    # Build system prompt with agent context
+    system_prompt = f"""You are {agent.name}, a {agent.role} from the {agent.department} department at HealOps.
+
+Your role: {agent.role}
+Department: {agent.department}
+Current status: {agent.status}
+Current task: {agent.current_task or "No active task"}
+Capabilities: {', '.join(agent.capabilities or [])}
+
+You are an AI agent employee helping with incident resolution, code fixes, and technical support. 
+Be helpful, professional, and concise. You can discuss:
+- Your current work and tasks
+- Technical questions about incidents and code
+- Status updates on ongoing work
+- General questions about your capabilities
+
+Keep responses conversational and friendly. If asked about specific incidents or code, provide helpful information based on your role and capabilities."""
+
+    # Build messages with conversation history
+    messages = [{"role": "system", "content": system_prompt}]
+    
+    # Add conversation history if provided
+    if conversation_history:
+        messages.extend(conversation_history)
+    
+    # Add current query
+    messages.append({"role": "user", "content": query})
+    
+    try:
+        import requests
+        from ai_analysis import MODEL_CONFIG
+        
+        # Use chat model from config (free Xiaomi model)
+        chat_config = MODEL_CONFIG.get("chat", MODEL_CONFIG["simple_analysis"])
+        
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": os.getenv("APP_URL", "https://healops.ai"),
+                "X-Title": "HealOps Agent Chat",
+            },
+            json={
+                "model": chat_config["model"],
+                "messages": messages,
+                "temperature": chat_config["temperature"],
+                "max_tokens": chat_config["max_tokens"],
+            },
+            timeout=15
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            assistant_message = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            
+            if assistant_message:
+                # Store in conversation context if thread_id provided
+                if thread_id:
+                    add_to_conversation_context(thread_id, "user", query)
+                    add_to_conversation_context(thread_id, "assistant", assistant_message)
+                
+                return assistant_message
+            else:
+                return generate_agent_response_simple(agent, query)
+        else:
+            print(f"⚠️  LLM API error: {response.status_code} - {response.text[:200]}")
+            return generate_agent_response_simple(agent, query)
+            
+    except Exception as e:
+        print(f"⚠️  Error calling LLM: {e}")
+        import traceback
+        traceback.print_exc()
+        return generate_agent_response_simple(agent, query)
+
+def generate_agent_response_simple(agent: Any, query: str) -> str:
+    """
+    Simple keyword-based fallback responses.
     
     Args:
         agent: AgentEmployee object
@@ -858,7 +1066,7 @@ def generate_agent_response(agent: Any, query: str) -> str:
     """
     query_lower = query.lower()
     
-    # Simple keyword-based responses (can be enhanced with LLM later)
+    # Simple keyword-based responses
     if "what are you working on" in query_lower or "current task" in query_lower:
         if agent.current_task:
             return f"🚀 I'm currently working on: {agent.current_task}"
@@ -879,6 +1087,26 @@ def generate_agent_response(agent: Any, query: str) -> str:
     
     # Default response
     return f"Hi! I'm {agent.name}, {agent.role} from {agent.department}. Ask me:\n• 'What are you working on?'\n• 'What have you completed?'\n• 'What's your status?'"
+
+def generate_agent_response(agent: Any, query: str, thread_id: str = None) -> str:
+    """
+    Generate a response from an agent (uses LLM if available, falls back to simple).
+    
+    Args:
+        agent: AgentEmployee object
+        query: User's query text
+        thread_id: Thread ID for conversation context
+    
+    Returns:
+        Response text
+    """
+    # Get conversation history if thread_id provided
+    conversation_history = None
+    if thread_id:
+        conversation_history = get_conversation_context(thread_id)
+    
+    # Use LLM-powered response
+    return generate_agent_response_llm(agent, query, thread_id, conversation_history)
 
 # ============================================================================
 # Log Ingestion

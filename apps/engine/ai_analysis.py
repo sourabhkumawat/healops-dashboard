@@ -29,6 +29,11 @@ MODEL_CONFIG = {
         "model": "x-ai/grok-code-fast-1",  # ~$0.20 per 1M input tokens (Specialized for agentic coding)
         "max_tokens": 8000,
         "temperature": 0.2
+    },
+    "chat": {
+        "model": "xiaomi/mimo-v2-flash:free",  # Free model for Slack chat
+        "max_tokens": 500,
+        "temperature": 0.7
     }
 }
 
