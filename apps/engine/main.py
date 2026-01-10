@@ -1,6 +1,13 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+# Add src directory to Python path for imports
+import sys
+from pathlib import Path
+_engine_root = Path(__file__).parent
+if str(_engine_root) not in sys.path:
+    sys.path.insert(0, str(_engine_root))
+
 # Initialize Langtrace before any CrewAI imports
 from langtrace_python_sdk import langtrace
 import os
@@ -19,20 +26,22 @@ from fastapi.responses import PlainTextResponse, FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import func
-from database import engine, Base, get_db, SessionLocal
-from models import Incident, LogEntry, User, Integration, ApiKey, IntegrationStatus, SourceMap, IncidentStatus, IncidentSeverity
-import memory_models  # Ensure memory tables are created
-from auth import verify_password, get_password_hash, create_access_token, verify_token
-from integrations import generate_api_key
-
-from integrations.github_integration import GithubIntegration
-from integrations.github_app_auth import get_installation_info, get_installation_repositories
-from middleware import APIKeyMiddleware
-from crypto_utils import encrypt_token, decrypt_token
-from rate_limiter import check_rate_limit
+from src.database import engine, Base, get_db, SessionLocal
+from src.database import (
+    Incident, LogEntry, User, Integration, ApiKey,
+    IntegrationStatus, SourceMap, IncidentStatus, IncidentSeverity
+)
+from src.memory import (
+    AgentEvent, AgentPlan, AgentWorkspace, AgentMemoryError,
+    AgentMemoryFix, AgentRepoContext, AgentLearningPattern
+)  # Ensure memory tables are created
+from src.auth import verify_password, get_password_hash, create_access_token, verify_token
+from src.auth import encrypt_token, decrypt_token
+from src.integrations import generate_api_key, GithubIntegration
+from src.integrations.github import get_installation_info, get_installation_repositories
+from src.middleware import APIKeyMiddleware, check_rate_limit
+from src.memory import ensure_partition_exists_for_timestamp
 from datetime import timedelta, datetime
-from partition_manager import ensure_partition_exists_for_timestamp
-import os
 import secrets
 import time
 from pydantic import BaseModel
@@ -41,6 +50,10 @@ import requests
 import redis
 import asyncio
 import threading
+import logging
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 def backfill_integration_to_incidents(db: Session, integration_id: int, user_id: int, config: dict):
     """
@@ -86,7 +99,7 @@ def backfill_integration_to_incidents(db: Session, integration_id: int, user_id:
         # If we're updating the integration, also get repo_name
         if should_update:
             # Get repo_name from integration config based on service_name
-            from ai_analysis import get_repo_name_from_integration
+            from src.core.ai_analysis import get_repo_name_from_integration
             if not incident.repo_name:
                 repo_name = get_repo_name_from_integration(integration, incident.service_name)
                 if repo_name:
@@ -147,7 +160,7 @@ async def startup_event():
 
 # Add Middleware
 from fastapi.middleware.cors import CORSMiddleware
-from middleware import APIKeyMiddleware, AuthenticationMiddleware
+from src.middleware import APIKeyMiddleware, AuthenticationMiddleware
 
 # CORS Configuration - Allow all origins
 # Note: allow_credentials must be False when allowing all origins
@@ -291,7 +304,7 @@ class TestEmailRequest(BaseModel):
 @app.post("/auth/test-email")
 def test_email_endpoint(request_data: TestEmailRequest, current_user: User = Depends(get_current_user)):
     """Test email functionality by sending a test email"""
-    from email_service import send_test_email
+    from src.services.email.service import send_test_email
     
     try:
         success = send_test_email(
@@ -750,9 +763,9 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
         team_id: Slack workspace team ID
     """
     try:
-        from slack_service import SlackService
-        from models import AgentEmployee
-        from database import SessionLocal
+        from src.services.slack.service import SlackService
+        from src.database.models import AgentEmployee
+        from src.database.database import SessionLocal
         
         channel_id = event.get("channel")
         user_id = event.get("user")
@@ -837,7 +850,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     try:
                         bot_token = os.getenv("SLACK_BOT_TOKEN")
                         if bot_token:
-                            from slack_service import SlackService
+                            from src.services.slack.service import SlackService
                             slack_service = SlackService(bot_token)
                             slack_service.client.chat_postMessage(
                                 channel=channel_id,
@@ -849,7 +862,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                 return
             
             # Initialize Slack service
-            from crypto_utils import decrypt_token
+            from src.auth.crypto_utils import decrypt_token
             bot_token = None
             
             # Try to get token from agent's stored token (encrypted)
@@ -909,6 +922,17 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                 print(f"📚 Found existing conversation context with {len(conversation_history)} messages")
             else:
                 print(f"📝 No existing conversation context, starting new thread")
+            
+            # Refresh agent status from database to get latest status (in case it changed)
+            db.refresh(agent_name_match)
+            logger.debug(
+                "Refreshed agent status from database",
+                extra={
+                    "agent_name": agent_name_match.name,
+                    "status": agent_name_match.status,
+                    "has_current_task": bool(agent_name_match.current_task)
+                }
+            )
             
             # Post thinking indicator immediately to show bot is processing
             thinking_ts = slack_service.post_thinking_indicator(channel_id, thread_ts=ts)
@@ -1051,9 +1075,9 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
         thread_id: Thread timestamp (used as conversation context ID)
     """
     try:
-        from slack_service import SlackService
-        from models import AgentEmployee
-        from database import SessionLocal
+        from src.services.slack.service import SlackService
+        from src.database.models import AgentEmployee
+        from src.database.database import SessionLocal
         
         channel_id = event.get("channel")
         user_id = event.get("user")
@@ -1106,7 +1130,7 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
             agent = agents[0]  # Use first available agent
             
             # Get bot token
-            from crypto_utils import decrypt_token
+            from src.auth.crypto_utils import decrypt_token
             bot_token = None
             
             if agent.slack_bot_token:
@@ -1132,13 +1156,27 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
                 print(f"⏭️  Skipping thread reply from bot itself (user_id: {user_id})")
                 return
             
+            # Refresh agent status from database to get latest status (in case it changed)
+            db.refresh(agent)
+            logger.debug(
+                "Refreshed agent status from database for thread reply",
+                extra={
+                    "agent_name": agent.name,
+                    "status": agent.status,
+                    "has_current_task": bool(agent.current_task)
+                }
+            )
+            
+            # Use thread_ts as conversation context ID (parameter thread_id is the thread timestamp)
+            conversation_thread_id = thread_ts or thread_id or ts  # Use thread_ts if available, otherwise use thread_id parameter or ts
+            
             # Post thinking indicator immediately to show bot is processing
             thinking_ts = slack_service.post_thinking_indicator(channel_id, thread_ts=thread_ts)
             
             # Get existing conversation history (if thread exists) but don't create new context
             conversation_history = None
-            if thread_id in _conversation_contexts:
-                conversation_history = get_conversation_context(thread_id)
+            if conversation_thread_id and conversation_thread_id in _conversation_contexts:
+                conversation_history = get_conversation_context(conversation_thread_id)
                 print(f"📚 Found existing conversation context with {len(conversation_history)} messages")
             
             # Generate LLM-powered response with conversation context (this takes time)
@@ -1254,8 +1292,8 @@ _recently_responded_threads: set = set()
 def get_bot_user_id_from_db(channel_id: str) -> Optional[str]:
     """Get bot user ID from database for a specific channel (faster than API call)."""
     try:
-        from models import AgentEmployee
-        from database import SessionLocal
+        from src.database.models import AgentEmployee
+        from src.database.database import SessionLocal
         
         db = SessionLocal()
         try:
@@ -1285,7 +1323,7 @@ def get_bot_user_id() -> Optional[str]:
     try:
         bot_token = os.getenv("SLACK_BOT_TOKEN")
         if bot_token:
-            from slack_service import SlackService
+            from src.services.slack.service import SlackService
             slack_service = SlackService(bot_token)
             _cached_bot_user_id = slack_service.bot_user_id
             return _cached_bot_user_id
@@ -1357,7 +1395,7 @@ Keep responses conversational and friendly. If asked about specific incidents or
     
     try:
         import requests
-        from ai_analysis import MODEL_CONFIG
+        from src.core.ai_analysis import MODEL_CONFIG
         
         # Use chat model from config (free Xiaomi model)
         chat_config = MODEL_CONFIG.get("chat", MODEL_CONFIG["simple_analysis"])
@@ -2479,7 +2517,7 @@ def list_integrations(request: Request, db: Session = Depends(get_db)):
 @app.get("/integrations/providers")
 def list_providers():
     """List available integration providers."""
-    from integrations import IntegrationRegistry
+    from src.integrations import IntegrationRegistry
     
     return IntegrationRegistry.list_providers()
 
@@ -3117,7 +3155,7 @@ async def get_incident(incident_id: int, background_tasks: BackgroundTasks, requ
 
     # Trigger AI analysis in background if root_cause is not set
     if not incident.root_cause:
-        from ai_analysis import analyze_incident_with_openrouter
+        from src.core.ai_analysis import analyze_incident_with_openrouter
         background_tasks.add_task(analyze_incident_async, incident_id)
 
     return {
@@ -3172,7 +3210,7 @@ async def analyze_incident(incident_id: int, background_tasks: BackgroundTasks, 
 async def analyze_incident_async(incident_id: int, user_id: Optional[int] = None):
     """Background task to analyze an incident."""
     from database import SessionLocal
-    from ai_analysis import analyze_incident_with_openrouter
+    from src.core.ai_analysis import analyze_incident_with_openrouter
     
     db = SessionLocal()
     incident = None
@@ -3392,7 +3430,7 @@ def update_incident(incident_id: int, update_data: dict, request: Request, db: S
     
     if status_changed_to_resolved:
         try:
-            from email_service import send_incident_resolved_email
+            from src.services.email.service import send_incident_resolved_email
             from models import User
             
             # Get user email from incident
@@ -3518,7 +3556,7 @@ async def test_agent_endpoint(
             print(f"⚠️  Root cause not set, using placeholder: {root_cause}")
         
         # Import agent orchestrator
-        from agent_orchestrator import run_robust_crew
+        from src.agents.orchestrator import run_robust_crew
         
         print(f"\n🚀 Starting agent execution...")
         print(f"   Repository: {repo_name}")

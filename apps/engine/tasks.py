@@ -1,5 +1,10 @@
-from database import SessionLocal
-from models import LogEntry, Incident, IncidentSeverity, IntegrationStatus, IntegrationStatusEnum, Integration
+import sys
+from pathlib import Path
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent))
+
+from src.database.database import SessionLocal
+from src.database.models import LogEntry, Incident, IncidentSeverity, IntegrationStatus, IntegrationStatusEnum, Integration
 from sqlalchemy import func
 from datetime import datetime, timedelta
 import json
