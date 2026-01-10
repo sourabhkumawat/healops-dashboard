@@ -635,6 +635,13 @@ async def slack_events(request: Request):
                 thread_ts = event.get("thread_ts")
                 # Only handle if it's a reply in a thread (has thread_ts)
                 if thread_ts:
+                    # IMPORTANT: Check if this is a thread we just responded to
+                    # When we post with thread_ts=ts, Slack sends it back with thread_ts=ts
+                    # We need to skip it immediately
+                    if thread_ts in _recently_responded_threads:
+                        print(f"⏭️  Skipping message in thread we just responded to (thread_ts: {thread_ts[:10]}...)")
+                        return {"status": "ok"}
+                    
                     # IMPORTANT: Check if message is from bot BEFORE checking conversation context
                     # This prevents processing bot's own messages even if subtype check fails
                     # Try database first (faster), then fallback to API
@@ -645,6 +652,7 @@ async def slack_events(request: Request):
                     
                     # Check if this thread has bot messages (conversation context exists)
                     # Only process if we have conversation context (meaning bot has responded before)
+                    # AND we haven't just responded to this thread
                     thread_id = thread_ts
                     if thread_id in _conversation_contexts:
                         print(f"💬 Thread reply detected: {event_text[:100]}...")
@@ -890,14 +898,24 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                 print(f"⏭️  Skipping message from bot itself (user_id: {user_id})")
                 return
             
-            # Use thread_ts as conversation context ID
+            # Use thread_ts as conversation context ID (but don't create context yet)
+            # We'll create context AFTER posting to prevent recursive responses
             thread_id = event.get("thread_ts") or ts  # Use existing thread or create new one
+            
+            # Get conversation history (if it exists) but don't create new context yet
+            conversation_history = None
+            if thread_id in _conversation_contexts:
+                conversation_history = get_conversation_context(thread_id)
+                print(f"📚 Found existing conversation context with {len(conversation_history)} messages")
+            else:
+                print(f"📝 No existing conversation context, starting new thread")
             
             # Post thinking indicator immediately to show bot is processing
             thinking_ts = slack_service.post_thinking_indicator(channel_id, thread_ts=ts)
             
             # Generate LLM-powered response with conversation context (this takes time)
-            response_text = generate_agent_response(agent_name_match, query, thread_id=thread_id)
+            # Pass conversation_history but don't add to context yet
+            response_text = generate_agent_response_llm(agent_name_match, query, thread_id=None, conversation_history=conversation_history)
             
             # Delete the thinking indicator and post the actual response
             # This prevents duplicate messages that can occur when updating
@@ -920,8 +938,41 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                 if response.get("ok") and response.get("ts"):
                     response_ts = response.get("ts")
                     _recently_posted_messages.add(response_ts)
+                    
+                    # Track this thread as recently responded to
+                    # When we post with thread_ts=ts, Slack will send it back with thread_ts=ts
+                    # We need to skip it when it comes back
+                    if ts:
+                        _recently_responded_threads.add(ts)
+                        print(f"🔒 Tracked thread {ts[:10]}... as recently responded to")
+                        # Clean up after 3 seconds (enough time for Slack to send events back)
+                        import threading
+                        def clear_thread_tracking():
+                            import time
+                            time.sleep(3)
+                            _recently_responded_threads.discard(ts)
+                            print(f"🔓 Removed thread {ts[:10]}... from tracking")
+                        threading.Thread(target=clear_thread_tracking, daemon=True).start()
+                    
+                    # NOW add to conversation context AFTER successfully posting
+                    # Use a delay to prevent the bot from responding to its own messages
+                    import threading
+                    def add_context_after_posting():
+                        import time
+                        time.sleep(2)  # Wait 2 seconds before adding context to prevent recursion
+                        # Only add context if thread_id is valid (not None)
+                        if thread_id:
+                            # Clean up the query (remove bot mentions)
+                            clean_query = query
+                            add_to_conversation_context(thread_id, "user", clean_query)
+                            add_to_conversation_context(thread_id, "assistant", response_text)
+                            print(f"📚 Added conversation context for thread {thread_id[:10]}... (after 2s delay)")
+                    
+                    threading.Thread(target=add_context_after_posting, daemon=True).start()
+                    
                     print(f"✅ Posted response message (ts: {response_ts[:10]}...), tracked to prevent recursion")
                     print(f"   Tracked messages: {len(_recently_posted_messages)}")
+                    print(f"   Tracked threads: {len(_recently_responded_threads)}")
                     # Clean up after 10 seconds
                     import threading
                     def clear_posted_message():
@@ -1084,8 +1135,15 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
             # Post thinking indicator immediately to show bot is processing
             thinking_ts = slack_service.post_thinking_indicator(channel_id, thread_ts=thread_ts)
             
+            # Get existing conversation history (if thread exists) but don't create new context
+            conversation_history = None
+            if thread_id in _conversation_contexts:
+                conversation_history = get_conversation_context(thread_id)
+                print(f"📚 Found existing conversation context with {len(conversation_history)} messages")
+            
             # Generate LLM-powered response with conversation context (this takes time)
-            response_text = generate_agent_response(agent, text, thread_id=thread_id)
+            # Pass conversation_history but don't add to context yet
+            response_text = generate_agent_response_llm(agent, text, thread_id=None, conversation_history=conversation_history)
             
             # Delete the thinking indicator and post the actual response
             # This prevents duplicate messages that can occur when updating
@@ -1108,7 +1166,35 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
                 if response.get("ok") and response.get("ts"):
                     response_ts = response.get("ts")
                     _recently_posted_messages.add(response_ts)
-                    print(f"✅ Posted thread reply (ts: {response_ts[:10]}...)")
+                    
+                    # Track this thread as recently responded to
+                    # When we post with thread_ts=thread_ts, Slack will send it back with thread_ts=thread_ts
+                    if thread_ts:
+                        _recently_responded_threads.add(thread_ts)
+                        print(f"🔒 Tracked thread {thread_ts[:10]}... as recently responded to")
+                        # Clean up after 3 seconds
+                        import threading
+                        def clear_thread_tracking():
+                            import time
+                            time.sleep(3)
+                            _recently_responded_threads.discard(thread_ts)
+                            print(f"🔓 Removed thread {thread_ts[:10]}... from tracking")
+                        threading.Thread(target=clear_thread_tracking, daemon=True).start()
+                    
+                    # Add to conversation context AFTER posting with delay
+                    import threading
+                    def add_context_after_posting():
+                        import time
+                        time.sleep(2)  # Wait 2 seconds before adding context to prevent recursion
+                        if thread_id:
+                            add_to_conversation_context(thread_id, "user", text)
+                            add_to_conversation_context(thread_id, "assistant", response_text)
+                            print(f"📚 Added conversation context for thread {thread_id[:10]}... (after 2s delay)")
+                    
+                    threading.Thread(target=add_context_after_posting, daemon=True).start()
+                    
+                    print(f"✅ Posted thread reply (ts: {response_ts[:10]}...), tracked to prevent recursion")
+                    print(f"   Tracked threads: {len(_recently_responded_threads)}")
                     # Clean up after 10 seconds
                     import threading
                     def clear_posted_message():
@@ -1161,6 +1247,9 @@ _updating_messages: set = set()
 
 # Track message timestamps we just posted to prevent recursive processing
 _recently_posted_messages: set = set()
+
+# Track threads we just responded to (by thread_ts) to prevent recursive responses
+_recently_responded_threads: set = set()
 
 def get_bot_user_id_from_db(channel_id: str) -> Optional[str]:
     """Get bot user ID from database for a specific channel (faster than API call)."""
@@ -1295,11 +1384,9 @@ Keep responses conversational and friendly. If asked about specific incidents or
             assistant_message = result.get("choices", [{}])[0].get("message", {}).get("content", "")
             
             if assistant_message:
-                # Store in conversation context if thread_id provided
-                if thread_id:
-                    add_to_conversation_context(thread_id, "user", query)
-                    add_to_conversation_context(thread_id, "assistant", assistant_message)
-                
+                # NOTE: Do NOT add to conversation context here - we'll add it AFTER posting
+                # to prevent the bot from responding to its own messages
+                # The conversation context will be added after the message is successfully posted
                 return assistant_message
             else:
                 return generate_agent_response_simple(agent, query)
