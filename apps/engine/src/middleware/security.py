@@ -89,6 +89,9 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         # GitHub OAuth flow (user is authenticated by GitHub, not us yet)
         "/integrations/github/callback",
         "/integrations/github/authorize",
+        # Slack webhooks (verified via Slack signature, not JWT)
+        "/slack/events",
+        "/slack/interactive",
     }
 
     async def dispatch(self, request: Request, call_next):
@@ -100,11 +103,47 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         if request.url.path in self.PUBLIC_ENDPOINTS:
             return await call_next(request)
 
+        # Skip /otel/errors - it's handled by APIKeyMiddleware (API key in body)
+        # Skip /ingest/logs and /api/sourcemaps - they're handled by APIKeyMiddleware (API key in headers)
+        if (request.url.path == "/otel/errors" or 
+            request.url.path.startswith("/ingest/logs") or 
+            request.url.path.startswith("/api/sourcemaps")):
+            return await call_next(request)
+
+        # Skip /incidents/{id}/test-agent - test endpoint, no auth required
+        import re
+        test_agent_pattern = re.compile(r"^/incidents/\d+/test-agent$")
+        if test_agent_pattern.match(request.url.path):
+            return await call_next(request)
+
         # Check if user_id was already set by APIKeyMiddleware
         # (for /ingest/logs and /api/sourcemaps endpoints)
         if hasattr(request.state, 'user_id') and request.state.user_id:
             # Already authenticated by API key
             return await call_next(request)
+
+        # For other endpoints, try API key first (X-HealOps-Key header)
+        api_key_header = request.headers.get("X-HealOps-Key")
+        if api_key_header:
+            # Validate API key
+            key_hash = hashlib.sha256(api_key_header.encode()).hexdigest()
+            db: Session = SessionLocal()
+            try:
+                api_key = db.query(ApiKey).filter(
+                    ApiKey.key_hash == key_hash,
+                    ApiKey.is_active == 1
+                ).first()
+
+                if api_key:
+                    # Set user_id in request state
+                    request.state.user_id = api_key.user_id
+                    request.state.api_key = api_key
+                    db.close()
+                    return await call_next(request)
+            except Exception as e:
+                pass
+            finally:
+                db.close()
 
         # Try to authenticate via JWT token
         auth_header = request.headers.get("Authorization", "")
