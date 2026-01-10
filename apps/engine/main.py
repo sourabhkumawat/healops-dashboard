@@ -575,20 +575,29 @@ async def slack_events(request: Request):
             event = data.get("event", {})
             event_type = event.get("type")
             
+            print(f"📥 Received Slack event: type={event_type}, channel={event.get('channel', 'unknown')}")
+            
             # Handle app mentions
             if event_type == "app_mentions":
+                print(f"🔔 App mention detected: {event.get('text', '')[:100]}...")
                 await handle_slack_mention(event, data.get("team_id"))
                 return {"status": "ok"}
             
             # Handle direct messages
             if event_type == "message" and event.get("channel_type") == "im":
+                print(f"💬 Direct message detected: {event.get('text', '')[:100]}...")
                 await handle_slack_dm(event, data.get("team_id"))
                 return {"status": "ok"}
             
             # Handle channel messages (if subscribed)
             if event_type == "message" and event.get("channel_type") == "channel":
                 # You can handle channel messages here if needed
+                print(f"📢 Channel message (not handling): {event.get('text', '')[:100]}...")
                 pass
+        
+        # Log if we receive an unexpected event type
+        if data.get("type") != "url_verification" and data.get("type") != "event_callback":
+            print(f"⚠️  Unexpected Slack event type: {data.get('type')}")
         
         return {"status": "ok"}
         
@@ -691,10 +700,17 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
         # Find agent mentions in text (format: @agent-name or agent name)
         db = SessionLocal()
         try:
-            # Get all agent employees
+            # Get all agent employees for this channel
             agents = db.query(AgentEmployee).filter(
                 AgentEmployee.slack_channel_id == channel_id
             ).all()
+            
+            print(f"🔍 Found {len(agents)} agent(s) for channel {channel_id}")
+            if not agents:
+                # Try to find agents without channel filter (in case channel_id format is different)
+                all_agents = db.query(AgentEmployee).all()
+                print(f"⚠️  No agents found for channel {channel_id}, but {len(all_agents)} agent(s) exist total")
+                print(f"   Channel IDs in DB: {[a.slack_channel_id for a in all_agents if a.slack_channel_id]}")
             
             # Try to match agent name from text
             for agent in agents:
@@ -704,15 +720,40 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                 
                 if agent_first_name in query or agent.name.lower() in query:
                     agent_name_match = agent
+                    print(f"✅ Matched agent by name: {agent.name}")
                     break
             
             # If no specific agent mentioned, use first agent in channel
             if not agent_name_match and agents:
                 agent_name_match = agents[0]
+                print(f"✅ Using first agent in channel: {agent_name_match.name}")
             
             if not agent_name_match:
                 print(f"⚠️  No agent found for channel {channel_id}")
-                return
+                print(f"   Query text: {query}")
+                print(f"   Channel ID received: {channel_id}")
+                
+                # Try to find any agent (fallback if channel_id doesn't match)
+                all_agents = db.query(AgentEmployee).all()
+                if all_agents:
+                    print(f"   Attempting to use first available agent from {len(all_agents)} total agents")
+                    agent_name_match = all_agents[0]
+                    print(f"   Using agent: {agent_name_match.name} (channel: {agent_name_match.slack_channel_id})")
+                else:
+                    # Try to send a helpful message back to the channel
+                    try:
+                        bot_token = os.getenv("SLACK_BOT_TOKEN")
+                        if bot_token:
+                            from slack_service import SlackService
+                            slack_service = SlackService(bot_token)
+                            slack_service.client.chat_postMessage(
+                                channel=channel_id,
+                                text="⚠️ No agent employee found in the system. Please run the onboarding script: `python onboard_agent_employee.py --role coding_agent --slack-channel \"#engineering\"`",
+                                thread_ts=ts
+                            )
+                    except Exception as e:
+                        print(f"⚠️  Could not send error message to Slack: {e}")
+                    return
             
             # Initialize Slack service
             from crypto_utils import decrypt_token
@@ -740,6 +781,15 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
         print(f"❌ Error handling Slack mention: {e}")
         import traceback
         traceback.print_exc()
+        # Try to send error message to Slack if possible
+        try:
+            if 'slack_service' in locals() and 'channel_id' in locals():
+                slack_service.client.chat_postMessage(
+                    channel=channel_id,
+                    text=f"⚠️ Sorry, I encountered an error: {str(e)}"
+                )
+        except:
+            pass  # Don't fail if we can't send error message
 
 
 async def handle_slack_dm(event: Dict[str, Any], team_id: Optional[str]):

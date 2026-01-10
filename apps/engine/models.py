@@ -192,5 +192,30 @@ class SourceMap(Base):
         {'schema': None},
     )
 
+class AgentEmployee(Base):
+    __tablename__ = "agent_employees"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=False)
+    role = Column(String, nullable=False)  # e.g., "Senior Software Engineer"
+    department = Column(String, nullable=False)  # e.g., "Engineering"
+    agent_type = Column(String, nullable=False)  # e.g., "coding", "safety"
+    crewai_role = Column(String, nullable=False)  # e.g., "code_fixer_primary"
+    capabilities = Column(JSON, server_default='[]')  # List of capabilities
+    description = Column(Text, nullable=True)
+    
+    status = Column(String, default="available")  # available, working, idle
+    current_task = Column(String, nullable=True)
+    completed_tasks = Column(JSON, server_default='[]')  # List of completed task IDs/descriptions
+    
+    # Slack integration
+    slack_bot_token = Column(String, nullable=True)  # Encrypted token
+    slack_channel_id = Column(String, nullable=True)  # Channel ID where agent posts
+    slack_user_id = Column(String, nullable=True)  # Bot user ID in Slack
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
+
 # Import new memory models so they are registered with Base
 from memory_models import AgentMemoryError, AgentMemoryFix, AgentRepoContext
