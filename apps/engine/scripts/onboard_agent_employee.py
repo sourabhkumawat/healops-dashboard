@@ -127,9 +127,9 @@ def get_or_create_agent_employee(
     See the plan for model structure.
     """
     try:
-        from models import AgentEmployee
+        from src.database.models import AgentEmployee
     except ImportError:
-        print("❌ Error: AgentEmployee model not found in models.py")
+        print("❌ Error: AgentEmployee model not found in src.database.models")
         print("   Please implement the AgentEmployee model first (see plan)")
         sys.exit(1)
     
@@ -269,7 +269,7 @@ def setup_slack_integration(
     
     # Import Slack service
     try:
-        from slack_service import SlackService
+        from src.services.slack.service import SlackService
         slack_service = SlackService(slack_bot_token)
     except ImportError as e:
         print(f"⚠️  SlackService import failed: {e}")

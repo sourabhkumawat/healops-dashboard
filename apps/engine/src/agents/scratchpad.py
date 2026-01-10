@@ -46,7 +46,7 @@ class Scratchpad:
         Args:
             plan: List of plan steps
         """
-        from task_planner import TaskPlanner
+        from src.core.task_planner import TaskPlanner
         
         # Create a temporary planner to generate todo.md format
         # We'll use a mock planner just for formatting

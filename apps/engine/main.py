@@ -3209,7 +3209,7 @@ async def analyze_incident(incident_id: int, background_tasks: BackgroundTasks, 
 
 async def analyze_incident_async(incident_id: int, user_id: Optional[int] = None):
     """Background task to analyze an incident."""
-    from database import SessionLocal
+    from src.database.database import SessionLocal
     from src.core.ai_analysis import analyze_incident_with_openrouter
     
     db = SessionLocal()
@@ -3431,7 +3431,7 @@ def update_incident(incident_id: int, update_data: dict, request: Request, db: S
     if status_changed_to_resolved:
         try:
             from src.services.email.service import send_incident_resolved_email
-            from models import User
+            from src.database.models import User
             
             # Get user email from incident
             user_email = None

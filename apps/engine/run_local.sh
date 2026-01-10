@@ -40,7 +40,7 @@ fi
 # Check database connection
 echo "🔍 Checking database connection..."
 python3 -c "
-from database import engine
+from src.database.database import engine
 try:
     with engine.connect() as conn:
         print('✅ Database connection successful')

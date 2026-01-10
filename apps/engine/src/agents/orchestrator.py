@@ -1324,19 +1324,19 @@ def _execute_code_safely(
     
     # Create a safe __import__ function that only allows importing whitelisted modules
     def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
-        """Safe import that only allows importing code_execution_tools and standard library modules."""
-        # Whitelist of allowed modules
+        """Safe import that only allows importing standard library modules."""
+        # Whitelist of allowed modules (standard library only)
         allowed_modules = {
-            'code_execution_tools',
             'json', 're', 'os', 'sys', 'datetime', 'time',
-            'collections', 'itertools', 'functools', 'operator'
+            'collections', 'itertools', 'functools', 'operator',
+            'math', 'random', 'string', 'copy', 'hashlib'
         }
         
         # Check if the module is in the whitelist
         if name in allowed_modules:
             return __import__(name, globals, locals, fromlist, level)
         else:
-            raise ImportError(f"Import of '{name}' is not allowed in the restricted execution environment")
+            raise ImportError(f"Import of '{name}' is not allowed in the restricted execution environment. Only standard library modules are allowed. Use the pre-loaded tool functions instead.")
     
     # Import builtins module to access built-in functions reliably
     import builtins as builtins_module
@@ -1356,7 +1356,27 @@ def _execute_code_safely(
             restricted_builtins[name] = getattr(__builtins__, name)
     
     # Import code_execution_tools once for efficiency
-    code_execution_tools_module = __import__("code_execution_tools")
+    # Use the new path after restructuring
+    import sys
+    if '.' not in sys.path:
+        sys.path.insert(0, '.')
+    from src.tools.code_execution import (
+        read_file, write_file, apply_incremental_edit,
+        validate_code, find_symbol_definition, update_todo,
+        retrieve_memory, list_files
+    )
+    # Create a module-like object for compatibility
+    class CodeExecutionToolsModule:
+        pass
+    code_execution_tools_module = CodeExecutionToolsModule()
+    code_execution_tools_module.read_file = read_file
+    code_execution_tools_module.write_file = write_file
+    code_execution_tools_module.apply_incremental_edit = apply_incremental_edit
+    code_execution_tools_module.validate_code = validate_code
+    code_execution_tools_module.find_symbol_definition = find_symbol_definition
+    code_execution_tools_module.update_todo = update_todo
+    code_execution_tools_module.retrieve_memory = retrieve_memory
+    code_execution_tools_module.list_files = list_files
     
     # Pre-import commonly used standard library modules
     import json

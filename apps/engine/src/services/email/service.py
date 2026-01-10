@@ -61,8 +61,8 @@ def log_email_to_database(
         return
     
     try:
-        from models import EmailLog
-        from database import SessionLocal
+        from src.database.models import EmailLog
+        from src.database.database import SessionLocal
         import json
         from sqlalchemy.exc import IntegrityError, OperationalError
         

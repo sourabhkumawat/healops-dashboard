@@ -340,7 +340,7 @@ class AgentLoop:
         if not github_integration or not repo_name:
             # Try to get from agent tools context as fallback
             try:
-                from code_execution_tools import get_context as get_tools_context
+                from src.tools.code_execution import get_context as get_tools_context
                 tools_ctx = get_tools_context()
                 github_integration = github_integration or tools_ctx.get("github_integration")
                 repo_name = repo_name or tools_ctx.get("repo_name")

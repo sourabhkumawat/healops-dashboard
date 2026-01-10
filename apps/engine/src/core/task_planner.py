@@ -129,16 +129,18 @@ Return ONLY the JSON array, no other text.
                 raise ValueError("LLM is not available. Cannot create plan.")
             
             # Call LLM to generate plan
-            if hasattr(llm, 'invoke'):
-                response = llm.invoke(planning_prompt)
-                response_text = response.content if hasattr(response, 'content') else str(response)
-            elif hasattr(llm, 'call'):
-                # Some LLM interfaces use 'call' method
+            # CrewAI LLM uses 'call' method, LangChain uses 'invoke'
+            if hasattr(llm, 'call'):
+                # CrewAI LLM interface
                 response = llm.call(planning_prompt)
+                response_text = response.content if hasattr(response, 'content') else str(response)
+            elif hasattr(llm, 'invoke'):
+                # LangChain LLM interface
+                response = llm.invoke(planning_prompt)
                 response_text = response.content if hasattr(response, 'content') else str(response)
             else:
                 # Last resort: try to use it as callable (but this will fail for CrewAI LLMs)
-                raise AttributeError("LLM object does not have 'invoke' or 'call' method. Cannot generate plan.")
+                raise AttributeError("LLM object does not have 'call' or 'invoke' method. Cannot generate plan.")
             
             # Extract JSON from response
             plan_json = self._extract_json(response_text)
@@ -385,16 +387,18 @@ Return ONLY the JSON array.
                 raise ValueError("LLM is not available. Cannot replan.")
             
             # Generate new plan
-            if hasattr(llm, 'invoke'):
-                response = llm.invoke(replan_prompt)
-                response_text = response.content if hasattr(response, 'content') else str(response)
-            elif hasattr(llm, 'call'):
-                # Some LLM interfaces use 'call' method
+            # CrewAI LLM uses 'call' method, LangChain uses 'invoke'
+            if hasattr(llm, 'call'):
+                # CrewAI LLM interface
                 response = llm.call(replan_prompt)
+                response_text = response.content if hasattr(response, 'content') else str(response)
+            elif hasattr(llm, 'invoke'):
+                # LangChain LLM interface
+                response = llm.invoke(replan_prompt)
                 response_text = response.content if hasattr(response, 'content') else str(response)
             else:
                 # Last resort: try to use it as callable (but this will fail for CrewAI LLMs)
-                raise AttributeError("LLM object does not have 'invoke' or 'call' method. Cannot replan.")
+                raise AttributeError("LLM object does not have 'call' or 'invoke' method. Cannot replan.")
             
             plan_json = self._extract_json(response_text)
             new_plan_data = json.loads(plan_json)
