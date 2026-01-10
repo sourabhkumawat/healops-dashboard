@@ -552,23 +552,23 @@ async def slack_events(request: Request):
             if not timestamp or not signature:
                 raise HTTPException(status_code=401, detail="Missing Slack signature headers")
             
-            # Check timestamp to prevent replay attacks (5 minute window)
-            try:
-                if abs(time.time() - int(timestamp)) > 60 * 5:
-                    raise HTTPException(status_code=400, detail="Request timestamp too old")
-            except ValueError:
+                # Check timestamp to prevent replay attacks (5 minute window)
+                try:
+                    if abs(time.time() - int(timestamp)) > 60 * 5:
+                        raise HTTPException(status_code=400, detail="Request timestamp too old")
+                except ValueError:
                 raise HTTPException(status_code=400, detail="Invalid timestamp format")
             
-            # Verify signature
-            sig_basestring = f"v0:{timestamp}:{body_str}"
-            computed_signature = "v0=" + hmac.new(
-                signing_secret.encode(),
-                sig_basestring.encode(),
-                hashlib.sha256
-            ).hexdigest()
-            
-            if not hmac.compare_digest(computed_signature, signature):
-                raise HTTPException(status_code=401, detail="Invalid Slack signature")
+                # Verify signature
+                sig_basestring = f"v0:{timestamp}:{body_str}"
+                computed_signature = "v0=" + hmac.new(
+                    signing_secret.encode(),
+                    sig_basestring.encode(),
+                    hashlib.sha256
+                ).hexdigest()
+                
+                if not hmac.compare_digest(computed_signature, signature):
+                    raise HTTPException(status_code=401, detail="Invalid Slack signature")
         
         # Handle event callbacks
         if data.get("type") == "event_callback":
@@ -620,6 +620,11 @@ async def slack_events(request: Request):
                 event_ts = event.get("ts")
                 if event_ts and event_ts in _updating_messages:
                     print(f"⏭️  Skipping message we're currently updating (ts: {event_ts[:10]}...)")
+                    return {"status": "ok"}
+                
+                # Skip messages we just posted (prevent recursive responses)
+                if event_ts and event_ts in _recently_posted_messages:
+                    print(f"⏭️  Skipping message we just posted (ts: {event_ts[:10]}...)")
                     return {"status": "ok"}
                 
                 # Also skip if message looks like our thinking indicator (extra safeguard)
@@ -752,10 +757,23 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
             print(f"⏭️  Skipping bot/system message (subtype: {subtype}, user_id: {user_id})")
             return
         
+        # Skip messages we just posted (prevent recursive responses)
+        if ts and ts in _recently_posted_messages:
+            print(f"⏭️  Skipping message we just posted in mention handler (ts: {ts[:10]}...)")
+            return
+        
         # Also skip if message looks like a bot thinking indicator or response
         if "💭 Thinking" in text or "Thinking..." in text:
             print(f"⏭️  Skipping thinking indicator message")
             return
+        
+        # Early check: Get bot user ID and verify message is not from bot
+        channel_id = event.get("channel")
+        if channel_id:
+            bot_user_id = get_bot_user_id_from_db(channel_id) or get_bot_user_id()
+            if bot_user_id and user_id == bot_user_id:
+                print(f"⏭️  Skipping mention from bot itself (user_id: {user_id}, bot_user_id: {bot_user_id})")
+                return
         
         print(f"📩 Slack mention received from user {user_id}: {text[:100]}...")
         
@@ -862,7 +880,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     pass
                 
                 if not bot_token:
-                    return
+                return
             
             slack_service = SlackService(bot_token)
             
@@ -893,20 +911,48 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     # Continue to post response anyway
                 
                 # Post the actual response
-                slack_service.client.chat_postMessage(
+                response = slack_service.client.chat_postMessage(
                     channel=channel_id,
                     text=response_text,
                     thread_ts=ts
                 )
-                print(f"✅ Posted response message")
+                # Track this message to prevent recursive processing
+                if response.get("ok") and response.get("ts"):
+                    response_ts = response.get("ts")
+                    _recently_posted_messages.add(response_ts)
+                    print(f"✅ Posted response message (ts: {response_ts[:10]}...), tracked to prevent recursion")
+                    print(f"   Tracked messages: {len(_recently_posted_messages)}")
+                    # Clean up after 10 seconds
+                    import threading
+                    def clear_posted_message():
+                        import time
+                        time.sleep(10)
+                        _recently_posted_messages.discard(response_ts)
+                        print(f"🗑️  Removed message {response_ts[:10]}... from tracking")
+                    threading.Thread(target=clear_posted_message, daemon=True).start()
+                else:
+                    print(f"⚠️  Failed to post response or get timestamp: {response}")
+                    print(f"✅ Posted response message (no tracking)")
             else:
                 # Fallback: if thinking indicator failed, just post the response
                 print(f"⚠️  No thinking_ts available, posting response as new message")
-                slack_service.client.chat_postMessage(
+                response = slack_service.client.chat_postMessage(
                     channel=channel_id,
                     text=response_text,
                     thread_ts=ts
                 )
+                # Track this message to prevent recursive processing
+                if response.get("ok") and response.get("ts"):
+                    response_ts = response.get("ts")
+                    _recently_posted_messages.add(response_ts)
+                    print(f"✅ Posted response message fallback (ts: {response_ts[:10]}...)")
+                    # Clean up after 10 seconds
+                    import threading
+                    def clear_posted_message():
+                        import time
+                        time.sleep(10)
+                        _recently_posted_messages.discard(response_ts)
+                    threading.Thread(target=clear_posted_message, daemon=True).start()
             
         finally:
             db.close()
@@ -970,10 +1016,23 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
             print(f"⏭️  Skipping bot/system message in thread (subtype: {subtype}, user_id: {user_id})")
             return
         
+        # Skip messages we just posted (prevent recursive responses)
+        if ts and ts in _recently_posted_messages:
+            print(f"⏭️  Skipping message we just posted in thread reply handler (ts: {ts[:10]}...)")
+            return
+        
         # Also skip if message looks like a bot thinking indicator to prevent recursive responses
         if "💭 Thinking" in text or "Thinking..." in text:
             print(f"⏭️  Skipping thinking indicator message in thread")
             return
+        
+        # Early check: Get bot user ID and verify message is not from bot
+        bot_user_id = None
+        if channel_id:
+            bot_user_id = get_bot_user_id_from_db(channel_id) or get_bot_user_id()
+            if bot_user_id and user_id == bot_user_id:
+                print(f"⏭️  Skipping thread reply from bot itself (user_id: {user_id}, bot_user_id: {bot_user_id})")
+                return
         
         print(f"💬 Thread reply received from user {user_id}: {text[:100]}...")
         
@@ -1040,22 +1099,47 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
                     # Continue to post response anyway
                 
                 # Post the actual response
-                slack_service.client.chat_postMessage(
+                response = slack_service.client.chat_postMessage(
                     channel=channel_id,
                     text=response_text,
                     thread_ts=thread_ts
                 )
-                print(f"✅ Posted thread reply")
+                # Track this message to prevent recursive processing
+                if response.get("ok") and response.get("ts"):
+                    response_ts = response.get("ts")
+                    _recently_posted_messages.add(response_ts)
+                    print(f"✅ Posted thread reply (ts: {response_ts[:10]}...)")
+                    # Clean up after 10 seconds
+                    import threading
+                    def clear_posted_message():
+                        import time
+                        time.sleep(10)
+                        _recently_posted_messages.discard(response_ts)
+                    threading.Thread(target=clear_posted_message, daemon=True).start()
+                else:
+                    print(f"✅ Posted thread reply")
             else:
                 # Fallback: if thinking indicator failed, just post the response
                 print(f"⚠️  No thinking_ts available for thread, posting response as new message")
-                slack_service.client.chat_postMessage(
+                response = slack_service.client.chat_postMessage(
                     channel=channel_id,
                     text=response_text,
                     thread_ts=thread_ts
                 )
-            
-            print(f"✅ Sent thread reply")
+                # Track this message to prevent recursive processing
+                if response.get("ok") and response.get("ts"):
+                    response_ts = response.get("ts")
+                    _recently_posted_messages.add(response_ts)
+                    print(f"✅ Posted thread reply fallback (ts: {response_ts[:10]}...)")
+                    # Clean up after 10 seconds
+                    import threading
+                    def clear_posted_message():
+                        import time
+                        time.sleep(10)
+                        _recently_posted_messages.discard(response_ts)
+                    threading.Thread(target=clear_posted_message, daemon=True).start()
+                else:
+                    print(f"✅ Sent thread reply")
             
         finally:
             db.close()
@@ -1074,6 +1158,9 @@ _cached_bot_user_id: Optional[str] = None
 
 # Track message timestamps we're currently updating to prevent duplicate posts
 _updating_messages: set = set()
+
+# Track message timestamps we just posted to prevent recursive processing
+_recently_posted_messages: set = set()
 
 def get_bot_user_id_from_db(channel_id: str) -> Optional[str]:
     """Get bot user ID from database for a specific channel (faster than API call)."""
