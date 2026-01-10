@@ -11,6 +11,21 @@ from src.integrations.github.integration import GithubIntegration
 from src.database.database import SessionLocal
 from src.database.models import Integration, AgentEmployee
 
+# Try to import tool decorator - supports different CrewAI versions
+try:
+    from crewai_tools import tool
+except ImportError:
+    try:
+        from crewai.tools import tool
+    except ImportError:
+        # Fallback: create a simple decorator
+        def tool(description: str = ""):
+            def decorator(func):
+                func.tool_description = description
+                func.is_tool = True
+                return func
+            return decorator
+
 
 def _get_github_integration(user_id: Optional[int] = None, integration_id: Optional[int] = None) -> Optional[GithubIntegration]:
     """Get GitHub integration instance."""
@@ -35,6 +50,7 @@ def _get_github_integration(user_id: Optional[int] = None, integration_id: Optio
         db.close()
 
 
+@tool("Review a pull request and return detailed analysis including files changed and review status")
 def review_pr(repo_name: str, pr_number: int, user_id: Optional[int] = None, integration_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Review a pull request and return detailed analysis.
@@ -83,6 +99,7 @@ def review_pr(repo_name: str, pr_number: int, user_id: Optional[int] = None, int
     return review_data
 
 
+@tool("Get file contents from a PR branch for review")
 def get_pr_file_contents(repo_name: str, pr_number: int, file_path: str, user_id: Optional[int] = None, integration_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Get file contents from a PR (from the head branch).
@@ -113,6 +130,7 @@ def get_pr_file_contents(repo_name: str, pr_number: int, file_path: str, user_id
     }
 
 
+@tool("Comment on a pull request, optionally as an inline comment on a specific line")
 def comment_on_pr(repo_name: str, pr_number: int, body: str, commit_id: Optional[str] = None, path: Optional[str] = None, line: Optional[int] = None, user_id: Optional[int] = None, integration_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Comment on a pull request.
@@ -146,6 +164,7 @@ def comment_on_pr(repo_name: str, pr_number: int, body: str, commit_id: Optional
     }
 
 
+@tool("Request changes on a PR, rejecting it and asking for fixes")
 def request_pr_changes(repo_name: str, pr_number: int, body: str, user_id: Optional[int] = None, integration_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Request changes on a PR (reject and ask for fixes).
@@ -176,6 +195,7 @@ def request_pr_changes(repo_name: str, pr_number: int, body: str, user_id: Optio
     }
 
 
+@tool("Approve a pull request after review")
 def approve_pr(repo_name: str, pr_number: int, body: Optional[str] = None, user_id: Optional[int] = None, integration_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Approve a pull request.
@@ -206,6 +226,7 @@ def approve_pr(repo_name: str, pr_number: int, body: Optional[str] = None, user_
     }
 
 
+@tool("Analyze code quality, detect issues like long functions, deep nesting, magic numbers")
 def analyze_code_quality(code: str, file_path: str) -> Dict[str, Any]:
     """
     Analyze code quality and detect common issues.
@@ -310,6 +331,7 @@ def analyze_code_quality(code: str, file_path: str) -> Dict[str, Any]:
     }
 
 
+@tool("Check for common antipatterns like duplicate code, god objects, too many parameters")
 def check_antipatterns(code: str, file_path: str) -> Dict[str, Any]:
     """
     Check for common antipatterns in code.
@@ -371,6 +393,7 @@ def check_antipatterns(code: str, file_path: str) -> Dict[str, Any]:
     }
 
 
+@tool("Validate that a solution addresses the root cause based on error logs")
 def validate_solution(solution_code: str, error_logs: str, root_cause: Optional[str] = None) -> Dict[str, Any]:
     """
     Validate that a solution actually addresses the root cause based on logs.
