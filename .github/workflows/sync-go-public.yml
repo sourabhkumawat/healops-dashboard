@@ -1,0 +1,41 @@
+name: Sync Go SDK to Public Repo
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'packages/healops_opentelemetry_go/**'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Sync to Public Repository
+        if: env.PUBLIC_REPO_TOKEN != ''
+        env:
+          PUBLIC_REPO_TOKEN: ${{ secrets.PUBLIC_GO_REPO_TOKEN }}
+          TARGET_REPO: "healops/healops-opentelemetry-go" # Replace with your actual public repo
+        run: |
+          # Configure git
+          git config --global user.name "HealOps Bot"
+          git config --global user.email "bot@healops.ai"
+
+          # Split the subdirectory into a temporary branch
+          # using git subtree split to keep history relevant to this folder
+          git subtree split --prefix packages/healops_opentelemetry_go -b split-branch
+
+          # Push to the target repository
+          # We use a force push to ensure the target matches this directory exactly
+          git push https://x-access-token:${PUBLIC_REPO_TOKEN}@github.com/${TARGET_REPO}.git split-branch:main --force
+
+      - name: Skip Notification
+        if: env.PUBLIC_REPO_TOKEN == ''
+        run: |
+          echo "Skipping sync because PUBLIC_GO_REPO_TOKEN is not set."
+          echo "To enable auto-sync, create a public repo 'healops/healops-opentelemetry-go' and add the token secret."
