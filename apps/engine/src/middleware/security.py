@@ -99,21 +99,43 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS":
             return await call_next(request)
 
+        # Normalize path: remove query parameters and trailing slashes
+        path = request.url.path
+        original_path = path  # Keep original for logging
+        # Remove query parameters (FastAPI's request.url.path should not include query, but be safe)
+        if '?' in path:
+            path = path.split('?')[0]
+        # Remove trailing slash (except for root)
+        if path != '/' and path.endswith('/'):
+            path = path.rstrip('/')
+        
+        # CRITICAL: Check Slack endpoints FIRST before any other checks
+        # Slack webhooks must bypass authentication - they use signature verification instead
+        if path.startswith('/slack/'):
+            if path in self.PUBLIC_ENDPOINTS:
+                print(f"✅ AuthenticationMiddleware: Allowing Slack endpoint (public): {path}")
+                return await call_next(request)
+            # If path is not in PUBLIC_ENDPOINTS but starts with /slack/, still allow it
+            # This handles cases where path might be slightly different but still valid
+            if path == '/slack/events' or path == '/slack/interactive':
+                print(f"✅ AuthenticationMiddleware: Allowing Slack endpoint (fallback): {path}")
+                return await call_next(request)
+        
         # Allow public endpoints without authentication
-        if request.url.path in self.PUBLIC_ENDPOINTS:
+        if path in self.PUBLIC_ENDPOINTS:
             return await call_next(request)
 
         # Skip /otel/errors - it's handled by APIKeyMiddleware (API key in body)
         # Skip /ingest/logs and /api/sourcemaps - they're handled by APIKeyMiddleware (API key in headers)
-        if (request.url.path == "/otel/errors" or 
-            request.url.path.startswith("/ingest/logs") or 
-            request.url.path.startswith("/api/sourcemaps")):
+        if (path == "/otel/errors" or 
+            path.startswith("/ingest/logs") or 
+            path.startswith("/api/sourcemaps")):
             return await call_next(request)
 
         # Skip /incidents/{id}/test-agent - test endpoint, no auth required
         import re
         test_agent_pattern = re.compile(r"^/incidents/\d+/test-agent$")
-        if test_agent_pattern.match(request.url.path):
+        if test_agent_pattern.match(path):
             return await call_next(request)
 
         # Check if user_id was already set by APIKeyMiddleware

@@ -129,8 +129,14 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# NOTE: This AuthenticationMiddleware is a duplicate and should not be used.
+# The actual AuthenticationMiddleware is imported from .security in __init__.py
+# This class is kept for backward compatibility but should be removed in future.
 class AuthenticationMiddleware(BaseHTTPMiddleware):
     """
+    DEPRECATED: This class should not be used.
+    Use the AuthenticationMiddleware from .security instead.
+    
     Enforces authentication on ALL endpoints except public ones.
     Validates JWT tokens and sets request.state.user_id for authenticated users.
 
@@ -158,8 +164,15 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS":
             return await call_next(request)
 
+        # Normalize path: remove query parameters and trailing slashes
+        path = request.url.path
+        if '?' in path:
+            path = path.split('?')[0]
+        if path != '/' and path.endswith('/'):
+            path = path.rstrip('/')
+        
         # Allow public endpoints without authentication
-        if request.url.path in self.PUBLIC_ENDPOINTS:
+        if path in self.PUBLIC_ENDPOINTS:
             return await call_next(request)
 
         # Skip /otel/errors - it's handled by APIKeyMiddleware (API key in body)

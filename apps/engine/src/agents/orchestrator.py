@@ -1747,10 +1747,7 @@ def _update_agent_employee_status(
                 "task_completed": task_completed is not None
             }
         )
-        
-        # Post to Slack if configured (non-blocking)
-        _post_slack_status_update(agent_employee, status, current_task, task_completed)
-    
+            
     except Exception as e:
         logger.exception(
             "Failed to update AgentEmployee status",
@@ -1760,60 +1757,6 @@ def _update_agent_employee_status(
         db.rollback()
 
 
-def _post_slack_status_update(
-    agent_employee: AgentEmployee,
-    status: str,
-    current_task: Optional[str],
-    task_completed: Optional[str]
-) -> None:
-    """
-    Post agent status update to Slack if configured.
-    
-    This is a helper function that handles Slack posting separately
-    to keep the main status update function clean.
-    
-    Args:
-        agent_employee: The AgentEmployee instance
-        status: Current status
-        current_task: Current task description
-        task_completed: Completed task description
-    """
-    if not (agent_employee.slack_channel_id and agent_employee.slack_bot_token):
-        return
-    
-    try:
-        from src.services.slack.service import SlackService
-        from src.auth.crypto_utils import decrypt_token
-        
-        bot_token = decrypt_token(agent_employee.slack_bot_token)
-        if not bot_token:
-            logger.debug("Failed to decrypt Slack bot token", extra={"agent_id": agent_employee.id})
-            return
-        
-        slack_service = SlackService(bot_token)
-        
-        # Generate appropriate message based on status
-        if status == AGENT_STATUS_WORKING and current_task:
-            message = f"🚀 [{agent_employee.name}] Starting work on: {current_task}"
-        elif status == AGENT_STATUS_AVAILABLE and task_completed:
-            message = f"✅ [{agent_employee.name}] Completed: {task_completed}"
-        else:
-            message = f"🔄 [{agent_employee.name}] Status: {status}"
-        
-        slack_service.client.chat_postMessage(
-            channel=agent_employee.slack_channel_id,
-            text=message
-        )
-        
-        logger.debug("Posted status update to Slack", extra={"agent_name": agent_employee.name})
-    
-    except Exception as slack_error:
-        # Slack posting is optional - don't fail if it doesn't work
-        logger.warning(
-            "Failed to post status to Slack",
-            extra={"agent_name": agent_employee.name},
-            exc_info=slack_error
-        )
 
 
 def _determine_agent_role_from_step(step_description: str) -> str:
