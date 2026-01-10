@@ -615,6 +615,12 @@ async def slack_events(request: Request):
                     print(f"⏭️  Skipping bot/system message (subtype: {subtype}, user_id: {event_user_id})")
                     return {"status": "ok"}
                 
+                # Skip messages we're currently updating (prevent duplicate processing)
+                event_ts = event.get("ts")
+                if event_ts and event_ts in _updating_messages:
+                    print(f"⏭️  Skipping message we're currently updating (ts: {event_ts[:10]}...)")
+                    return {"status": "ok"}
+                
                 # Also skip if message looks like our thinking indicator (extra safeguard)
                 if "💭 Thinking" in event_text or "Thinking..." in event_text:
                     print(f"⏭️  Skipping thinking indicator message")
@@ -874,18 +880,27 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
             # Generate LLM-powered response with conversation context (this takes time)
             response_text = generate_agent_response(agent_name_match, query, thread_id=thread_id)
             
-            # Update the thinking message with the actual response
+            # Delete the thinking indicator and post the actual response
+            # This prevents duplicate messages that can occur when updating
             if thinking_ts:
-                success = slack_service.update_message(channel_id, thinking_ts, response_text)
-                if not success:
-                    # Fallback: if update fails, post as new message
-                    slack_service.client.chat_postMessage(
-                        channel=channel_id,
-                        text=response_text,
-                        thread_ts=ts
-                    )
+                try:
+                    # Delete the thinking indicator message
+                    slack_service.client.chat_delete(channel=channel_id, ts=thinking_ts)
+                    print(f"✅ Deleted thinking indicator message")
+                except Exception as e:
+                    print(f"⚠️  Could not delete thinking indicator: {e}")
+                    # Continue to post response anyway
+                
+                # Post the actual response
+                slack_service.client.chat_postMessage(
+                    channel=channel_id,
+                    text=response_text,
+                    thread_ts=ts
+                )
+                print(f"✅ Posted response message")
             else:
                 # Fallback: if thinking indicator failed, just post the response
+                print(f"⚠️  No thinking_ts available, posting response as new message")
                 slack_service.client.chat_postMessage(
                     channel=channel_id,
                     text=response_text,
@@ -1012,18 +1027,27 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
             # Generate LLM-powered response with conversation context (this takes time)
             response_text = generate_agent_response(agent, text, thread_id=thread_id)
             
-            # Update the thinking message with the actual response
+            # Delete the thinking indicator and post the actual response
+            # This prevents duplicate messages that can occur when updating
             if thinking_ts:
-                success = slack_service.update_message(channel_id, thinking_ts, response_text)
-                if not success:
-                    # Fallback: if update fails, post as new message
-                    slack_service.client.chat_postMessage(
-                        channel=channel_id,
-                        text=response_text,
-                        thread_ts=thread_ts
-                    )
+                try:
+                    # Delete the thinking indicator message
+                    slack_service.client.chat_delete(channel=channel_id, ts=thinking_ts)
+                    print(f"✅ Deleted thinking indicator message in thread")
+                except Exception as e:
+                    print(f"⚠️  Could not delete thinking indicator in thread: {e}")
+                    # Continue to post response anyway
+                
+                # Post the actual response
+                slack_service.client.chat_postMessage(
+                    channel=channel_id,
+                    text=response_text,
+                    thread_ts=thread_ts
+                )
+                print(f"✅ Posted thread reply")
             else:
                 # Fallback: if thinking indicator failed, just post the response
+                print(f"⚠️  No thinking_ts available for thread, posting response as new message")
                 slack_service.client.chat_postMessage(
                     channel=channel_id,
                     text=response_text,
@@ -1046,6 +1070,9 @@ _conversation_contexts: Dict[str, List[Dict[str, str]]] = {}
 
 # Cache bot user ID to prevent recursive responses (avoid creating SlackService repeatedly)
 _cached_bot_user_id: Optional[str] = None
+
+# Track message timestamps we're currently updating to prevent duplicate posts
+_updating_messages: set = set()
 
 def get_bot_user_id_from_db(channel_id: str) -> Optional[str]:
     """Get bot user ID from database for a specific channel (faster than API call)."""

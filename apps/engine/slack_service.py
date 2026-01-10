@@ -216,30 +216,55 @@ class SlackService:
     def update_message(self, channel_id: str, ts: str, text: str, blocks: Optional[List[Dict[str, Any]]] = None) -> bool:
         """
         Update an existing message.
+        To replace blocks with plain text, pass blocks=[] (empty list).
         
         Args:
             channel_id: Channel ID
             ts: Message timestamp
             text: New text content
-            blocks: Optional blocks for rich formatting
+            blocks: Optional blocks for rich formatting (pass [] to remove blocks, None to keep existing)
         
         Returns:
             True if successful, False otherwise
         """
         try:
+            # When updating from blocks to plain text, we need to explicitly pass empty blocks
+            # to remove the blocks from the message
             kwargs = {
                 "channel": channel_id,
                 "ts": ts,
                 "text": text
             }
             
-            if blocks:
+            # If blocks are explicitly provided, use them (including empty list to remove blocks)
+            # If blocks is None (default), we need to pass empty list to remove existing blocks
+            # from thinking indicator
+            if blocks is not None:
                 kwargs["blocks"] = blocks
+            else:
+                # Default: remove blocks (convert from thinking indicator blocks to plain text)
+                kwargs["blocks"] = []
             
             response = self.client.chat_update(**kwargs)
-            return response.get("ok", False)
+            
+            if response.get("ok"):
+                print(f"✅ Successfully updated message {ts[:10]}...")
+                return True
+            else:
+                error = response.get("error", "Unknown error")
+                print(f"⚠️  Failed to update message: {error}")
+                print(f"   Response: {response}")
+                return False
+        except SlackApiError as e:
+            error = e.response.get("error", str(e)) if e.response else str(e)
+            print(f"⚠️  Slack API error updating message: {error}")
+            if e.response:
+                print(f"   Full response: {e.response}")
+            return False
         except Exception as e:
             print(f"⚠️  Error updating message: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def post_message(
