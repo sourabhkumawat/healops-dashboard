@@ -552,23 +552,23 @@ async def slack_events(request: Request):
             if not timestamp or not signature:
                 raise HTTPException(status_code=401, detail="Missing Slack signature headers")
             
-            # Check timestamp to prevent replay attacks (5 minute window)
-            try:
-                if abs(time.time() - int(timestamp)) > 60 * 5:
-                    raise HTTPException(status_code=400, detail="Request timestamp too old")
-            except ValueError:
+                # Check timestamp to prevent replay attacks (5 minute window)
+                try:
+                    if abs(time.time() - int(timestamp)) > 60 * 5:
+                        raise HTTPException(status_code=400, detail="Request timestamp too old")
+                except ValueError:
                 raise HTTPException(status_code=400, detail="Invalid timestamp format")
             
-            # Verify signature
-            sig_basestring = f"v0:{timestamp}:{body_str}"
-            computed_signature = "v0=" + hmac.new(
-                signing_secret.encode(),
-                sig_basestring.encode(),
-                hashlib.sha256
-            ).hexdigest()
-            
-            if not hmac.compare_digest(computed_signature, signature):
-                raise HTTPException(status_code=401, detail="Invalid Slack signature")
+                # Verify signature
+                sig_basestring = f"v0:{timestamp}:{body_str}"
+                computed_signature = "v0=" + hmac.new(
+                    signing_secret.encode(),
+                    sig_basestring.encode(),
+                    hashlib.sha256
+                ).hexdigest()
+                
+                if not hmac.compare_digest(computed_signature, signature):
+                    raise HTTPException(status_code=401, detail="Invalid Slack signature")
         
         # Handle event callbacks
         if data.get("type") == "event_callback":
@@ -609,6 +609,7 @@ async def slack_events(request: Request):
                 subtype = event.get("subtype")
                 event_user_id = event.get("user")
                 event_text = event.get("text", "")
+                channel_id = event.get("channel")  # Extract channel_id from event
                 
                 # Skip bot messages, message updates, and system messages
                 if subtype == "bot_message" or subtype == "message_changed" or not event_user_id:
@@ -819,7 +820,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                             )
                     except Exception as e:
                         print(f"⚠️  Could not send error message to Slack: {e}")
-                    return
+                return
             
             # Initialize Slack service
             from crypto_utils import decrypt_token
@@ -861,7 +862,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     pass
                 
                 if not bot_token:
-                    return
+                return
             
             slack_service = SlackService(bot_token)
             
@@ -892,9 +893,9 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     # Continue to post response anyway
                 
                 # Post the actual response
-                slack_service.client.chat_postMessage(
-                    channel=channel_id,
-                    text=response_text,
+            slack_service.client.chat_postMessage(
+                channel=channel_id,
+                text=response_text,
                     thread_ts=ts
                 )
                 print(f"✅ Posted response message")
@@ -905,7 +906,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     channel=channel_id,
                     text=response_text,
                     thread_ts=ts
-                )
+            )
             
         finally:
             db.close()
