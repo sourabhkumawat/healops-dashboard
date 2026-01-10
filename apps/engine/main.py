@@ -579,31 +579,69 @@ async def slack_events(request: Request):
             
             # Handle app mentions (Slack sends "app_mention" singular, not "app_mentions")
             if event_type == "app_mention" or event_type == "app_mentions":
-                print(f"🔔 App mention detected: {event.get('text', '')[:100]}...")
+                # Skip bot messages to prevent recursive responses
+                subtype = event.get("subtype")
+                user_id = event.get("user")
+                if subtype == "bot_message" or not user_id:
+                    print(f"⏭️  Skipping app_mention from bot/system (subtype: {subtype}, user_id: {user_id})")
+                    return {"status": "ok"}
+                
+                print(f"🔔 App mention detected from user {user_id}: {event.get('text', '')[:100]}...")
                 await handle_slack_mention(event, data.get("team_id"))
                 return {"status": "ok"}
             
             # Handle direct messages
             if event_type == "message" and event.get("channel_type") == "im":
-                print(f"💬 Direct message detected: {event.get('text', '')[:100]}...")
+                # Skip bot messages to prevent recursive responses
+                subtype = event.get("subtype")
+                user_id = event.get("user")
+                if subtype == "bot_message" or not user_id:
+                    print(f"⏭️  Skipping DM from bot/system (subtype: {subtype}, user_id: {user_id})")
+                    return {"status": "ok"}
+                
+                print(f"💬 Direct message detected from user {user_id}: {event.get('text', '')[:100]}...")
                 await handle_slack_dm(event, data.get("team_id"))
                 return {"status": "ok"}
             
             # Handle channel messages in threads (when user replies to bot's message)
             if event_type == "message" and event.get("channel_type") == "channel":
+                # Skip bot messages to prevent recursive responses
+                subtype = event.get("subtype")
+                event_user_id = event.get("user")
+                event_text = event.get("text", "")
+                
+                # Skip bot messages, message updates, and system messages
+                if subtype == "bot_message" or subtype == "message_changed" or not event_user_id:
+                    print(f"⏭️  Skipping bot/system message (subtype: {subtype}, user_id: {event_user_id})")
+                    return {"status": "ok"}
+                
+                # Also skip if message looks like our thinking indicator (extra safeguard)
+                if "💭 Thinking" in event_text or "Thinking..." in event_text:
+                    print(f"⏭️  Skipping thinking indicator message")
+                    return {"status": "ok"}
+                
                 thread_ts = event.get("thread_ts")
-                # Only handle if it's a reply in a thread (has thread_ts) and bot is not the sender
-                if thread_ts and event.get("subtype") != "bot_message":
+                # Only handle if it's a reply in a thread (has thread_ts)
+                if thread_ts:
+                    # IMPORTANT: Check if message is from bot BEFORE checking conversation context
+                    # This prevents processing bot's own messages even if subtype check fails
+                    # Try database first (faster), then fallback to API
+                    bot_user_id = get_bot_user_id_from_db(channel_id) or get_bot_user_id()
+                    if bot_user_id and event_user_id == bot_user_id:
+                        print(f"⏭️  Skipping message from bot itself (user_id: {event_user_id}, bot_user_id: {bot_user_id})")
+                        return {"status": "ok"}
+                    
                     # Check if this thread has bot messages (conversation context exists)
+                    # Only process if we have conversation context (meaning bot has responded before)
                     thread_id = thread_ts
                     if thread_id in _conversation_contexts:
-                        print(f"💬 Thread reply detected: {event.get('text', '')[:100]}...")
+                        print(f"💬 Thread reply detected: {event_text[:100]}...")
                         await handle_thread_reply(event, data.get("team_id"), thread_id)
                         return {"status": "ok"}
                     else:
-                        print(f"📢 Channel message in thread (no bot context): {event.get('text', '')[:100]}...")
+                        print(f"📢 Channel message in thread (no bot context): {event_text[:100]}...")
                 else:
-                    print(f"📢 Channel message (not in thread): {event.get('text', '')[:100]}...")
+                    print(f"📢 Channel message (not in thread): {event_text[:100]}...")
                 pass
         
         # Log if we receive an unexpected event type
@@ -700,8 +738,19 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
         user_id = event.get("user")
         text = event.get("text", "")
         ts = event.get("ts")
+        subtype = event.get("subtype")
         
-        print(f"📩 Slack mention received: {text[:100]}...")
+        # Skip bot messages (bot responding to itself)
+        if subtype == "bot_message" or subtype == "message_changed" or not user_id:
+            print(f"⏭️  Skipping bot/system message (subtype: {subtype}, user_id: {user_id})")
+            return
+        
+        # Also skip if message looks like a bot thinking indicator or response
+        if "💭 Thinking" in text or "Thinking..." in text:
+            print(f"⏭️  Skipping thinking indicator message")
+            return
+        
+        print(f"📩 Slack mention received from user {user_id}: {text[:100]}...")
         
         # Parse mention to extract agent name and query
         # Format: "@healops-agent @alexandra.chen what are you working on?"
@@ -810,18 +859,38 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
             
             slack_service = SlackService(bot_token)
             
+            # Check if message is from bot itself (prevent recursive responses)
+            bot_user_id = agent_name_match.slack_user_id or slack_service.bot_user_id
+            if bot_user_id and user_id == bot_user_id:
+                print(f"⏭️  Skipping message from bot itself (user_id: {user_id})")
+                return
+            
             # Use thread_ts as conversation context ID
             thread_id = event.get("thread_ts") or ts  # Use existing thread or create new one
             
-            # Generate LLM-powered response with conversation context
+            # Post thinking indicator immediately to show bot is processing
+            thinking_ts = slack_service.post_thinking_indicator(channel_id, thread_ts=ts)
+            
+            # Generate LLM-powered response with conversation context (this takes time)
             response_text = generate_agent_response(agent_name_match, query, thread_id=thread_id)
             
-            # Post response in thread (reply to the mention)
-            slack_service.client.chat_postMessage(
-                channel=channel_id,
-                text=response_text,
-                thread_ts=ts  # Reply in thread
-            )
+            # Update the thinking message with the actual response
+            if thinking_ts:
+                success = slack_service.update_message(channel_id, thinking_ts, response_text)
+                if not success:
+                    # Fallback: if update fails, post as new message
+                    slack_service.client.chat_postMessage(
+                        channel=channel_id,
+                        text=response_text,
+                        thread_ts=ts
+                    )
+            else:
+                # Fallback: if thinking indicator failed, just post the response
+                slack_service.client.chat_postMessage(
+                    channel=channel_id,
+                    text=response_text,
+                    thread_ts=ts
+                )
             
         finally:
             db.close()
@@ -878,8 +947,19 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
         text = event.get("text", "")
         ts = event.get("ts")
         thread_ts = event.get("thread_ts")
+        subtype = event.get("subtype")
         
-        print(f"💬 Thread reply received: {text[:100]}...")
+        # Skip bot messages and system messages to prevent recursive responses
+        if subtype == "bot_message" or subtype == "message_changed" or not user_id:
+            print(f"⏭️  Skipping bot/system message in thread (subtype: {subtype}, user_id: {user_id})")
+            return
+        
+        # Also skip if message looks like a bot thinking indicator to prevent recursive responses
+        if "💭 Thinking" in text or "Thinking..." in text:
+            print(f"⏭️  Skipping thinking indicator message in thread")
+            return
+        
+        print(f"💬 Thread reply received from user {user_id}: {text[:100]}...")
         
         # Find agent for this channel
         db = SessionLocal()
@@ -920,15 +1000,35 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
             
             slack_service = SlackService(bot_token)
             
-            # Generate LLM-powered response with conversation context
+            # Check if message is from bot itself (prevent recursive responses)
+            bot_user_id = agent.slack_user_id or slack_service.bot_user_id
+            if bot_user_id and user_id == bot_user_id:
+                print(f"⏭️  Skipping thread reply from bot itself (user_id: {user_id})")
+                return
+            
+            # Post thinking indicator immediately to show bot is processing
+            thinking_ts = slack_service.post_thinking_indicator(channel_id, thread_ts=thread_ts)
+            
+            # Generate LLM-powered response with conversation context (this takes time)
             response_text = generate_agent_response(agent, text, thread_id=thread_id)
             
-            # Post response in the same thread
-            slack_service.client.chat_postMessage(
-                channel=channel_id,
-                text=response_text,
-                thread_ts=thread_ts  # Reply in the same thread
-            )
+            # Update the thinking message with the actual response
+            if thinking_ts:
+                success = slack_service.update_message(channel_id, thinking_ts, response_text)
+                if not success:
+                    # Fallback: if update fails, post as new message
+                    slack_service.client.chat_postMessage(
+                        channel=channel_id,
+                        text=response_text,
+                        thread_ts=thread_ts
+                    )
+            else:
+                # Fallback: if thinking indicator failed, just post the response
+                slack_service.client.chat_postMessage(
+                    channel=channel_id,
+                    text=response_text,
+                    thread_ts=thread_ts
+                )
             
             print(f"✅ Sent thread reply")
             
@@ -943,6 +1043,51 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
 
 # Conversation context storage (in-memory, can be moved to Redis for production)
 _conversation_contexts: Dict[str, List[Dict[str, str]]] = {}
+
+# Cache bot user ID to prevent recursive responses (avoid creating SlackService repeatedly)
+_cached_bot_user_id: Optional[str] = None
+
+def get_bot_user_id_from_db(channel_id: str) -> Optional[str]:
+    """Get bot user ID from database for a specific channel (faster than API call)."""
+    try:
+        from models import AgentEmployee
+        from database import SessionLocal
+        
+        db = SessionLocal()
+        try:
+            agent = db.query(AgentEmployee).filter(
+                AgentEmployee.slack_channel_id == channel_id
+            ).first()
+            
+            if agent and agent.slack_user_id:
+                return agent.slack_user_id
+            
+            # Try any agent as fallback
+            agent = db.query(AgentEmployee).first()
+            if agent and agent.slack_user_id:
+                return agent.slack_user_id
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"⚠️  Error getting bot user ID from DB: {e}")
+    return None
+
+def get_bot_user_id() -> Optional[str]:
+    """Get bot user ID, caching it for performance."""
+    global _cached_bot_user_id
+    if _cached_bot_user_id:
+        return _cached_bot_user_id
+    
+    try:
+        bot_token = os.getenv("SLACK_BOT_TOKEN")
+        if bot_token:
+            from slack_service import SlackService
+            slack_service = SlackService(bot_token)
+            _cached_bot_user_id = slack_service.bot_user_id
+            return _cached_bot_user_id
+    except Exception as e:
+        print(f"⚠️  Error getting bot user ID: {e}")
+    return None
 
 def get_conversation_context(thread_id: str, max_messages: int = 10) -> List[Dict[str, str]]:
     """Get conversation history for a thread."""

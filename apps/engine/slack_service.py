@@ -175,6 +175,73 @@ class SlackService:
             print(f"⚠️  Error inviting bot to channel: {str(e)}")
             return False
     
+    def post_thinking_indicator(self, channel_id: str, thread_ts: Optional[str] = None) -> Optional[str]:
+        """
+        Post a "thinking" indicator message to show the bot is processing.
+        Returns the message timestamp for later updating.
+        
+        Args:
+            channel_id: Channel ID
+            thread_ts: Optional thread timestamp to reply in thread
+        
+        Returns:
+            Message timestamp (ts) if successful, None otherwise
+        """
+        try:
+            # Use a visual thinking indicator with hourglass emoji
+            thinking_blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "💭 *Thinking...* :hourglass_flowing_sand:"
+                    }
+                }
+            ]
+            
+            response = self.client.chat_postMessage(
+                channel=channel_id,
+                blocks=thinking_blocks,
+                text="💭 Thinking... ⏳",
+                thread_ts=thread_ts
+            )
+            
+            if response.get("ok"):
+                return response.get("ts")
+            return None
+        except Exception as e:
+            print(f"⚠️  Error posting thinking indicator: {e}")
+            return None
+    
+    def update_message(self, channel_id: str, ts: str, text: str, blocks: Optional[List[Dict[str, Any]]] = None) -> bool:
+        """
+        Update an existing message.
+        
+        Args:
+            channel_id: Channel ID
+            ts: Message timestamp
+            text: New text content
+            blocks: Optional blocks for rich formatting
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            kwargs = {
+                "channel": channel_id,
+                "ts": ts,
+                "text": text
+            }
+            
+            if blocks:
+                kwargs["blocks"] = blocks
+            
+            response = self.client.chat_update(**kwargs)
+            return response.get("ok", False)
+        except Exception as e:
+            print(f"⚠️  Error updating message: {e}")
+            return False
+    
     def post_message(
         self,
         channel_id: str,
