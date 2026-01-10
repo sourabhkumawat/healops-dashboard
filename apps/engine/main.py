@@ -757,10 +757,45 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
             
             # Initialize Slack service
             from crypto_utils import decrypt_token
-            bot_token = decrypt_token(agent_name_match.slack_bot_token) if agent_name_match.slack_bot_token else os.getenv("SLACK_BOT_TOKEN")
+            bot_token = None
+            
+            # Try to get token from agent's stored token (encrypted)
+            if agent_name_match.slack_bot_token:
+                try:
+                    decrypted = decrypt_token(agent_name_match.slack_bot_token)
+                    if decrypted:
+                        bot_token = decrypted
+                        print(f"✅ Retrieved bot token from agent's stored token (decrypted successfully)")
+                    else:
+                        print(f"⚠️  Decryption returned empty string - token may be corrupted or encryption key changed")
+                        bot_token = None
+                except Exception as e:
+                    print(f"⚠️  Failed to decrypt stored token: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    bot_token = None
+            
+            # Fallback to environment variable
+            if not bot_token:
+                bot_token = os.getenv("SLACK_BOT_TOKEN")
+                if bot_token:
+                    print(f"✅ Using bot token from environment variable")
+            
             if not bot_token:
                 print("⚠️  No Slack bot token available")
-                return
+                print(f"   Agent has stored token: {'YES' if agent_name_match.slack_bot_token else 'NO'}")
+                print(f"   Environment variable SLACK_BOT_TOKEN: {'SET' if os.getenv('SLACK_BOT_TOKEN') else 'NOT SET'}")
+                # Try to send error message using any available token
+                try:
+                    # Last resort: try to use the raw token if it's not encrypted
+                    if agent_name_match.slack_bot_token and not agent_name_match.slack_bot_token.startswith('gAAAAA'):
+                        bot_token = agent_name_match.slack_bot_token
+                        print(f"⚠️  Attempting to use raw token (may not be encrypted)")
+                except:
+                    pass
+                
+                if not bot_token:
+                    return
             
             slack_service = SlackService(bot_token)
             
