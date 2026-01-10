@@ -18,7 +18,7 @@ try:
 except ImportError:
     pass
 
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, Tuple
 import os
 import json
 import re
@@ -41,7 +41,7 @@ from knowledge_retriever import KnowledgeRetriever
 from system_prompt import build_system_prompt
 from memory import CodeMemory
 from integrations.github_integration import GithubIntegration
-from models import Incident, LogEntry
+from models import Incident, LogEntry, AgentEmployee
 from sqlalchemy.orm import Session
 from ai_analysis import get_incident_fingerprint
 from agent_definitions import create_all_enhanced_agents
@@ -335,6 +335,13 @@ def run_robust_crew(
     # Create agents
     agents = create_all_enhanced_agents()
     
+    # Load AgentEmployee records and map them to CrewAI agents
+    agent_employee_map = _get_agent_employee_mapping(db, agents)
+    if agent_employee_map:
+        print(f"✅ Loaded {len(agent_employee_map)} AgentEmployee mapping(s) to CrewAI agents")
+    else:
+        print("ℹ️  No AgentEmployee records found - using CrewAI agents directly")
+    
     # Create agent executor function
     def agent_executor(step: Dict[str, Any], context: str, workspace: Workspace) -> Dict[str, Any]:
         """Execute agent action for a step."""
@@ -343,10 +350,12 @@ def run_robust_crew(
             context=context,
             workspace=workspace,
             agents=agents,
+            agent_employee_map=agent_employee_map,
             github_integration=github_integration,
             repo_name=repo_name,
             code_memory=code_memory,
-            available_files=available_files
+            available_files=available_files,
+            db=db
         )
     
     # Run agent loop
@@ -500,7 +509,9 @@ def _execute_agent_action(
     github_integration: GithubIntegration,
     repo_name: str,
     code_memory: CodeMemory,
-    available_files: List[str] = None
+    available_files: List[str] = None,
+    agent_employee_map: Optional[Dict[str, Any]] = None,
+    db: Optional[Session] = None
 ) -> Dict[str, Any]:
     """
     Execute agent action for a step.
@@ -514,21 +525,33 @@ def _execute_agent_action(
         github_integration: GitHub integration
         repo_name: Repository name
         code_memory: Code memory instance
+        available_files: List of available files in repository
+        agent_employee_map: Optional mapping of AgentEmployee records to CrewAI agents
+        db: Optional database session for status updates
         
     Returns:
         Action result dictionary
     """
     step_description = step.get("description", "")
     
-    # Determine which agent to use based on step
-    agent = _select_agent_for_step(step, agents)
+    # Determine which agent to use based on step (with AgentEmployee mapping if available)
+    agent, agent_employee = _select_agent_for_step(step, agents, agent_employee_map, db)
     
     if not agent:
         return {
             "success": False,
             "error": "No suitable agent found for step",
-            "agent_name": None
+            "agent_name": None,
+            "agent_employee": None
         }
+    
+    # Extract agent name for logging
+    agent_name = None
+    if agent_employee:
+        agent_name = agent_employee.name
+        print(f"🤖 Using AgentEmployee: {agent_name} ({agent_employee.crewai_role}) for step: {step_description[:50]}...")
+    elif hasattr(agent, 'role'):
+        agent_name = agent.role
     
     # Build full context with system prompt
     system_prompt = build_system_prompt(
@@ -573,13 +596,52 @@ def _execute_agent_action(
             available_files=available_files or []
         )
         
+        # Add AgentEmployee info to result
+        if agent_employee:
+            action_result["agent_employee"] = {
+                "id": agent_employee.id,
+                "name": agent_employee.name,
+                "email": agent_employee.email,
+                "crewai_role": agent_employee.crewai_role
+            }
+        
+        # Update AgentEmployee status to "available" when task completes
+        if agent_employee and db:
+            task_description = step.get("description", "Unknown task")
+            _update_agent_employee_status(
+                db=db,
+                crewai_role=agent_employee.crewai_role,
+                status="available",
+                current_task=None,  # Clear current task
+                task_completed=task_description if action_result.get("success") else None
+            )
+        
         return action_result
     except Exception as e:
-        return {
+        # Update AgentEmployee status to "available" on error (task failed)
+        if agent_employee and db:
+            _update_agent_employee_status(
+                db=db,
+                crewai_role=agent_employee.crewai_role,
+                status="available",
+                current_task=None  # Clear current task
+            )
+        
+        error_result = {
             "success": False,
             "error": str(e),
-            "agent_name": agent.role if hasattr(agent, 'role') else "unknown"
+            "agent_name": agent_name or (agent.role if hasattr(agent, 'role') else "unknown")
         }
+        
+        if agent_employee:
+            error_result["agent_employee"] = {
+                "id": agent_employee.id,
+                "name": agent_employee.name,
+                "email": agent_employee.email,
+                "crewai_role": agent_employee.crewai_role
+            }
+        
+        return error_result
 
 
 def _detect_languages(available_files: List[str]) -> Dict[str, List[str]]:
@@ -1389,22 +1451,208 @@ def _validate_code_syntax(code: str) -> Optional[str]:
         return f"Code validation error: {str(e)}"
 
 
-def _select_agent_for_step(step: Dict[str, Any], agents: Dict[str, Any]) -> Optional[Any]:
-    """Select appropriate agent for step."""
-    description = step.get("description", "").lower()
+def _map_crewai_role_to_agent_key(crewai_role: str) -> Tuple[str, str]:
+    """
+    Map crewai_role from AgentEmployee to agent dictionary keys.
     
-    # Map step types to agents
+    Args:
+        crewai_role: The crewai_role value (e.g., "code_fixer_primary")
+    
+    Returns:
+        Tuple of (phase, agent_key) for accessing agents dict
+    """
+    role_mapping = {
+        "code_fixer_primary": ("fix_generation", "code_fixer_primary"),
+        "code_fixer_alternative": ("fix_generation", "code_fixer_alternative"),
+        "fix_strategist": ("fix_generation", "fix_strategist"),
+        "confidence_scorer": ("fix_generation", "confidence_scorer"),
+        "codebase_explorer": ("exploration", "codebase_explorer"),
+        "dependency_analyzer": ("exploration", "dependency_analyzer"),
+        "pattern_matcher": ("exploration", "pattern_matcher"),
+        "syntax_validator": ("validation", "syntax_validator"),
+        "impact_analyzer": ("validation", "impact_analyzer"),
+        "pattern_consistency_validator": ("validation", "pattern_consistency_validator"),
+        "decision_maker": ("validation", "decision_maker"),
+        # Legacy role mappings (from agents.py)
+        "rca_analyst": ("exploration", "dependency_analyzer"),  # Approximate mapping
+        "log_parser": ("exploration", "codebase_explorer"),  # Approximate mapping
+        "safety_officer": ("validation", "impact_analyzer"),  # Approximate mapping
+    }
+    
+    return role_mapping.get(crewai_role, ("fix_generation", "code_fixer_primary"))
+
+
+def _get_agent_employee_mapping(db: Session, agents: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Get AgentEmployee records and map them to CrewAI agent instances.
+    
+    Args:
+        db: Database session
+        agents: Dictionary of CrewAI agents organized by phase
+    
+    Returns:
+        Dictionary mapping crewai_role to (AgentEmployee, CrewAI Agent) tuples
+    """
+    agent_employee_map = {}
+    
+    try:
+        # Query all active AgentEmployee records
+        agent_employees = db.query(AgentEmployee).filter(
+            AgentEmployee.status != "disabled"  # Only get active agents
+        ).all()
+        
+        for agent_employee in agent_employees:
+            phase, agent_key = _map_crewai_role_to_agent_key(agent_employee.crewai_role)
+            crewai_agent = agents.get(phase, {}).get(agent_key)
+            
+            if crewai_agent:
+                agent_employee_map[agent_employee.crewai_role] = {
+                    "agent_employee": agent_employee,
+                    "crewai_agent": crewai_agent,
+                    "phase": phase,
+                    "agent_key": agent_key
+                }
+                print(f"✅ Mapped AgentEmployee {agent_employee.name} ({agent_employee.crewai_role}) to CrewAI agent")
+            else:
+                print(f"⚠️  Warning: No CrewAI agent found for role '{agent_employee.crewai_role}' (phase: {phase}, key: {agent_key})")
+    
+    except Exception as e:
+        print(f"⚠️  Warning: Failed to load AgentEmployee records: {e}")
+        # Continue without AgentEmployee mapping (backward compatible)
+    
+    return agent_employee_map
+
+
+def _update_agent_employee_status(
+    db: Session, 
+    crewai_role: str, 
+    status: str, 
+    current_task: Optional[str] = None,
+    task_completed: Optional[str] = None
+):
+    """
+    Update AgentEmployee status when agent starts/completes tasks.
+    
+    Args:
+        db: Database session
+        crewai_role: The crewai_role to identify the agent
+        status: New status ("available", "working", "idle")
+        current_task: Current task description (if working)
+        task_completed: Task that was just completed (to add to completed_tasks)
+    """
+    try:
+        agent_employee = db.query(AgentEmployee).filter(
+            AgentEmployee.crewai_role == crewai_role
+        ).first()
+        
+        if agent_employee:
+            agent_employee.status = status
+            agent_employee.updated_at = datetime.utcnow()
+            
+            if current_task is not None:
+                agent_employee.current_task = current_task
+            
+            if task_completed:
+                # Add completed task to list
+                completed_tasks = agent_employee.completed_tasks or []
+                if not isinstance(completed_tasks, list):
+                    completed_tasks = []
+                completed_tasks.append({
+                    "task": task_completed,
+                    "completed_at": datetime.utcnow().isoformat()
+                })
+                # Keep only last 50 completed tasks
+                agent_employee.completed_tasks = completed_tasks[-50:]
+            
+            db.commit()
+            
+            # Try to post to Slack if configured
+            try:
+                if agent_employee.slack_channel_id and agent_employee.slack_bot_token:
+                    from slack_service import SlackService
+                    from crypto_utils import decrypt_token
+                    
+                    bot_token = decrypt_token(agent_employee.slack_bot_token)
+                    if bot_token:
+                        slack_service = SlackService(bot_token)
+                        
+                        if status == "working" and current_task:
+                            message = f"🚀 [{agent_employee.name}] Starting work on: {current_task}"
+                        elif status == "available" and task_completed:
+                            message = f"✅ [{agent_employee.name}] Completed: {task_completed}"
+                        else:
+                            message = f"🔄 [{agent_employee.name}] Status: {status}"
+                        
+                        slack_service.client.chat_postMessage(
+                            channel=agent_employee.slack_channel_id,
+                            text=message
+                        )
+            except Exception as slack_error:
+                # Slack posting is optional - don't fail if it doesn't work
+                print(f"Warning: Failed to post status to Slack: {slack_error}")
+    
+    except Exception as e:
+        print(f"Warning: Failed to update AgentEmployee status: {e}")
+        db.rollback()
+
+
+def _select_agent_for_step(
+    step: Dict[str, Any], 
+    agents: Dict[str, Any], 
+    agent_employee_map: Optional[Dict[str, Any]] = None,
+    db: Optional[Session] = None
+) -> Tuple[Optional[Any], Optional[Any]]:
+    """
+    Select appropriate agent for step, optionally using AgentEmployee records.
+    
+    Args:
+        step: Step dictionary with description
+        agents: Dictionary of CrewAI agents organized by phase
+        agent_employee_map: Optional mapping of crewai_role to (AgentEmployee, CrewAI Agent)
+        db: Optional database session for status updates
+    
+    Returns:
+        Tuple of (CrewAI Agent, AgentEmployee) or (CrewAI Agent, None)
+    """
+    description = step.get("description", "").lower()
+    selected_crewai_agent = None
+    selected_agent_employee = None
+    
+    # Determine which crewai_role to use based on step description
+    target_crewai_role = None
     if "read" in description or "explore" in description:
-        return agents.get("exploration", {}).get("codebase_explorer")
+        target_crewai_role = "codebase_explorer"
     elif "fix" in description or "generate" in description or "edit" in description:
-        return agents.get("fix_generation", {}).get("code_fixer_primary")
+        target_crewai_role = "code_fixer_primary"
     elif "validate" in description or "check" in description:
-        return agents.get("validation", {}).get("syntax_validator")
+        target_crewai_role = "syntax_validator"
     elif "analyze" in description or "dependency" in description:
-        return agents.get("exploration", {}).get("dependency_analyzer")
+        target_crewai_role = "dependency_analyzer"
     else:
         # Default to code fixer
-        return agents.get("fix_generation", {}).get("code_fixer_primary")
+        target_crewai_role = "code_fixer_primary"
+    
+    # Try to use AgentEmployee mapping if available
+    if agent_employee_map and target_crewai_role in agent_employee_map:
+        mapping = agent_employee_map[target_crewai_role]
+        selected_crewai_agent = mapping["crewai_agent"]
+        selected_agent_employee = mapping["agent_employee"]
+        
+        # Update AgentEmployee status to "working"
+        if db and selected_agent_employee:
+            _update_agent_employee_status(
+                db=db,
+                crewai_role=target_crewai_role,
+                status="working",
+                current_task=step.get("description", "Unknown task")
+            )
+    
+    # Fallback to direct agent selection if no AgentEmployee mapping
+    if not selected_crewai_agent:
+        phase, agent_key = _map_crewai_role_to_agent_key(target_crewai_role)
+        selected_crewai_agent = agents.get(phase, {}).get(agent_key)
+    
+    return selected_crewai_agent, selected_agent_employee
 
 
 def _extract_file_paths_from_logs(logs: List[LogEntry]) -> List[str]:
