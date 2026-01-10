@@ -508,6 +508,294 @@ async def agent_events_websocket(websocket: WebSocket, incident_id: int):
         agent_event_manager.disconnect(websocket, incident_id)
 
 # ============================================================================
+# Slack Webhooks
+# ============================================================================
+
+@app.post("/slack/events")
+async def slack_events(request: Request):
+    """
+    Handle Slack Events API webhook.
+    Receives events like app_mentions, messages, etc.
+    """
+    try:
+        import hmac
+        import hashlib
+        import time
+        
+        # Read body once (can't read twice in FastAPI)
+        body_bytes = await request.body()
+        body_str = body_bytes.decode('utf-8')
+        
+        # Parse request body first to check for challenge
+        try:
+            data = json.loads(body_str)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
+        
+        # Handle URL verification challenge FIRST (before signature verification)
+        # Slack sends this during initial setup and it doesn't require signature verification
+        if data.get("type") == "url_verification":
+            challenge = data.get("challenge")
+            if challenge:
+                print(f"✅ Received Slack URL verification challenge: {challenge[:20]}...")
+                return {"challenge": challenge}
+            else:
+                print("❌ Slack challenge request missing 'challenge' parameter")
+                raise HTTPException(status_code=400, detail="Challenge parameter missing")
+        
+        # For all other requests, verify Slack request signature
+        signing_secret = os.getenv("SLACK_SIGNING_SECRET")
+        if signing_secret:
+            timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+            signature = request.headers.get("X-Slack-Signature", "")
+            
+            if not timestamp or not signature:
+                raise HTTPException(status_code=401, detail="Missing Slack signature headers")
+            
+            # Check timestamp to prevent replay attacks (5 minute window)
+            try:
+                if abs(time.time() - int(timestamp)) > 60 * 5:
+                    raise HTTPException(status_code=400, detail="Request timestamp too old")
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid timestamp format")
+            
+            # Verify signature
+            sig_basestring = f"v0:{timestamp}:{body_str}"
+            computed_signature = "v0=" + hmac.new(
+                signing_secret.encode(),
+                sig_basestring.encode(),
+                hashlib.sha256
+            ).hexdigest()
+            
+            if not hmac.compare_digest(computed_signature, signature):
+                raise HTTPException(status_code=401, detail="Invalid Slack signature")
+        
+        # Handle event callbacks
+        if data.get("type") == "event_callback":
+            event = data.get("event", {})
+            event_type = event.get("type")
+            
+            # Handle app mentions
+            if event_type == "app_mentions":
+                await handle_slack_mention(event, data.get("team_id"))
+                return {"status": "ok"}
+            
+            # Handle direct messages
+            if event_type == "message" and event.get("channel_type") == "im":
+                await handle_slack_dm(event, data.get("team_id"))
+                return {"status": "ok"}
+            
+            # Handle channel messages (if subscribed)
+            if event_type == "message" and event.get("channel_type") == "channel":
+                # You can handle channel messages here if needed
+                pass
+        
+        return {"status": "ok"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error handling Slack event: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error processing Slack event: {str(e)}")
+
+
+@app.post("/slack/interactive")
+async def slack_interactive(request: Request):
+    """
+    Handle Slack Interactive Components (buttons, modals, etc.).
+    Note: Slack sends interactive components as application/x-www-form-urlencoded.
+    """
+    try:
+        import hmac
+        import hashlib
+        import urllib.parse
+        
+        # Read body for signature verification
+        body_bytes = await request.body()
+        body_str = body_bytes.decode('utf-8')
+        
+        # Verify Slack request signature
+        signing_secret = os.getenv("SLACK_SIGNING_SECRET")
+        if signing_secret:
+            timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+            signature = request.headers.get("X-Slack-Signature", "")
+            
+            if timestamp and signature:
+                # Verify signature (body is already in form-encoded format)
+                sig_basestring = f"v0:{timestamp}:{body_str}"
+                computed_signature = "v0=" + hmac.new(
+                    signing_secret.encode(),
+                    sig_basestring.encode(),
+                    hashlib.sha256
+                ).hexdigest()
+                
+                if not hmac.compare_digest(computed_signature, signature):
+                    raise HTTPException(status_code=401, detail="Invalid Slack signature")
+        
+        # Parse form data (need to restore body for FastAPI form parser)
+        # Create a new request with the body restored
+        async def receive():
+            return {"type": "http.request", "body": body_bytes}
+        request._receive = receive
+        
+        form_data = await request.form()
+        payload_str = form_data.get("payload", "{}")
+        payload = json.loads(payload_str)
+        
+        # Handle different interactive component types
+        if payload.get("type") == "block_actions":
+            # Handle button clicks, etc.
+            pass
+        elif payload.get("type") == "view_submission":
+            # Handle modal submissions
+            pass
+        
+        return {"status": "ok"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error handling Slack interactive component: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error processing Slack interaction: {str(e)}")
+
+
+async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
+    """
+    Handle when the bot is mentioned in a channel.
+    
+    Args:
+        event: Slack event data
+        team_id: Slack workspace team ID
+    """
+    try:
+        from slack_service import SlackService
+        from models import AgentEmployee
+        from database import SessionLocal
+        
+        channel_id = event.get("channel")
+        user_id = event.get("user")
+        text = event.get("text", "")
+        ts = event.get("ts")
+        
+        print(f"📩 Slack mention received: {text[:100]}...")
+        
+        # Parse mention to extract agent name and query
+        # Format: "@healops-agent @alexandra.chen what are you working on?"
+        agent_name_match = None
+        query = text.lower()
+        
+        # Find agent mentions in text (format: @agent-name or agent name)
+        db = SessionLocal()
+        try:
+            # Get all agent employees
+            agents = db.query(AgentEmployee).filter(
+                AgentEmployee.slack_channel_id == channel_id
+            ).all()
+            
+            # Try to match agent name from text
+            for agent in agents:
+                # Check for agent name in mention
+                agent_first_name = agent.name.split()[0].lower() if agent.name else ""
+                agent_last_name = agent.name.split()[-1].lower() if len(agent.name.split()) > 1 else ""
+                
+                if agent_first_name in query or agent.name.lower() in query:
+                    agent_name_match = agent
+                    break
+            
+            # If no specific agent mentioned, use first agent in channel
+            if not agent_name_match and agents:
+                agent_name_match = agents[0]
+            
+            if not agent_name_match:
+                print(f"⚠️  No agent found for channel {channel_id}")
+                return
+            
+            # Initialize Slack service
+            from crypto_utils import decrypt_token
+            bot_token = decrypt_token(agent_name_match.slack_bot_token) if agent_name_match.slack_bot_token else os.getenv("SLACK_BOT_TOKEN")
+            if not bot_token:
+                print("⚠️  No Slack bot token available")
+                return
+            
+            slack_service = SlackService(bot_token)
+            
+            # Generate response based on query
+            response_text = generate_agent_response(agent_name_match, query)
+            
+            # Post response in thread (reply to the mention)
+            slack_service.client.chat_postMessage(
+                channel=channel_id,
+                text=response_text,
+                thread_ts=ts  # Reply in thread
+            )
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        print(f"❌ Error handling Slack mention: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+async def handle_slack_dm(event: Dict[str, Any], team_id: Optional[str]):
+    """
+    Handle direct messages to the bot.
+    
+    Args:
+        event: Slack event data
+        team_id: Slack workspace team ID
+    """
+    try:
+        # Similar to handle_slack_mention but for DMs
+        # For now, redirect to mention handler
+        await handle_slack_mention(event, team_id)
+    except Exception as e:
+        print(f"❌ Error handling Slack DM: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def generate_agent_response(agent: Any, query: str) -> str:
+    """
+    Generate a response from an agent based on a query.
+    
+    Args:
+        agent: AgentEmployee object
+        query: User's query text
+    
+    Returns:
+        Response text
+    """
+    query_lower = query.lower()
+    
+    # Simple keyword-based responses (can be enhanced with LLM later)
+    if "what are you working on" in query_lower or "current task" in query_lower:
+        if agent.current_task:
+            return f"🚀 I'm currently working on: {agent.current_task}"
+        else:
+            return f"💤 I'm currently idle. No active tasks."
+    
+    if "completed" in query_lower or "what did you do" in query_lower:
+        completed = agent.completed_tasks or []
+        if completed:
+            tasks_text = "\n".join([f"• {task}" for task in completed[-5:]])
+            return f"✅ Recently completed tasks:\n{tasks_text}"
+        else:
+            return "No completed tasks yet."
+    
+    if "status" in query_lower or "what's your status" in query_lower:
+        status_emoji = {"available": "✅", "working": "⚙️", "idle": "💤"}.get(agent.status, "❓")
+        return f"{status_emoji} Status: {agent.status}\nDepartment: {agent.department}\nRole: {agent.role}"
+    
+    # Default response
+    return f"Hi! I'm {agent.name}, {agent.role} from {agent.department}. Ask me:\n• 'What are you working on?'\n• 'What have you completed?'\n• 'What's your status?'"
+
+# ============================================================================
 # Log Ingestion
 # ============================================================================
 

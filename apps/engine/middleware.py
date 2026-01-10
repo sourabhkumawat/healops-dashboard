@@ -148,6 +148,9 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         # GitHub OAuth callback (user is authenticated by GitHub, not us yet)
         # Note: /integrations/github/authorize is now protected - user must be authenticated
         "/integrations/github/callback",
+        # Slack webhooks (verified via Slack signature, not JWT)
+        "/slack/events",
+        "/slack/interactive",
     }
 
     async def dispatch(self, request: Request, call_next):
