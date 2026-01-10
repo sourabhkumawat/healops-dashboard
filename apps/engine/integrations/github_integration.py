@@ -9,6 +9,11 @@ from github import Github, GithubException
 from database import SessionLocal
 from models import Integration
 from integrations.github_app_auth import get_installation_token
+import hashlib
+
+# Simple in-memory cache for repository structure (key: (repo_name, ref, max_depth), value: (files, timestamp))
+_repo_structure_cache: Dict[str, tuple] = {}
+CACHE_TTL_SECONDS = 300  # Cache for 5 minutes
 
 class GithubIntegration:
     """Handles GitHub interactions."""
@@ -270,7 +275,8 @@ class GithubIntegration:
     
     def get_repo_structure(self, repo_name: str, path: str = "", ref: str = "main", max_depth: int = 2) -> list[str]:
         """
-        Get repository file structure.
+        Get repository file structure efficiently using GitHub tree API when possible.
+        Includes caching to avoid re-fetching the same structure.
         
         Args:
             repo_name: "owner/repo"
@@ -287,31 +293,56 @@ class GithubIntegration:
         
         if max_depth <= 0:
             return []
-            
+        
+        # Check cache (only for root path to keep cache simple)
+        if path == "":
+            cache_key = self._get_cache_key(repo_name, ref, max_depth)
+            if cache_key in _repo_structure_cache:
+                cached_files, cache_time = _repo_structure_cache[cache_key]
+                age_seconds = (datetime.utcnow() - cache_time).total_seconds()
+                if age_seconds < CACHE_TTL_SECONDS:
+                    print(f"   ✓ Using cached repository structure ({len(cached_files)} files, cached {age_seconds:.1f}s ago)")
+                    return cached_files.copy()  # Return a copy to avoid mutation
+                else:
+                    # Cache expired
+                    del _repo_structure_cache[cache_key]
+        
+        # Directories to skip (common build/cache directories)
+        skip_dirs = {
+            'node_modules', '__pycache__', '.git', 'venv', 'env', '.venv', 
+            'dist', 'build', '.next', '.nuxt', 'target', 'bin', 'obj',
+            '.gradle', '.idea', '.vscode', 'coverage', '.pytest_cache'
+        }
+        
         try:
             repo = self.client.get_repo(repo_name)
-            print(f"   Getting contents for path: '{path}' (ref: {ref}, depth: {max_depth})")
-            contents = repo.get_contents(path, ref=ref)
             files = []
             
-            if isinstance(contents, list):
-                print(f"   Found {len(contents)} items in '{path}'")
-                for item in contents:
-                    if item.type == "file":
-                        files.append(item.path)
-                    elif item.type == "dir" and max_depth > 1:
-                        # Recursively get subdirectory contents
-                        sub_files = self.get_repo_structure(repo_name, item.path, ref, max_depth - 1)
-                        files.extend(sub_files)
+            # For root path and max_depth >= 2, use tree API for better performance
+            if path == "" and max_depth >= 2:
+                try:
+                    files = self._get_repo_structure_via_tree(repo, ref, max_depth, skip_dirs)
+                except Exception as tree_error:
+                    print(f"   Tree API failed, falling back to recursive method: {tree_error}")
+                    # Fall through to recursive method
+                    files = self._get_repo_structure_recursive(repo, repo_name, path, ref, max_depth, skip_dirs)
             else:
-                if contents.type == "file":
-                    files.append(contents.path)
-                elif contents.type == "dir" and max_depth > 1:
-                    # Single directory, get its contents
-                    sub_files = self.get_repo_structure(repo_name, contents.path, ref, max_depth - 1)
-                    files.extend(sub_files)
+                # Recursive method (original implementation) as fallback
+                files = self._get_repo_structure_recursive(repo, repo_name, path, ref, max_depth, skip_dirs)
+            
+            # Cache the result (only for root path)
+            if path == "":
+                cache_key = self._get_cache_key(repo_name, ref, max_depth)
+                _repo_structure_cache[cache_key] = (files.copy(), datetime.utcnow())
+                # Limit cache size to prevent memory issues (keep last 50 entries)
+                if len(_repo_structure_cache) > 50:
+                    # Remove oldest entry
+                    oldest_key = min(_repo_structure_cache.keys(), 
+                                   key=lambda k: _repo_structure_cache[k][1])
+                    del _repo_structure_cache[oldest_key]
             
             return files
+            
         except GithubException as e:
             print(f"Error getting repo structure: {e} (status: {e.status})")
             if e.status == 404:
@@ -321,6 +352,139 @@ class GithubIntegration:
             print(f"Error getting repo structure: {e}")
             import traceback
             traceback.print_exc()
+            return []
+    
+    def _get_cache_key(self, repo_name: str, ref: str, max_depth: int) -> str:
+        """Generate a cache key for repository structure."""
+        key_str = f"{repo_name}:{ref}:{max_depth}"
+        return hashlib.md5(key_str.encode()).hexdigest()
+    
+    def _get_repo_structure_via_tree(self, repo, ref: str, max_depth: int, skip_dirs: set) -> list[str]:
+        """
+        Get repository structure using GitHub tree API (much faster for large repos).
+        Gets entire tree in 1-2 API calls instead of hundreds.
+        """
+        try:
+            # Get the branch/commit SHA
+            try:
+                branch = repo.get_branch(ref)
+                commit_sha = branch.commit.sha
+            except:
+                # Try as commit SHA directly
+                commit_sha = ref
+            
+            # Use direct API call for tree (PyGithub doesn't support recursive trees well)
+            # Get the token from the client
+            token = None
+            if self._cached_token:
+                token = self._cached_token
+            elif self.access_token:
+                token = self.access_token
+            else:
+                # Try to get token from installation
+                token = self._get_installation_token()
+            
+            if not token:
+                raise Exception("No authentication token available")
+            
+            # Get the tree recursively via direct API call
+            tree_url = f"https://api.github.com/repos/{repo.full_name}/git/trees/{commit_sha}?recursive=1"
+            headers = {
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            
+            import requests
+            print(f"   📥 Fetching repository tree via API (this may take a moment for large repos)...")
+            response = requests.get(tree_url, headers=headers, timeout=60)
+            
+            if response.status_code == 200:
+                tree_data = response.json()
+                
+                # Check if tree was truncated (GitHub limits to 100,000 entries)
+                truncated = tree_data.get("truncated", False)
+                if truncated:
+                    print(f"   ⚠️  Tree was truncated (repo too large). Using recursive fallback method.")
+                    raise Exception("Tree truncated - repository too large for single API call")
+                
+                all_paths = []
+                tree_items = tree_data.get("tree", [])
+                print(f"   📊 Processing {len(tree_items)} tree items...")
+                
+                for item in tree_items:
+                    item_path = item.get("path", "")
+                    item_type = item.get("type", "")
+                    
+                    # Only include files (not directories)
+                    if item_type == "blob":  # blob = file in Git
+                        # Check depth
+                        depth = item_path.count("/")
+                        if depth < max_depth:
+                            # Skip files in ignored directories
+                            path_parts = item_path.split("/")
+                            if not any(part in skip_dirs for part in path_parts):
+                                all_paths.append(item_path)
+                
+                print(f"   ✓ Retrieved {len(all_paths)} files via tree API (filtered from {len(tree_items)} items)")
+                return sorted(all_paths)
+            elif response.status_code == 404:
+                raise Exception(f"Commit {commit_sha} not found")
+            else:
+                raise Exception(f"Tree API returned status {response.status_code}: {response.text[:200]}")
+                
+        except Exception as e:
+            print(f"   Tree API error: {e}, falling back to recursive method")
+            raise
+    
+    def _get_repo_structure_recursive(self, repo, repo_name: str, path: str, ref: str, max_depth: int, skip_dirs: set) -> list[str]:
+        """
+        Original recursive method (fallback when tree API doesn't work).
+        Optimized to skip irrelevant directories early.
+        """
+        if max_depth <= 0:
+            return []
+        
+        # Skip ignored directories
+        if path:
+            path_parts = path.split("/")
+            if any(part in skip_dirs for part in path_parts):
+                return []
+        
+        try:
+            contents = repo.get_contents(path, ref=ref)
+            files = []
+            
+            if isinstance(contents, list):
+                for item in contents:
+                    if item.type == "file":
+                        files.append(item.path)
+                    elif item.type == "dir" and max_depth > 1:
+                        # Skip ignored directories
+                        dir_name = item.path.split("/")[-1]
+                        if dir_name not in skip_dirs:
+                            sub_files = self._get_repo_structure_recursive(
+                                repo, repo_name, item.path, ref, max_depth - 1, skip_dirs
+                            )
+                            files.extend(sub_files)
+            else:
+                if contents.type == "file":
+                    files.append(contents.path)
+                elif contents.type == "dir" and max_depth > 1:
+                    dir_name = contents.path.split("/")[-1]
+                    if dir_name not in skip_dirs:
+                        sub_files = self._get_repo_structure_recursive(
+                            repo, repo_name, contents.path, ref, max_depth - 1, skip_dirs
+                        )
+                        files.extend(sub_files)
+            
+            return files
+            
+        except GithubException as e:
+            if e.status != 404:  # Don't print for expected 404s
+                print(f"   Error getting contents for '{path}': {e.status}")
+            return []
+        except Exception as e:
+            print(f"   Error in recursive fetch for '{path}': {e}")
             return []
 
     def create_pr(self, repo_name: str, title: str, body: str, head_branch: str, base_branch: str = "main", changes: Dict[str, str] = None, draft: bool = False) -> Dict[str, Any]:

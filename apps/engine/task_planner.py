@@ -71,25 +71,51 @@ Affected Files: {', '.join(affected_files) if affected_files else 'None'}
 
 {f'Relevant Knowledge: {knowledge_context}' if knowledge_context else ''}
 
+CRITICAL PLANNING REQUIREMENTS:
+1. The FIRST step MUST be a comprehensive exploration phase that reads ALL affected files COMPLETELY
+2. Steps must be specific and actionable - no vague descriptions
+3. Each step that involves code changes MUST first read all relevant files
+4. Include steps to trace dependencies and understand the complete codebase context
+5. Only after full understanding should fixes be generated
+
 Generate a numbered list of steps. Each step should:
 1. Be specific and actionable
 2. Have a clear completion criterion
-3. List any files that need to be read/modified
+3. List ALL files that need to be read (not just the immediate affected ones)
 4. Have an expected output description
+5. For code modification steps, ensure previous steps have already read the necessary context
+
+MANDATORY FIRST STEPS:
+- Step 1 should read ALL affected files completely
+- Step 2 should trace dependencies and read related files
+- Step 3 should analyze patterns and understand the codebase structure
+- Only then proceed to fix generation
 
 Format as JSON array:
 [
     {{
         "step_number": 1,
-        "description": "Read and analyze affected files",
-        "files_to_read": ["file1.py", "file2.py"],
-        "expected_output": "Understanding of current code structure and error location"
+        "description": "Read and analyze ALL affected files completely to understand the full context",
+        "files_to_read": ["file1.py", "file2.py", "related_file.py"],
+        "expected_output": "Complete understanding of all affected file contents, their structure, and purpose"
     }},
     {{
         "step_number": 2,
-        "description": "Analyze dependencies and find root cause",
+        "description": "Trace dependencies: find and read all files that import or are imported by affected files",
+        "files_to_read": ["dependency1.py", "dependency2.py"],
+        "expected_output": "Complete dependency graph and understanding of how files interact"
+    }},
+    {{
+        "step_number": 3,
+        "description": "Analyze root cause in the context of the complete codebase",
         "files_to_read": [],
-        "expected_output": "Identified root cause with specific code location"
+        "expected_output": "Root cause analysis based on complete code understanding, not assumptions"
+    }},
+    {{
+        "step_number": 4,
+        "description": "Generate code fix based on complete understanding",
+        "files_to_read": ["file1.py", "file2.py"],
+        "expected_output": "Code fix that addresses root cause correctly"
     }},
     ...
 ]
@@ -514,14 +540,14 @@ Return ONLY the JSON array.
             root_cause: Root cause description
             
         Returns:
-            Simple plan with basic steps
+            Simple plan with mandatory exploration steps
         """
         return [
             {
                 "step_number": 1,
-                "description": f"Read affected files: {', '.join(affected_files[:3]) if affected_files else 'None'}",
-                "files_to_read": affected_files[:5] if affected_files else [],
-                "expected_output": "File contents and understanding of code structure",
+                "description": f"Read and understand ALL affected files completely: {', '.join(affected_files[:5]) if affected_files else 'None'}. Read the complete file contents, understand the code structure, purpose, and how each file fits into the system.",
+                "files_to_read": affected_files[:10] if affected_files else [],
+                "expected_output": "Complete understanding of all affected file contents, their structure, purpose, and code patterns",
                 "status": StepStatus.PENDING.value,
                 "result": None,
                 "errors": [],
@@ -531,9 +557,9 @@ Return ONLY the JSON array.
             },
             {
                 "step_number": 2,
-                "description": f"Analyze root cause: {root_cause[:100]}",
-                "files_to_read": [],
-                "expected_output": "Root cause analysis with specific code location",
+                "description": "Trace dependencies: Find and read all files that are imported by or import the affected files. Use find_symbol_definition for all referenced symbols.",
+                "files_to_read": [],  # Will be discovered during execution
+                "expected_output": "Complete dependency graph showing how files interact and where all symbols are defined",
                 "status": StepStatus.PENDING.value,
                 "result": None,
                 "errors": [],
@@ -543,9 +569,9 @@ Return ONLY the JSON array.
             },
             {
                 "step_number": 3,
-                "description": "Generate code fix",
-                "files_to_read": affected_files[:5] if affected_files else [],
-                "expected_output": "Fixed code with incremental edits",
+                "description": f"Analyze root cause in context of complete codebase: {root_cause[:150]}. Based on the files read and dependencies traced, identify the specific root cause.",
+                "files_to_read": [],
+                "expected_output": "Root cause analysis based on complete code understanding, not assumptions, with specific code locations",
                 "status": StepStatus.PENDING.value,
                 "result": None,
                 "errors": [],
@@ -555,9 +581,21 @@ Return ONLY the JSON array.
             },
             {
                 "step_number": 4,
-                "description": "Validate fix (syntax and impact)",
+                "description": "Generate code fix based on complete understanding. Use incremental edits to fix only what's necessary.",
+                "files_to_read": affected_files[:5] if affected_files else [],
+                "expected_output": "Code fix with incremental edits that addresses the root cause correctly",
+                "status": StepStatus.PENDING.value,
+                "result": None,
+                "errors": [],
+                "retry_count": 0,
+                "started_at": None,
+                "completed_at": None
+            },
+            {
+                "step_number": 5,
+                "description": "Validate fix: Check syntax, analyze impact on dependencies, and verify the fix is correct",
                 "files_to_read": [],
-                "expected_output": "Validation results confirming fix is correct",
+                "expected_output": "Validation results confirming fix is syntactically correct and doesn't break dependencies",
                 "status": StepStatus.PENDING.value,
                 "result": None,
                 "errors": [],

@@ -327,7 +327,9 @@ def run_robust_crew(
         workspace=workspace,
         context_manager=context_manager,
         knowledge_retriever=knowledge_retriever,
-        llm=coding_llm  # Pass LLM for replanning
+        llm=coding_llm,  # Pass LLM for replanning
+        github_integration=github_integration,
+        repo_name=repo_name
     )
     
     # Create agents
@@ -693,14 +695,14 @@ def _execute_with_codeact(
             lang_context += "When working with JavaScript files, use JavaScript syntax (no type annotations).\n"
     
     # Build prompt that encourages code generation
-    # Escape any braces in context/lang_context to prevent f-string format specifier errors
+    # Use string concatenation instead of f-string to avoid format specifier errors
     # This prevents issues if context contains things like {var: "value"} which would be interpreted as format specifiers
-    def escape_braces(text: str) -> str:
-        """Escape braces in text to prevent f-string format specifier errors."""
+    def escape_braces_for_display(text: str) -> str:
+        """Escape braces in text for display in the prompt."""
         if not text:
             return text
-        # Replace { with {{ and } with }}, but be careful not to double-escape
-        # First, replace }} with a placeholder, then { with {{, then } with }}, then restore }}
+        # Replace { with {{ and } with }} so they display as literal braces
+        # First, replace }} with a placeholder to avoid double-escaping
         text = text.replace('}}', '\0PLACEHOLDER_DOUBLE_CLOSE\0')
         text = text.replace('{{', '\0PLACEHOLDER_DOUBLE_OPEN\0')
         text = text.replace('{', '{{')
@@ -716,19 +718,16 @@ def _execute_with_codeact(
         print(f"⚠️  Warning: Error formatting available files: {e}")
         available_files_text = "Repository structure not available. Use list_files() function to explore."
     
-    # Escape all dynamic content that will be inserted into the f-string
-    safe_context = escape_braces(context)
-    safe_lang_context = escape_braces(lang_context)
-    safe_description = escape_braces(str(step.get('description', '')))
-    safe_available_files = escape_braces(available_files_text)
+    # Escape all dynamic content that will be inserted into the prompt
+    safe_context = escape_braces_for_display(context)
+    safe_lang_context = escape_braces_for_display(lang_context)
+    safe_description = escape_braces_for_display(str(step.get('description', '')))
+    safe_available_files = escape_braces_for_display(available_files_text)
     
-    # Build the prompt with try-catch to catch any f-string format specifier errors
+    # Build the prompt using string concatenation instead of f-string to avoid format specifier errors
+    # This way, we can safely include any text without worrying about f-string interpretation
     try:
-        codeact_prompt = f"""
-{safe_context}{safe_lang_context}
-
-Generate Python code to complete this step: {safe_description}
-
+        static_template = """
 ## SAFE EXECUTION ENVIRONMENT
 
 Your code will run in a restricted, safe execution environment with the following capabilities:
@@ -817,7 +816,34 @@ These functions are pre-imported and available directly:
    - Example: `result = list_files("src")` or `result = list_files()` for root directory
 
 ### Repository File Structure:
-{safe_available_files}
+"""
+        codeact_prompt = (
+            "\n" +
+            safe_context +
+            safe_lang_context +
+            "\n\n" +
+            "Generate Python code to complete this step: " +
+            safe_description +
+            static_template +
+            safe_available_files +
+            """
+
+### ⚠️ CRITICAL: USE PRE-LOADED FILE CONTENTS
+
+The context above includes a section "## PRE-LOADED FILE CONTENTS" with actual file contents that have been loaded for you.
+
+**BEFORE generating any code or making changes:**
+1. **READ AND UNDERSTAND** the pre-loaded file contents completely
+2. **DO NOT** skip reading these files - they contain the actual code context you need
+3. **DO NOT** make assumptions based on file names or error messages alone
+4. **TRACE DEPENDENCIES**: For any symbols you see in pre-loaded files, use find_symbol_definition() to find where they're defined
+5. **READ DEPENDENCIES**: Read any imported files or dependencies that are referenced
+
+**If the context includes pre-loaded files:**
+- Start by analyzing those files completely
+- Understand the code structure, patterns, and purpose
+- Only after full understanding should you generate fixes
+- If you need additional files not pre-loaded, use read_file() to read them
 
 **IMPORTANT**: Always use the exact file paths from the list above. Do NOT guess or assume file paths. If you need to find a file, use list_files() first.
 
@@ -886,6 +912,7 @@ These functions are pre-imported and available directly:
 
 Generate the Python code to complete the step now:
 """
+        )
     except ValueError as format_error:
         # Catch f-string format specifier errors when building the prompt
         error_msg = str(format_error)

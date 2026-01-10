@@ -30,7 +30,9 @@ class AgentLoop:
         context_manager: ContextManager,
         knowledge_retriever=None,
         max_iterations: int = None,
-        llm=None
+        llm=None,
+        github_integration=None,
+        repo_name: str = None
     ):
         """
         Initialize agent loop.
@@ -43,6 +45,9 @@ class AgentLoop:
             context_manager: ContextManager instance
             knowledge_retriever: Optional KnowledgeRetriever instance
             max_iterations: Maximum iterations (default from env or 50)
+            llm: Optional LLM for replanning
+            github_integration: Optional GitHub integration for file access
+            repo_name: Optional repository name for file access
         """
         self.incident_id = incident_id
         self.event_stream = event_stream
@@ -52,6 +57,8 @@ class AgentLoop:
         self.knowledge_retriever = knowledge_retriever
         self.max_iterations = max_iterations or int(os.getenv("MAX_AGENT_ITERATIONS", "50"))
         self.llm = llm  # LLM for replanning
+        self.github_integration = github_integration
+        self.repo_name = repo_name
         
         self.current_iteration = 0
         self.consecutive_failures = 0
@@ -240,18 +247,39 @@ class AgentLoop:
                 category="root_cause"
             )
         
-        # Add affected files
+        # Pre-load file contents for files mentioned in the step
+        # This is critical to prevent agents from making assumptions
+        files_to_preload = set()
+        if current_step.get("files_to_read"):
+            files_to_preload.update(current_step["files_to_read"])
         if self.current_context.get("affected_files"):
-            files_info = f"Affected files: {', '.join(self.current_context['affected_files'])}"
+            files_to_preload.update(self.current_context["affected_files"])
+        
+        # Pre-load actual file contents (not just paths)
+        if files_to_preload:
+            file_contents_context = self._preload_file_contents(list(files_to_preload))
+            if file_contents_context:
+                self.context_manager.add_context(
+                    file_contents_context,
+                    priority=9,  # High priority - actual code context
+                    category="files"
+                )
+        
+        # Also add file paths list for reference
+        if self.current_context.get("affected_files") or current_step.get("files_to_read"):
+            all_files = set(self.current_context.get("affected_files", []))
+            if current_step.get("files_to_read"):
+                all_files.update(current_step["files_to_read"])
+            files_info = f"Files to analyze: {', '.join(sorted(all_files))}"
             self.context_manager.add_context(
                 files_info,
-                priority=9,
+                priority=8,
                 category="files"
             )
         
         # Add memory if available
         if self.current_context.get("memory_data"):
-            memory_text = f"Past fixes: {str(self.current_context['memory_data'])[:500]}"
+            memory_text = self._format_memory_context(self.current_context["memory_data"])
             self.context_manager.add_context(
                 memory_text,
                 priority=7,
@@ -290,6 +318,112 @@ class AgentLoop:
             current_step=current_step,
             workspace_state=workspace_state
         )
+    
+    def _preload_file_contents(self, file_paths: List[str]) -> str:
+        """
+        Pre-load file contents from GitHub to provide full context.
+        
+        Args:
+            file_paths: List of file paths to load
+            
+        Returns:
+            Formatted string with file contents
+        """
+        if not file_paths:
+            return ""
+        
+        # Get GitHub integration - prefer stored instance, fallback to context
+        github_integration = self.github_integration
+        repo_name = self.repo_name
+        ref = "main"
+        
+        if not github_integration or not repo_name:
+            # Try to get from agent tools context as fallback
+            try:
+                from code_execution_tools import get_context as get_tools_context
+                tools_ctx = get_tools_context()
+                github_integration = github_integration or tools_ctx.get("github_integration")
+                repo_name = repo_name or tools_ctx.get("repo_name")
+                ref = tools_ctx.get("ref", "main")
+            except Exception:
+                pass
+        
+        if not github_integration or not repo_name:
+            return ""  # Cannot pre-load without GitHub integration
+        
+        contents_parts = []
+        contents_parts.append("## PRE-LOADED FILE CONTENTS (Read these files completely before making changes):")
+        contents_parts.append("")
+        
+        loaded_count = 0
+        max_files_to_load = 10  # Limit to prevent context overflow
+        max_file_size = 2000  # Limit file size (lines) to prevent context overflow
+        
+        for file_path in file_paths[:max_files_to_load]:
+            try:
+                content = github_integration.get_file_contents(repo_name, file_path, ref)
+                if content:
+                    lines = content.split('\n')
+                    file_preview = content
+                    
+                    # If file is too large, show first and last portions
+                    if len(lines) > max_file_size:
+                        file_preview = '\n'.join(lines[:max_file_size//2]) + f"\n\n... ({len(lines) - max_file_size} lines omitted) ...\n\n" + '\n'.join(lines[-max_file_size//2:])
+                    
+                    contents_parts.append(f"### File: {file_path}")
+                    contents_parts.append(f"```")
+                    contents_parts.append(file_preview)
+                    contents_parts.append(f"```")
+                    contents_parts.append("")
+                    loaded_count += 1
+                else:
+                    contents_parts.append(f"### File: {file_path}")
+                    contents_parts.append(f"⚠️ Could not load file contents (file may not exist or may be inaccessible)")
+                    contents_parts.append("")
+            except Exception as e:
+                contents_parts.append(f"### File: {file_path}")
+                contents_parts.append(f"⚠️ Error loading file: {str(e)}")
+                contents_parts.append("")
+        
+        if loaded_count == 0:
+            return ""  # No files loaded
+        
+        if len(file_paths) > max_files_to_load:
+            contents_parts.append(f"Note: Only showing first {max_files_to_load} files. Additional files should be read using read_file() tool.")
+        
+        contents_parts.append("**IMPORTANT**: Read and understand ALL file contents above before making any changes. Do not make assumptions based on file names alone.")
+        
+        return "\n".join(contents_parts)
+    
+    def _format_memory_context(self, memory_data: Dict[str, Any]) -> str:
+        """
+        Format memory data for context.
+        
+        Args:
+            memory_data: Memory data dictionary
+            
+        Returns:
+            Formatted string
+        """
+        parts = []
+        
+        if memory_data.get("known_fixes"):
+            parts.append("### Known Fixes from Past Incidents:")
+            for i, fix in enumerate(memory_data["known_fixes"][:3], 1):
+                desc = fix.get('description', 'No description')
+                patch = fix.get('patch', '')[:300]  # Limit patch preview
+                parts.append(f"Fix #{i}: {desc}")
+                if patch:
+                    parts.append(f"  Patch preview: {patch}...")
+            parts.append("")
+        
+        if memory_data.get("past_errors"):
+            parts.append("### Past Error Context:")
+            for i, err in enumerate(memory_data["past_errors"][:2], 1):
+                context = err.get("context", "")[:500]
+                parts.append(f"Context #{i}: {context}...")
+        
+        return "\n".join(parts) if parts else "No memory context available."
     
     def _observe_result(
         self,
