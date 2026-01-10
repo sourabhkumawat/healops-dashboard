@@ -862,7 +862,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     pass
                 
                 if not bot_token:
-                return
+                    return
             
             slack_service = SlackService(bot_token)
             
@@ -893,9 +893,9 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     # Continue to post response anyway
                 
                 # Post the actual response
-            slack_service.client.chat_postMessage(
-                channel=channel_id,
-                text=response_text,
+                slack_service.client.chat_postMessage(
+                    channel=channel_id,
+                    text=response_text,
                     thread_ts=ts
                 )
                 print(f"✅ Posted response message")
@@ -906,7 +906,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     channel=channel_id,
                     text=response_text,
                     thread_ts=ts
-            )
+                )
             
         finally:
             db.close()
