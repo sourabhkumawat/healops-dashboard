@@ -552,23 +552,23 @@ async def slack_events(request: Request):
             if not timestamp or not signature:
                 raise HTTPException(status_code=401, detail="Missing Slack signature headers")
             
-                # Check timestamp to prevent replay attacks (5 minute window)
-                try:
-                    if abs(time.time() - int(timestamp)) > 60 * 5:
-                        raise HTTPException(status_code=400, detail="Request timestamp too old")
-                except ValueError:
+            # Check timestamp to prevent replay attacks (5 minute window)
+            try:
+                if abs(time.time() - int(timestamp)) > 60 * 5:
+                    raise HTTPException(status_code=400, detail="Request timestamp too old")
+            except ValueError:
                 raise HTTPException(status_code=400, detail="Invalid timestamp format")
             
-                # Verify signature
-                sig_basestring = f"v0:{timestamp}:{body_str}"
-                computed_signature = "v0=" + hmac.new(
-                    signing_secret.encode(),
-                    sig_basestring.encode(),
-                    hashlib.sha256
-                ).hexdigest()
-                
-                if not hmac.compare_digest(computed_signature, signature):
-                    raise HTTPException(status_code=401, detail="Invalid Slack signature")
+            # Verify signature
+            sig_basestring = f"v0:{timestamp}:{body_str}"
+            computed_signature = "v0=" + hmac.new(
+                signing_secret.encode(),
+                sig_basestring.encode(),
+                hashlib.sha256
+            ).hexdigest()
+            
+            if not hmac.compare_digest(computed_signature, signature):
+                raise HTTPException(status_code=401, detail="Invalid Slack signature")
         
         # Handle event callbacks
         if data.get("type") == "event_callback":
