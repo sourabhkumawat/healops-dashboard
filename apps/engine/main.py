@@ -577,8 +577,8 @@ async def slack_events(request: Request):
             
             print(f"📥 Received Slack event: type={event_type}, channel={event.get('channel', 'unknown')}")
             
-            # Handle app mentions
-            if event_type == "app_mentions":
+            # Handle app mentions (Slack sends "app_mention" singular, not "app_mentions")
+            if event_type == "app_mention" or event_type == "app_mentions":
                 print(f"🔔 App mention detected: {event.get('text', '')[:100]}...")
                 await handle_slack_mention(event, data.get("team_id"))
                 return {"status": "ok"}
