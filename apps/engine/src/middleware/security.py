@@ -89,6 +89,8 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         # GitHub OAuth flow (user is authenticated by GitHub, not us yet)
         "/integrations/github/callback",
         "/integrations/github/authorize",
+        # GitHub webhooks (verified via GitHub signature, not JWT)
+        "/integrations/github/webhook",
         # Slack webhooks (verified via Slack signature, not JWT)
         "/slack/events",
         "/slack/interactive",

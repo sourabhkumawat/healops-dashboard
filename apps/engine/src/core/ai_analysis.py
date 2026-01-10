@@ -1040,6 +1040,68 @@ Only include files that need changes. Provide the COMPLETE file content for each
                 pr_url = pr_result.get("pr_url")
                 pr_number = pr_result.get("pr_number")
                 
+                # Track PR created by Alex (agent) for QA review
+                try:
+                    from src.database.models import AgentPR, AgentEmployee
+                    # Find Alex (Alexandra Chen) agent employee
+                    alex_agent = db.query(AgentEmployee).filter(
+                        AgentEmployee.email == "alexandra.chen@healops.work"
+                    ).first()
+                    
+                    if alex_agent:
+                        # Store PR tracking record
+                        agent_pr = AgentPR(
+                            pr_number=pr_number,
+                            repo_name=repo_name,
+                            pr_url=pr_url,
+                            title=pr_title,
+                            head_branch=branch_name,
+                            base_branch=default_branch,
+                            agent_employee_id=alex_agent.id,
+                            agent_name=alex_agent.name,
+                            incident_id=incident.id,
+                            qa_review_status="pending"
+                        )
+                        db.add(agent_pr)
+                        db.commit()
+                        db.refresh(agent_pr)
+                        print(f"✅ Tracked PR #{pr_number} created by {alex_agent.name} for QA review")
+                        
+                        # Trigger QA review asynchronously
+                        try:
+                            from src.agents.qa_orchestrator import review_pr_for_alex
+                            import asyncio
+                            # Get integration_id from the github_integration if possible
+                            integration_id = None
+                            if hasattr(github_integration, 'installation_id') and github_integration.installation_id:
+                                from src.database.models import Integration
+                                integration = db.query(Integration).filter(
+                                    Integration.installation_id == github_integration.installation_id
+                                ).first()
+                                if integration:
+                                    integration_id = integration.id
+                            
+                            # Trigger QA review in background
+                            asyncio.create_task(
+                                review_pr_for_alex(
+                                    repo_name=repo_name,
+                                    pr_number=pr_number,
+                                    user_id=incident.user_id,
+                                    integration_id=integration_id,
+                                    db=db
+                                )
+                            )
+                        except Exception as e:
+                            print(f"⚠️  Failed to trigger QA review: {e}")
+                            # Continue anyway - webhook will also trigger review
+                    else:
+                        print(f"⚠️  Alex agent not found in database - PR won't be tracked for QA review")
+                except Exception as e:
+                    print(f"⚠️  Failed to track PR for QA review: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Continue anyway - the PR is still created
+                
                 # MEMORY: Store the successful fix with workspace context for learning
                 try:
                     print(f"🧠 Storing fix in CodeMemory with workspace context for future learning...")
@@ -1694,6 +1756,62 @@ This PR was generated using the enhanced multi-agent system with:
                                             changes=changes,
                                             draft=is_draft
                                         )
+                                        
+                                        # Track PR created by Alex for QA review
+                                        if pr_result.get("status") == "success":
+                                            try:
+                                                from src.database.models import AgentPR, AgentEmployee
+                                                pr_number = pr_result.get("pr_number")
+                                                pr_url = pr_result.get("pr_url")
+                                                
+                                                # Find Alex agent
+                                                alex_agent = db.query(AgentEmployee).filter(
+                                                    AgentEmployee.email == "alexandra.chen@healops.work"
+                                                ).first()
+                                                
+                                                if alex_agent:
+                                                    agent_pr = AgentPR(
+                                                        pr_number=pr_number,
+                                                        repo_name=repo_name,
+                                                        pr_url=pr_url,
+                                                        title=f"Fix: {incident.title} (Enhanced AI)" + (" [DRAFT]" if is_draft else ""),
+                                                        head_branch=f"healops-enhanced-fix-{incident.id}",
+                                                        base_branch="main",
+                                                        agent_employee_id=alex_agent.id,
+                                                        agent_name=alex_agent.name,
+                                                        incident_id=incident.id,
+                                                        qa_review_status="pending"
+                                                    )
+                                                    db.add(agent_pr)
+                                                    db.commit()
+                                                    print(f"✅ Tracked Enhanced AI PR #{pr_number} created by {alex_agent.name} for QA review")
+                                                    
+                                                    # Trigger QA review
+                                                    try:
+                                                        from src.agents.qa_orchestrator import review_pr_for_alex
+                                                        import asyncio
+                                                        integration_id = None
+                                                        if hasattr(github_integration, 'installation_id') and github_integration.installation_id:
+                                                            from src.database.models import Integration
+                                                            integration = db.query(Integration).filter(
+                                                                Integration.installation_id == github_integration.installation_id
+                                                            ).first()
+                                                            if integration:
+                                                                integration_id = integration.id
+                                                        
+                                                        asyncio.create_task(
+                                                            review_pr_for_alex(
+                                                                repo_name=repo_name,
+                                                                pr_number=pr_number,
+                                                                user_id=incident.user_id,
+                                                                integration_id=integration_id,
+                                                                db=db
+                                                            )
+                                                        )
+                                                    except Exception as e:
+                                                        print(f"⚠️  Failed to trigger QA review: {e}")
+                                            except Exception as e:
+                                                print(f"⚠️  Failed to track Enhanced AI PR for QA review: {e}")
                                         
                                         if pr_result.get("status") == "success":
                                             result["pr_url"] = pr_result.get("pr_url")

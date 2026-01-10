@@ -31,7 +31,8 @@ from src.agents.prompts import (
     SYNTAX_VALIDATOR_PROMPT,
     IMPACT_ANALYZER_PROMPT,
     PATTERN_CONSISTENCY_VALIDATOR_PROMPT,
-    DECISION_MAKER_PROMPT
+    DECISION_MAKER_PROMPT,
+    QA_REVIEWER_PROMPT
 )
 from src.tools.coding import (
     read_file,
@@ -43,6 +44,16 @@ from src.tools.coding import (
     validate_code,
     get_repo_structure,
     retrieve_memory_context
+)
+from src.tools.qa_review import (
+    review_pr,
+    get_pr_file_contents,
+    comment_on_pr,
+    request_pr_changes,
+    approve_pr,
+    analyze_code_quality,
+    check_antipatterns,
+    validate_solution
 )
 
 # LLM Configuration
@@ -235,6 +246,35 @@ def create_validation_agents() -> tuple:
     return syntax_validator, impact_analyzer, pattern_consistency_validator, decision_maker
 
 # ============================================================================
+# QA Review Phase Agents
+# ============================================================================
+
+def create_qa_agents() -> tuple:
+    """Create agents for QA review phase."""
+    
+    qa_reviewer = Agent(
+        role='QA Reviewer',
+        goal='Review pull requests, identify code issues, antipatterns, and ensure best practices',
+        backstory=QA_REVIEWER_PROMPT,
+        verbose=True,
+        allow_delegation=False,
+        llm=coding_llm,  # Best model for code review and analysis
+        tools=[
+            review_pr,
+            get_pr_file_contents,
+            comment_on_pr,
+            request_pr_changes,
+            approve_pr,
+            analyze_code_quality,
+            check_antipatterns,
+            validate_solution,
+            read_file
+        ]
+    )
+    
+    return (qa_reviewer,)
+
+# ============================================================================
 # Convenience Functions
 # ============================================================================
 
@@ -243,6 +283,7 @@ def create_all_enhanced_agents() -> dict:
     exploration = create_exploration_agents()
     fix_generation = create_fix_generation_agents()
     validation = create_validation_agents()
+    qa_review = create_qa_agents()
     
     return {
         "exploration": {
@@ -261,6 +302,9 @@ def create_all_enhanced_agents() -> dict:
             "impact_analyzer": validation[1],
             "pattern_consistency_validator": validation[2],
             "decision_maker": validation[3]
+        },
+        "qa_review": {
+            "qa_reviewer": qa_review[0]
         }
     }
 

@@ -2665,6 +2665,133 @@ def remove_service_mapping(integration_id: int, service_name: str, request: Requ
         "service_mappings": integration.config.get("service_mappings", {})
     }
 
+# ============================================================================
+# GitHub Webhooks
+# ============================================================================
+
+@app.post("/integrations/github/webhook")
+async def github_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Handle GitHub webhook events, particularly PR events from Alex.
+    Triggers QA review when Alex creates or updates a PR.
+    """
+    try:
+        import hmac
+        import hashlib
+        
+        # Read body
+        body_bytes = await request.body()
+        body_str = body_bytes.decode('utf-8')
+        
+        # Verify GitHub webhook signature (optional but recommended)
+        github_webhook_secret = os.getenv("GITHUB_WEBHOOK_SECRET")
+        if github_webhook_secret:
+            signature_header = request.headers.get("X-Hub-Signature-256")
+            if signature_header:
+                expected_signature = hmac.new(
+                    github_webhook_secret.encode(),
+                    body_bytes,
+                    hashlib.sha256
+                ).hexdigest()
+                actual_signature = signature_header.replace("sha256=", "")
+                if not hmac.compare_digest(expected_signature, actual_signature):
+                    print("⚠️  GitHub webhook signature verification failed")
+                    raise HTTPException(status_code=401, detail="Invalid signature")
+        
+        # Parse webhook payload
+        try:
+            payload = json.loads(body_str)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
+        
+        event_type = request.headers.get("X-GitHub-Event")
+        print(f"📥 Received GitHub webhook: event_type={event_type}")
+        
+        # Handle pull request events
+        if event_type == "pull_request":
+            action = payload.get("action")
+            pr_data = payload.get("pull_request", {})
+            
+            if action in ["opened", "synchronize"]:  # PR created or updated
+                pr_number = pr_data.get("number")
+                repo_name = payload.get("repository", {}).get("full_name")
+                
+                print(f"🔔 PR #{pr_number} {action} in {repo_name}")
+                
+                # Check if PR was created by Alex using database tracking
+                # Since Alex doesn't have a GitHub account, PRs are created by HealOps app
+                # We track this in the AgentPR table
+                from src.database.models import AgentPR, AgentEmployee
+                
+                agent_pr = db.query(AgentPR).filter(
+                    AgentPR.pr_number == pr_number,
+                    AgentPR.repo_name == repo_name
+                ).first()
+                
+                if not agent_pr:
+                    print(f"   PR #{pr_number} is not tracked as created by Alex. Skipping review.")
+                    return {"status": "ok", "message": "PR not tracked as created by Alex, skipping review"}
+                
+                # Verify it's by Alex
+                alex_agent = db.query(AgentEmployee).filter(
+                    AgentEmployee.id == agent_pr.agent_employee_id,
+                    AgentEmployee.email == "alexandra.chen@healops.work"
+                ).first()
+                
+                if not alex_agent:
+                    print(f"   PR #{pr_number} is not by Alex. Skipping review.")
+                    return {"status": "ok", "message": "PR not by Alex, skipping review"}
+                
+                print(f"✅ PR #{pr_number} confirmed to be created by {alex_agent.name}")
+                
+                # Find integration for this repository
+                integration = db.query(Integration).filter(
+                    Integration.provider == "GITHUB",
+                    Integration.status == "ACTIVE"
+                ).first()
+                
+                if not integration:
+                    print("⚠️  No active GitHub integration found")
+                    return {"status": "ok", "message": "No active GitHub integration"}
+                
+                # Trigger QA review asynchronously
+                print(f"🚀 Triggering QA review for PR #{pr_number} by {alex_agent.name}")
+                from src.agents.qa_orchestrator import review_pr_for_alex
+                import asyncio
+                
+                # Run review in background
+                asyncio.create_task(
+                    review_pr_for_alex(
+                        repo_name=repo_name,
+                        pr_number=pr_number,
+                        integration_id=integration.id,
+                        user_id=integration.user_id,
+                        db=db
+                    )
+                )
+                
+                return {
+                    "status": "ok",
+                    "message": f"QA review triggered for PR #{pr_number}",
+                    "pr_number": pr_number,
+                    "repo": repo_name
+                }
+        
+        # Handle ping event (webhook setup)
+        elif event_type == "ping":
+            print("✅ GitHub webhook ping received - webhook is configured correctly")
+            return {"status": "ok", "message": "Webhook is active"}
+        
+        return {"status": "ok", "message": f"Event {event_type} received but not handled"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error handling GitHub webhook: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error processing webhook: {str(e)}")
+
 @app.get("/services")
 def list_services(request: Request = None, db: Session = Depends(get_db)):
     """Get list of unique service names from logs and incidents for the authenticated user."""

@@ -102,6 +102,26 @@ AGENT_ROLES = {
             "approval_workflow"
         ],
         "description": "Ensures all actions are safe, reversible, and compliant"
+    },
+    "qa_reviewer": {
+        "name": "Morgan Taylor",
+        "email": "morgan.taylor@healops.work",
+        "display_name": "Morgan Taylor",
+        "role": "Senior QA Engineer",
+        "department": "QA",
+        "crewai_role": "qa_reviewer",
+        "agent_type": "qa",
+        "capabilities": [
+            "pr_review",
+            "code_quality_analysis",
+            "antipattern_detection",
+            "best_practices_validation",
+            "log_analysis",
+            "solution_validation",
+            "pr_comments",
+            "code_structure_analysis"
+        ],
+        "description": "Expert at reviewing PRs, detecting code issues, antipatterns, and ensuring code quality and best practices"
     }
 }
 
@@ -241,10 +261,26 @@ def setup_slack_integration(
     print("="*60)
     
     # Check for Slack bot token in environment
-    slack_bot_token = os.getenv("SLACK_BOT_TOKEN")
+    # Try agent-specific token first (e.g., SLACK_BOT_TOKEN_ALEX, SLACK_BOT_TOKEN_MORGAN)
+    # Then fall back to generic SLACK_BOT_TOKEN
+    agent_token_var = None
+    if "alex" in agent_name.lower() or "alexandra" in agent_name.lower():
+        agent_token_var = os.getenv("SLACK_BOT_TOKEN_ALEX")
+    elif "morgan" in agent_name.lower() or "qa" in agent_role.lower():
+        agent_token_var = os.getenv("SLACK_BOT_TOKEN_MORGAN")
+    
+    slack_bot_token = agent_token_var or os.getenv("SLACK_BOT_TOKEN")
     
     if not slack_bot_token:
-        print("\n⚠️  SLACK_BOT_TOKEN not found in environment variables.")
+        print("\n⚠️  Slack bot token not found in environment variables.")
+        print(f"\nFor {agent_name} ({agent_role}):")
+        print("\nOption 1: Use agent-specific token (recommended for separate bots):")
+        if "alex" in agent_name.lower() or "alexandra" in agent_name.lower():
+            print("   export SLACK_BOT_TOKEN_ALEX='xoxb-your-token-for-alex'")
+        elif "morgan" in agent_name.lower() or "qa" in agent_role.lower():
+            print("   export SLACK_BOT_TOKEN_MORGAN='xoxb-your-token-for-morgan'")
+        print("\nOption 2: Use shared token (if using same Slack App for all agents):")
+        print("   export SLACK_BOT_TOKEN='xoxb-your-shared-token'")
         print("\nTo setup Slack integration:")
         print("1. Create a Slack App at https://api.slack.com/apps")
         print("2. Install the app to your workspace (OAuth & Permissions)")
@@ -257,7 +293,7 @@ def setup_slack_integration(
         print("   - im:read")
         print("   - im:write")
         print("4. Copy the Bot User OAuth Token (starts with xoxb-)")
-        print("5. Set environment variable: export SLACK_BOT_TOKEN='xoxb-your-token'")
+        print("5. Set the appropriate environment variable")
         print("\n📖 See SLACK_ONBOARDING_GUIDE.md for detailed instructions")
         print("\nFor now, continuing without Slack integration...")
         return {
@@ -265,7 +301,8 @@ def setup_slack_integration(
             "message": "Slack bot token not configured"
         }
     
-    print(f"✅ Found Slack bot token (prefix: {slack_bot_token[:12]}...)")
+    token_source = "agent-specific" if agent_token_var else "shared"
+    print(f"✅ Found Slack bot token (prefix: {slack_bot_token[:12]}..., source: {token_source})")
     
     # Import Slack service
     try:

@@ -217,5 +217,35 @@ class AgentEmployee(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
+class AgentPR(Base):
+    """Track PRs created by agents (like Alex) for QA review."""
+    __tablename__ = "agent_prs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    pr_number = Column(Integer, nullable=False, index=True)
+    repo_name = Column(String, nullable=False, index=True)  # "owner/repo"
+    pr_url = Column(String, nullable=True)
+    title = Column(String, nullable=True)
+    head_branch = Column(String, nullable=True)
+    base_branch = Column(String, nullable=True)
+    
+    # Agent who created the PR
+    agent_employee_id = Column(Integer, ForeignKey("agent_employees.id"), nullable=False, index=True)
+    agent_name = Column(String, nullable=False)  # e.g., "Alexandra Chen"
+    
+    # Related incident (if any)
+    incident_id = Column(Integer, ForeignKey("incidents.id"), nullable=True, index=True)
+    
+    # QA review status
+    qa_review_status = Column(String, default="pending")  # pending, in_review, reviewed, approved, changes_requested
+    qa_reviewed_by_id = Column(Integer, ForeignKey("agent_employees.id"), nullable=True)
+    qa_reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Metadata
+    pr_created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
+
 # Import new memory models so they are registered with Base
 from src.memory.models import AgentMemoryError, AgentMemoryFix, AgentRepoContext

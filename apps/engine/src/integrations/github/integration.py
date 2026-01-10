@@ -2,7 +2,7 @@
 GitHub integration for PR creation and code management.
 Supports both OAuth tokens (legacy) and GitHub App installations.
 """
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import os
 from datetime import datetime, timedelta
 from github import Github, GithubException
@@ -550,6 +550,285 @@ class GithubIntegration:
             
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    def get_pr_details(self, repo_name: str, pr_number: int) -> Dict[str, Any]:
+        """
+        Get details of a pull request.
+        
+        Args:
+            repo_name: "owner/repo"
+            pr_number: PR number
+            
+        Returns:
+            PR details including files changed, diffs, author, etc.
+        """
+        if not self.client:
+            return {"status": "error", "message": "Not authenticated"}
+        
+        try:
+            repo = self.client.get_repo(repo_name)
+            pr = repo.get_pull(pr_number)
+            
+            # Get files changed
+            files = []
+            for file in pr.get_files():
+                files.append({
+                    "filename": file.filename,
+                    "status": file.status,  # added, removed, modified, renamed
+                    "additions": file.additions,
+                    "deletions": file.deletions,
+                    "changes": file.changes,
+                    "patch": file.patch,  # Unified diff
+                    "raw_url": file.raw_url,
+                    "blob_url": file.blob_url
+                })
+            
+            # Get PR reviews (comments from reviewers)
+            reviews = []
+            for review in pr.get_reviews():
+                reviews.append({
+                    "id": review.id,
+                    "user": review.user.login if review.user else None,
+                    "state": review.state,  # APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED
+                    "body": review.body,
+                    "commit_id": review.commit_id
+                })
+            
+            # Get PR comments
+            comments = []
+            for comment in pr.get_issue_comments():
+                comments.append({
+                    "id": comment.id,
+                    "user": comment.user.login if comment.user else None,
+                    "body": comment.body,
+                    "created_at": comment.created_at.isoformat() if comment.created_at else None
+                })
+            
+            return {
+                "status": "success",
+                "pr_number": pr.number,
+                "title": pr.title,
+                "body": pr.body,
+                "state": pr.state,  # open, closed
+                "merged": pr.merged,
+                "author": pr.user.login if pr.user else None,
+                "created_at": pr.created_at.isoformat() if pr.created_at else None,
+                "updated_at": pr.updated_at.isoformat() if pr.updated_at else None,
+                "head_branch": pr.head.ref,
+                "base_branch": pr.base.ref,
+                "url": pr.html_url,
+                "files": files,
+                "reviews": reviews,
+                "comments": comments
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def get_pr_file_contents(self, repo_name: str, pr_number: int, file_path: str) -> Optional[str]:
+        """
+        Get file contents from a PR (from the head branch).
+        
+        Args:
+            repo_name: "owner/repo"
+            pr_number: PR number
+            file_path: Path to file in repo
+            
+        Returns:
+            File contents as string, or None if error
+        """
+        if not self.client:
+            return None
+        
+        try:
+            repo = self.client.get_repo(repo_name)
+            pr = repo.get_pull(pr_number)
+            head_sha = pr.head.sha
+            
+            contents = repo.get_contents(file_path, ref=head_sha)
+            if contents.encoding == "base64":
+                import base64
+                return base64.b64decode(contents.content).decode("utf-8")
+            return contents.decoded_content.decode("utf-8")
+        except Exception as e:
+            print(f"Error fetching PR file {file_path}: {e}")
+            return None
+    
+    def comment_on_pr(self, repo_name: str, pr_number: int, body: str, commit_id: Optional[str] = None, path: Optional[str] = None, line: Optional[int] = None, side: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Comment on a pull request.
+        Can be a general PR comment or an inline review comment.
+        
+        Args:
+            repo_name: "owner/repo"
+            pr_number: PR number
+            body: Comment text
+            commit_id: Optional commit SHA for inline comments
+            path: Optional file path for inline comments
+            line: Optional line number for inline comments
+            side: Optional side ("LEFT" for original, "RIGHT" for modified) for inline comments
+            
+        Returns:
+            Comment details if successful
+        """
+        if not self.client:
+            return {"status": "error", "message": "Not authenticated"}
+        
+        try:
+            repo = self.client.get_repo(repo_name)
+            pr = repo.get_pull(pr_number)
+            
+            # If all inline comment parameters are provided, create inline review comment
+            if commit_id and path and line is not None:
+                # Create review with inline comment
+                review = pr.create_review(
+                    body=body,
+                    event="COMMENT",  # COMMENT, APPROVE, REQUEST_CHANGES
+                    commit_id=commit_id
+                )
+                
+                # Add inline comment to review
+                # Note: PyGithub doesn't directly support inline comments in create_review
+                # We need to use the review comment endpoint
+                # For now, create a general review comment
+                # Full inline comment support would require direct API calls
+                
+                return {
+                    "status": "success",
+                    "review_id": review.id,
+                    "message": "Review comment created",
+                    "type": "review"
+                }
+            else:
+                # Create general PR comment
+                comment = pr.create_issue_comment(body)
+                return {
+                    "status": "success",
+                    "comment_id": comment.id,
+                    "message": "Comment created",
+                    "type": "general"
+                }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def request_pr_changes(self, repo_name: str, pr_number: int, body: str) -> Dict[str, Any]:
+        """
+        Request changes on a PR (reject and ask for fixes).
+        
+        Args:
+            repo_name: "owner/repo"
+            pr_number: PR number
+            body: Review comment body
+            
+        Returns:
+            Review details if successful
+        """
+        if not self.client:
+            return {"status": "error", "message": "Not authenticated"}
+        
+        try:
+            repo = self.client.get_repo(repo_name)
+            pr = repo.get_pull(pr_number)
+            
+            # Get the latest commit SHA
+            commits = list(pr.get_commits())
+            if not commits:
+                return {"status": "error", "message": "PR has no commits"}
+            
+            latest_commit = commits[-1]
+            
+            # Create review requesting changes
+            review = pr.create_review(
+                body=body,
+                event="REQUEST_CHANGES",
+                commit_id=latest_commit.sha
+            )
+            
+            return {
+                "status": "success",
+                "review_id": review.id,
+                "message": "Changes requested",
+                "state": review.state
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def approve_pr(self, repo_name: str, pr_number: int, body: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Approve a pull request.
+        
+        Args:
+            repo_name: "owner/repo"
+            pr_number: PR number
+            body: Optional approval comment
+            
+        Returns:
+            Review details if successful
+        """
+        if not self.client:
+            return {"status": "error", "message": "Not authenticated"}
+        
+        try:
+            repo = self.client.get_repo(repo_name)
+            pr = repo.get_pull(pr_number)
+            
+            # Get the latest commit SHA
+            commits = list(pr.get_commits())
+            if not commits:
+                return {"status": "error", "message": "PR has no commits"}
+            
+            latest_commit = commits[-1]
+            
+            # Create review approving PR
+            review = pr.create_review(
+                body=body or "✅ Approved by QA review",
+                event="APPROVE",
+                commit_id=latest_commit.sha
+            )
+            
+            return {
+                "status": "success",
+                "review_id": review.id,
+                "message": "PR approved",
+                "state": review.state
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def list_prs_by_author(self, repo_name: str, author: str, state: str = "open") -> List[Dict[str, Any]]:
+        """
+        List pull requests by author.
+        
+        Args:
+            repo_name: "owner/repo"
+            author: GitHub username of the author
+            state: PR state ("open", "closed", "all")
+            
+        Returns:
+            List of PRs created by the author
+        """
+        if not self.client:
+            return []
+        
+        try:
+            repo = self.client.get_repo(repo_name)
+            prs = repo.get_pulls(state=state, sort="created", direction="desc")
+            
+            author_prs = []
+            for pr in prs:
+                if pr.user and pr.user.login.lower() == author.lower():
+                    author_prs.append({
+                        "number": pr.number,
+                        "title": pr.title,
+                        "state": pr.state,
+                        "url": pr.html_url,
+                        "created_at": pr.created_at.isoformat() if pr.created_at else None,
+                        "author": pr.user.login if pr.user else None
+                    })
+            
+            return author_prs
+        except Exception as e:
+            print(f"Error listing PRs by author: {e}")
+            return []
 
 
 
