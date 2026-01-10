@@ -552,11 +552,11 @@ async def slack_events(request: Request):
             if not timestamp or not signature:
                 raise HTTPException(status_code=401, detail="Missing Slack signature headers")
             
-                # Check timestamp to prevent replay attacks (5 minute window)
-                try:
-                    if abs(time.time() - int(timestamp)) > 60 * 5:
-                        raise HTTPException(status_code=400, detail="Request timestamp too old")
-                except ValueError:
+            # Check timestamp to prevent replay attacks (5 minute window)
+            try:
+                if abs(time.time() - int(timestamp)) > 60 * 5:
+                    raise HTTPException(status_code=400, detail="Request timestamp too old")
+            except ValueError:
                 raise HTTPException(status_code=400, detail="Invalid timestamp format")
             
                 # Verify signature
@@ -880,7 +880,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     pass
                 
                 if not bot_token:
-                return
+                    return
             
             slack_service = SlackService(bot_token)
             
