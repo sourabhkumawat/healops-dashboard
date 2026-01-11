@@ -1718,9 +1718,10 @@ def _update_agent_employee_status(
         agent_employee.status = status
         agent_employee.updated_at = datetime.utcnow()
         
-        # Update current task
-        if current_task is not None:
-            agent_employee.current_task = current_task
+        # Update current task (always update, including clearing when None)
+        # Note: Since current_task is an optional parameter, we always update it
+        # when the function is called (even if None, which means clear the task)
+        agent_employee.current_task = current_task
         
         # Add completed task to history
         if task_completed:

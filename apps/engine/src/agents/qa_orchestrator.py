@@ -24,6 +24,11 @@ from src.database.models import AgentEmployee, Incident, LogEntry, AgentPR
 from src.services.slack.service import SlackService
 from crewai import Task, Crew
 from sqlalchemy.orm import Session
+from src.agents.orchestrator import (
+    _update_agent_employee_status,
+    AGENT_STATUS_AVAILABLE,
+    AGENT_STATUS_WORKING
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +139,15 @@ async def review_pr_for_alex(
         
         logger.info(f"Starting QA review for PR #{pr_number} created by {alex_agent.name}")
         
+        # Update QA agent status to "working"
+        task_description = f"Reviewing PR #{pr_number}: {pr_details.get('title', '')[:100]}"
+        _update_agent_employee_status(
+            db=db,
+            crewai_role="qa_reviewer",
+            status=AGENT_STATUS_WORKING,
+            current_task=task_description
+        )
+        
         # Initialize Slack service for QA agent
         slack_service = None
         if qa_agent.slack_bot_token:
@@ -159,6 +173,16 @@ async def review_pr_for_alex(
         # Get PR review data
         pr_review_data = review_pr(repo_name, pr_number, user_id, integration_id)
         if not pr_review_data.get("success"):
+            # Clear status if we can't proceed with review
+            try:
+                _update_agent_employee_status(
+                    db=db,
+                    crewai_role="qa_reviewer",
+                    status=AGENT_STATUS_AVAILABLE,
+                    current_task=None  # Clear current task
+                )
+            except Exception as status_error:
+                logger.warning(f"Failed to update QA agent status on early return: {status_error}")
             return {
                 "success": False,
                 "error": pr_review_data.get("error", "Failed to review PR")
@@ -284,6 +308,16 @@ Be thorough but constructive. Prioritize functional correctness and antipatterns
         agent_pr.last_reviewed_at = datetime.utcnow()
         db.commit()
         
+        # Update QA agent status back to "available" and clear current_task
+        completed_task_description = f"Reviewed PR #{pr_number}: {pr_details.get('title', '')[:100]}"
+        _update_agent_employee_status(
+            db=db,
+            crewai_role="qa_reviewer",
+            status=AGENT_STATUS_AVAILABLE,
+            current_task=None,  # Clear current task
+            task_completed=completed_task_description
+        )
+        
         # Notify in Slack that review is complete
         if slack_service and qa_agent.slack_channel_id:
             try:
@@ -333,6 +367,17 @@ Be thorough but constructive. Prioritize functional correctness and antipatterns
         
     except Exception as e:
         logger.error(f"Error during QA review: {e}", exc_info=True)
+        # Update QA agent status back to "available" on error
+        try:
+            _update_agent_employee_status(
+                db=db,
+                crewai_role="qa_reviewer",
+                status=AGENT_STATUS_AVAILABLE,
+                current_task=None  # Clear current task
+            )
+        except Exception as status_error:
+            logger.warning(f"Failed to update QA agent status on error: {status_error}")
+        
         return {
             "success": False,
             "error": str(e)
