@@ -113,15 +113,10 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         
         # CRITICAL: Check Slack endpoints FIRST before any other checks
         # Slack webhooks must bypass authentication - they use signature verification instead
+        # Make ALL /slack/* endpoints public to ensure webhooks work
         if path.startswith('/slack/'):
-            if path in self.PUBLIC_ENDPOINTS:
-                print(f"✅ AuthenticationMiddleware: Allowing Slack endpoint (public): {path}")
-                return await call_next(request)
-            # If path is not in PUBLIC_ENDPOINTS but starts with /slack/, still allow it
-            # This handles cases where path might be slightly different but still valid
-            if path == '/slack/events' or path == '/slack/interactive':
-                print(f"✅ AuthenticationMiddleware: Allowing Slack endpoint (fallback): {path}")
-                return await call_next(request)
+            print(f"✅ AuthenticationMiddleware: Allowing Slack endpoint (public): {path}")
+            return await call_next(request)
         
         # Allow public endpoints without authentication
         if path in self.PUBLIC_ENDPOINTS:

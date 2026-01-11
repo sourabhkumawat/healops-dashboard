@@ -579,6 +579,9 @@ async def slack_events(request: Request):
         import hashlib
         import time
         
+        print(f"📥 Received request to /slack/events from {request.client.host if request.client else 'unknown'}")
+        print(f"📋 Headers: X-Slack-Request-Timestamp={request.headers.get('X-Slack-Request-Timestamp', 'MISSING')}, X-Slack-Signature={'present' if request.headers.get('X-Slack-Signature') else 'MISSING'}")
+        
         # Read body once (can't read twice in FastAPI)
         body_bytes = await request.body()
         body_str = body_bytes.decode('utf-8')
@@ -587,6 +590,7 @@ async def slack_events(request: Request):
         try:
             data = json.loads(body_str)
         except json.JSONDecodeError:
+            print("❌ Invalid JSON payload received")
             raise HTTPException(status_code=400, detail="Invalid JSON payload")
         
         # Handle URL verification challenge FIRST (before signature verification)
@@ -602,18 +606,25 @@ async def slack_events(request: Request):
         
         # For all other requests, verify Slack request signature
         signing_secret = os.getenv("SLACK_SIGNING_SECRET")
-        if signing_secret:
+        if not signing_secret:
+            print("⚠️  WARNING: SLACK_SIGNING_SECRET not set - skipping signature verification")
+        else:
             timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
             signature = request.headers.get("X-Slack-Signature", "")
             
             if not timestamp or not signature:
+                print(f"❌ Missing Slack signature headers - timestamp: {'present' if timestamp else 'MISSING'}, signature: {'present' if signature else 'MISSING'}")
                 raise HTTPException(status_code=401, detail="Missing Slack signature headers")
             
             # Check timestamp to prevent replay attacks (5 minute window)
             try:
-                if abs(time.time() - int(timestamp)) > 60 * 5:
+                timestamp_int = int(timestamp)
+                time_diff = abs(time.time() - timestamp_int)
+                if time_diff > 60 * 5:
+                    print(f"❌ Request timestamp too old: {time_diff:.0f} seconds (max: 300)")
                     raise HTTPException(status_code=400, detail="Request timestamp too old")
-            except ValueError:
+            except ValueError as e:
+                print(f"❌ Invalid timestamp format: {timestamp} - {e}")
                 raise HTTPException(status_code=400, detail="Invalid timestamp format")
             
             # Verify signature
@@ -625,7 +636,11 @@ async def slack_events(request: Request):
             ).hexdigest()
             
             if not hmac.compare_digest(computed_signature, signature):
+                print(f"❌ Invalid Slack signature - computed: {computed_signature[:20]}..., received: {signature[:20]}...")
+                print(f"   Timestamp: {timestamp}, Body length: {len(body_str)}")
                 raise HTTPException(status_code=401, detail="Invalid Slack signature")
+            else:
+                print("✅ Slack signature verified successfully")
         
         # Handle event callbacks
         if data.get("type") == "event_callback":
