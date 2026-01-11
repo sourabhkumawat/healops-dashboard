@@ -524,6 +524,50 @@ async def agent_events_websocket(websocket: WebSocket, incident_id: int):
 # Slack Webhooks
 # ============================================================================
 
+def get_bot_token_for_agent(agent_name: str, agent_role: str = None, agent_stored_token: str = None) -> Optional[str]:
+    """
+    Get the appropriate Slack bot token for an agent.
+    
+    Priority:
+    1. Agent's stored token (decrypted if encrypted)
+    2. Agent-specific environment variable (SLACK_BOT_TOKEN_MORGAN, SLACK_BOT_TOKEN_ALEX)
+    3. Generic SLACK_BOT_TOKEN environment variable
+    
+    Args:
+        agent_name: Agent's name (e.g., "Morgan Taylor", "Alexandra Chen")
+        agent_role: Agent's role (e.g., "QA Engineer", "Senior Software Engineer")
+        agent_stored_token: Encrypted token stored in database (optional)
+    
+    Returns:
+        Bot token string or None if not found
+    """
+    # Try agent's stored token first (if provided)
+    if agent_stored_token:
+        try:
+            from src.auth.crypto_utils import decrypt_token
+            decrypted = decrypt_token(agent_stored_token)
+            if decrypted:
+                return decrypted
+        except Exception as e:
+            print(f"⚠️  Failed to decrypt stored token: {e}")
+    
+    # Try agent-specific environment variable
+    agent_token_var = None
+    agent_name_lower = agent_name.lower() if agent_name else ""
+    agent_role_lower = agent_role.lower() if agent_role else ""
+    
+    if "alex" in agent_name_lower or "alexandra" in agent_name_lower:
+        agent_token_var = os.getenv("SLACK_BOT_TOKEN_ALEX")
+    elif "morgan" in agent_name_lower or "qa" in agent_role_lower:
+        agent_token_var = os.getenv("SLACK_BOT_TOKEN_MORGAN")
+    
+    if agent_token_var:
+        return agent_token_var
+    
+    # Fallback to generic token
+    return os.getenv("SLACK_BOT_TOKEN")
+
+
 @app.post("/slack/events")
 async def slack_events(request: Request):
     """
@@ -862,35 +906,40 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                 return
             
             # Initialize Slack service
-            from src.auth.crypto_utils import decrypt_token
-            bot_token = None
+            # Get bot token using helper function (checks agent-specific tokens)
+            bot_token = get_bot_token_for_agent(
+                agent_name=agent_name_match.name,
+                agent_role=agent_name_match.role,
+                agent_stored_token=agent_name_match.slack_bot_token
+            )
             
-            # Try to get token from agent's stored token (encrypted)
-            if agent_name_match.slack_bot_token:
-                try:
-                    decrypted = decrypt_token(agent_name_match.slack_bot_token)
-                    if decrypted:
-                        bot_token = decrypted
-                        print(f"✅ Retrieved bot token from agent's stored token (decrypted successfully)")
-                    else:
-                        print(f"⚠️  Decryption returned empty string - token may be corrupted or encryption key changed")
-                        bot_token = None
-                except Exception as e:
-                    print(f"⚠️  Failed to decrypt stored token: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    bot_token = None
-            
-            # Fallback to environment variable
-            if not bot_token:
-                bot_token = os.getenv("SLACK_BOT_TOKEN")
-                if bot_token:
-                    print(f"✅ Using bot token from environment variable")
-            
-            if not bot_token:
+            if bot_token:
+                # Determine token source for logging
+                agent_name_lower = agent_name_match.name.lower()
+                agent_role_lower = agent_name_match.role.lower() if agent_name_match.role else ""
+                if agent_name_match.slack_bot_token:
+                    token_source = "stored (encrypted)"
+                elif ("morgan" in agent_name_lower or "qa" in agent_role_lower) and os.getenv("SLACK_BOT_TOKEN_MORGAN"):
+                    token_source = "SLACK_BOT_TOKEN_MORGAN"
+                elif ("alex" in agent_name_lower or "alexandra" in agent_name_lower) and os.getenv("SLACK_BOT_TOKEN_ALEX"):
+                    token_source = "SLACK_BOT_TOKEN_ALEX"
+                else:
+                    token_source = "SLACK_BOT_TOKEN"
+                print(f"✅ Retrieved bot token ({token_source})")
+            else:
                 print("⚠️  No Slack bot token available")
+                print(f"   Agent: {agent_name_match.name} ({agent_name_match.role})")
                 print(f"   Agent has stored token: {'YES' if agent_name_match.slack_bot_token else 'NO'}")
+                
+                # Check which tokens are set
+                agent_name_lower = agent_name_match.name.lower()
+                agent_role_lower = agent_name_match.role.lower() if agent_name_match.role else ""
+                if "morgan" in agent_name_lower or "qa" in agent_role_lower:
+                    print(f"   Environment variable SLACK_BOT_TOKEN_MORGAN: {'SET' if os.getenv('SLACK_BOT_TOKEN_MORGAN') else 'NOT SET'}")
+                elif "alex" in agent_name_lower or "alexandra" in agent_name_lower:
+                    print(f"   Environment variable SLACK_BOT_TOKEN_ALEX: {'SET' if os.getenv('SLACK_BOT_TOKEN_ALEX') else 'NOT SET'}")
                 print(f"   Environment variable SLACK_BOT_TOKEN: {'SET' if os.getenv('SLACK_BOT_TOKEN') else 'NOT SET'}")
+                
                 # Try to send error message using any available token
                 try:
                     # Last resort: try to use the raw token if it's not encrypted
@@ -1129,23 +1178,16 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
             
             agent = agents[0]  # Use first available agent
             
-            # Get bot token
-            from src.auth.crypto_utils import decrypt_token
-            bot_token = None
-            
-            if agent.slack_bot_token:
-                try:
-                    decrypted = decrypt_token(agent.slack_bot_token)
-                    if decrypted:
-                        bot_token = decrypted
-                except:
-                    pass
-            
-            if not bot_token:
-                bot_token = os.getenv("SLACK_BOT_TOKEN")
+            # Get bot token using helper function (checks agent-specific tokens)
+            bot_token = get_bot_token_for_agent(
+                agent_name=agent.name,
+                agent_role=agent.role,
+                agent_stored_token=agent.slack_bot_token
+            )
             
             if not bot_token:
                 print("⚠️  No Slack bot token available for thread reply")
+                print(f"   Agent: {agent.name} ({agent.role})")
                 return
             
             slack_service = SlackService(bot_token)
