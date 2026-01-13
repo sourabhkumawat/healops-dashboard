@@ -723,17 +723,108 @@ async def slack_events(request: Request):
                         return {"status": "ok"}
                     
                     # Check if this thread has bot messages (conversation context exists)
-                    # Only process if we have conversation context (meaning bot has responded before)
-                    # AND we haven't just responded to this thread
+                    # OR if the message mentions an agent name (handle even without context)
                     thread_id = thread_ts
-                    if thread_id in _conversation_contexts:
+                    event_text_lower = event_text.lower()
+                    
+                    # Check if message mentions an agent name
+                    mentions_agent = False
+                    try:
+                        from src.database.models import AgentEmployee
+                        from src.database.database import SessionLocal
+                        db = SessionLocal()
+                        try:
+                            agents = db.query(AgentEmployee).filter(
+                                AgentEmployee.slack_channel_id == channel_id
+                            ).all()
+                            
+                            if not agents:
+                                agents = db.query(AgentEmployee).all()
+                            
+                            for agent in agents:
+                                if not agent.name:
+                                    continue
+                                    
+                                agent_first_name = agent.name.split()[0].lower() if agent.name else ""
+                                agent_full_name = agent.name.lower() if agent.name else ""
+                                
+                                # Handle common nicknames/variations (same as mention handler)
+                                name_variations = [agent_first_name, agent_full_name]
+                                if agent_first_name == "alexandra":
+                                    name_variations.extend(["alex", " alex ", "alex "])
+                                elif agent_first_name == "morgan":
+                                    name_variations.append("morgan taylor")
+                                
+                                # Check if any variation matches
+                                for variation in name_variations:
+                                    if variation and variation in event_text_lower:
+                                        mentions_agent = True
+                                        print(f"✅ Thread reply mentions agent: {agent.name} (matched: '{variation}')")
+                                        break
+                                
+                                if mentions_agent:
+                                    break
+                        finally:
+                            db.close()
+                    except Exception as e:
+                        print(f"⚠️  Error checking agent mentions in thread: {e}")
+                    
+                    # Process if we have conversation context OR if message mentions an agent
+                    if thread_id in _conversation_contexts or mentions_agent:
                         print(f"💬 Thread reply detected: {event_text[:100]}...")
                         await handle_thread_reply(event, data.get("team_id"), thread_id)
                         return {"status": "ok"}
                     else:
-                        print(f"📢 Channel message in thread (no bot context): {event_text[:100]}...")
+                        print(f"📢 Channel message in thread (no bot context, no agent mention): {event_text[:100]}...")
                 else:
-                    print(f"📢 Channel message (not in thread): {event_text[:100]}...")
+                    # Handle regular channel messages that mention agent names (not in thread)
+                    # Check if message mentions an agent name
+                    event_text_lower = event_text.lower()
+                    mentions_agent = False
+                    try:
+                        from src.database.models import AgentEmployee
+                        from src.database.database import SessionLocal
+                        db = SessionLocal()
+                        try:
+                            agents = db.query(AgentEmployee).filter(
+                                AgentEmployee.slack_channel_id == channel_id
+                            ).all()
+                            
+                            if not agents:
+                                agents = db.query(AgentEmployee).all()
+                            
+                            for agent in agents:
+                                if not agent.name:
+                                    continue
+                                    
+                                agent_first_name = agent.name.split()[0].lower() if agent.name else ""
+                                agent_full_name = agent.name.lower() if agent.name else ""
+                                
+                                # Handle common nicknames/variations (same as mention handler)
+                                name_variations = [agent_first_name, agent_full_name]
+                                if agent_first_name == "alexandra":
+                                    name_variations.extend(["alex", " alex ", "alex "])
+                                elif agent_first_name == "morgan":
+                                    name_variations.append("morgan taylor")
+                                
+                                # Check if any variation matches
+                                for variation in name_variations:
+                                    if variation and variation in event_text_lower:
+                                        mentions_agent = True
+                                        print(f"✅ Channel message mentions agent: {agent.name} (matched: '{variation}')")
+                                        # Treat as a mention even if bot wasn't @mentioned
+                                        print(f"💬 Processing channel message as mention: {event_text[:100]}...")
+                                        await handle_slack_mention(event, data.get("team_id"))
+                                        return {"status": "ok"}
+                                
+                                if mentions_agent:
+                                    break
+                        finally:
+                            db.close()
+                    except Exception as e:
+                        print(f"⚠️  Error checking agent mentions in channel: {e}")
+                    
+                    print(f"📢 Channel message (not in thread, no agent mention): {event_text[:100]}...")
                 pass
         
         # Log if we receive an unexpected event type
@@ -847,20 +938,27 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
             print(f"⏭️  Skipping thinking indicator message")
             return
         
-        # Early check: Get bot user ID and verify message is not from bot
+        # Note: We can't determine which specific bot this is from until we match the agent
+        # The subtype check above should catch most bot messages
+        # We'll do a more thorough check after agent matching below
         channel_id = event.get("channel")
-        if channel_id:
-            bot_user_id = get_bot_user_id_from_db(channel_id) or get_bot_user_id()
-            if bot_user_id and user_id == bot_user_id:
-                print(f"⏭️  Skipping mention from bot itself (user_id: {user_id}, bot_user_id: {bot_user_id})")
-                return
         
         print(f"📩 Slack mention received from user {user_id}: {text[:100]}...")
         
         # Parse mention to extract agent name and query
         # Format: "@healops-agent @alexandra.chen what are you working on?"
+        # Or: "@healops-agent ask Morgan what are you working on?"
         agent_name_match = None
-        query = text.lower()
+        
+        # Clean text: Remove Slack user mention formatting like <@U123456|displayname>
+        import re
+        # Remove Slack user mentions: <@U123456> or <@U123456|Display Name>
+        cleaned_text = re.sub(r'<@[A-Z0-9]+\|?[^>]*>', '', text)
+        # Remove extra whitespace
+        cleaned_text = ' '.join(cleaned_text.split())
+        query = cleaned_text.lower()
+        
+        print(f"🔍 Query after cleaning: {query[:100]}...")
         
         # Find agent mentions in text (format: @agent-name or agent name)
         db = SessionLocal()
@@ -876,16 +974,90 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                 all_agents = db.query(AgentEmployee).all()
                 print(f"⚠️  No agents found for channel {channel_id}, but {len(all_agents)} agent(s) exist total")
                 print(f"   Channel IDs in DB: {[a.slack_channel_id for a in all_agents if a.slack_channel_id]}")
+                agents = all_agents  # Use all agents as fallback
             
             # Try to match agent name from text
+            # Check for various patterns: "morgan", "morgan taylor", "ask morgan", "tell morgan", etc.
+            # Also handles: "alex", "alexandra", "alexandra chen", etc.
             for agent in agents:
+                if not agent.name:
+                    continue
+                    
                 # Check for agent name in mention
                 agent_first_name = agent.name.split()[0].lower() if agent.name else ""
                 agent_last_name = agent.name.split()[-1].lower() if len(agent.name.split()) > 1 else ""
+                agent_full_name = agent.name.lower()
                 
-                if agent_first_name in query or agent.name.lower() in query:
+                # Handle common nicknames/variations
+                # "alex" for "Alexandra", "alexandra" for "Alexandra Chen"
+                name_variations = [agent_first_name, agent_full_name]
+                if agent_first_name == "alexandra":
+                    name_variations.extend(["alex", " alex ", "alex "])
+                elif agent_first_name == "morgan":
+                    # Morgan doesn't have a common nickname, but check full name
+                    name_variations.append("morgan taylor")
+                
+                # Also check role keywords (e.g., "qa" for Morgan, "coding" for Alex)
+                agent_role_keywords = []
+                if agent.role:
+                    role_lower = agent.role.lower()
+                    if "qa" in role_lower or "quality" in role_lower:
+                        agent_role_keywords.append("qa")
+                    if "engineer" in role_lower:
+                        agent_role_keywords.append("engineer")
+                    if "software" in role_lower or "coding" in role_lower:
+                        agent_role_keywords.append("coding")
+                        agent_role_keywords.append("software")
+                
+                # Check multiple patterns
+                name_patterns = []
+                for variation in name_variations:
+                    if variation:
+                        name_patterns.extend([
+                            variation,
+                            f" {variation} ",  # With spaces on both sides
+                            f" {variation}",   # With space before
+                            f"{variation} ",   # With space after
+                        ])
+                
+                # Also check for "ask X", "tell X", "@X" patterns
+                if agent_first_name:
+                    # Add patterns for first name
+                    name_patterns.extend([
+                        f"ask {agent_first_name}",
+                        f"tell {agent_first_name}",
+                        f"@ {agent_first_name}",
+                        f"@{agent_first_name}",
+                    ])
+                    # Add patterns for nickname if applicable
+                    if agent_first_name == "alexandra":
+                        name_patterns.extend([
+                            "ask alex",
+                            "tell alex",
+                            "@ alex",
+                            "@alex",
+                            " alex ",
+                        ])
+                
+                # Check if any pattern matches
+                matched = False
+                for pattern in name_patterns:
+                    if pattern and pattern in query:
+                        matched = True
+                        print(f"✅ Matched pattern '{pattern}' for agent {agent.name}")
+                        break
+                
+                # Also check role keywords (but only if no name match yet)
+                if not matched and agent_role_keywords:
+                    for keyword in agent_role_keywords:
+                        if keyword in query:
+                            matched = True
+                            print(f"✅ Matched agent by role keyword '{keyword}': {agent.name}")
+                            break
+                
+                if matched:
                     agent_name_match = agent
-                    print(f"✅ Matched agent by name: {agent.name}")
+                    print(f"✅ Matched agent by name: {agent.name} (role: {agent.role})")
                     break
             
             # If no specific agent mentioned, use first agent in channel
@@ -969,10 +1141,24 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
             
             slack_service = SlackService(bot_token)
             
-            # Check if message is from bot itself (prevent recursive responses)
-            bot_user_id = agent_name_match.slack_user_id or slack_service.bot_user_id
+            # Get the bot user ID for this specific agent's bot
+            # Each agent has their own bot, so we need to use the correct bot user ID
+            bot_user_id = agent_name_match.slack_user_id
+            if not bot_user_id:
+                # If not stored in DB, get it from the SlackService (which uses the agent's token)
+                bot_user_id = slack_service.bot_user_id
+                # Store it in the database for future use
+                if bot_user_id:
+                    try:
+                        agent_name_match.slack_user_id = bot_user_id
+                        db.commit()
+                        print(f"💾 Stored bot user ID {bot_user_id} for {agent_name_match.name}")
+                    except Exception as e:
+                        print(f"⚠️  Could not store bot user ID: {e}")
+            
+            # Check if message is from this specific bot (prevent recursive responses)
             if bot_user_id and user_id == bot_user_id:
-                print(f"⏭️  Skipping message from bot itself (user_id: {user_id})")
+                print(f"⏭️  Skipping message from bot itself (user_id: {user_id}, bot_user_id: {bot_user_id} for {agent_name_match.name})")
                 return
             
             # Use thread_ts as conversation context ID (but don't create context yet)
@@ -1191,7 +1377,38 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
                 print(f"⚠️  No agent found for thread reply")
                 return
             
-            agent = agents[0]  # Use first available agent
+            # Try to match agent name from text (similar to mention handler)
+            agent = None
+            text_lower = text.lower()
+            
+            for candidate_agent in agents:
+                if not candidate_agent.name:
+                    continue
+                    
+                agent_first_name = candidate_agent.name.split()[0].lower() if candidate_agent.name else ""
+                agent_full_name = candidate_agent.name.lower()
+                
+                # Handle common nicknames/variations
+                name_variations = [agent_first_name, agent_full_name]
+                if agent_first_name == "alexandra":
+                    name_variations.extend(["alex", " alex ", "alex "])
+                elif agent_first_name == "morgan":
+                    name_variations.append("morgan taylor")
+                
+                # Check if any variation matches
+                for variation in name_variations:
+                    if variation and variation in text_lower:
+                        agent = candidate_agent
+                        print(f"✅ Thread reply matched agent: {agent.name} (matched: '{variation}')")
+                        break
+                
+                if agent:
+                    break
+            
+            # If no specific agent mentioned, use first agent in channel
+            if not agent:
+                agent = agents[0]
+                print(f"✅ Using first agent in channel for thread reply: {agent.name}")
             
             # Get bot token using helper function (checks agent-specific tokens)
             bot_token = get_bot_token_for_agent(
@@ -1207,10 +1424,24 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
             
             slack_service = SlackService(bot_token)
             
-            # Check if message is from bot itself (prevent recursive responses)
-            bot_user_id = agent.slack_user_id or slack_service.bot_user_id
+            # Get the bot user ID for this specific agent's bot
+            # Each agent has their own bot, so we need to use the correct bot user ID
+            bot_user_id = agent.slack_user_id
+            if not bot_user_id:
+                # If not stored in DB, get it from the SlackService (which uses the agent's token)
+                bot_user_id = slack_service.bot_user_id
+                # Store it in the database for future use
+                if bot_user_id:
+                    try:
+                        agent.slack_user_id = bot_user_id
+                        db.commit()
+                        print(f"💾 Stored bot user ID {bot_user_id} for {agent.name}")
+                    except Exception as e:
+                        print(f"⚠️  Could not store bot user ID: {e}")
+            
+            # Check if message is from this specific bot (prevent recursive responses)
             if bot_user_id and user_id == bot_user_id:
-                print(f"⏭️  Skipping thread reply from bot itself (user_id: {user_id})")
+                print(f"⏭️  Skipping thread reply from bot itself (user_id: {user_id}, bot_user_id: {bot_user_id} for {agent.name})")
                 return
             
             # Refresh agent status from database to get latest status (in case it changed)
@@ -1346,14 +1577,35 @@ _recently_posted_messages: set = set()
 # Track threads we just responded to (by thread_ts) to prevent recursive responses
 _recently_responded_threads: set = set()
 
-def get_bot_user_id_from_db(channel_id: str) -> Optional[str]:
-    """Get bot user ID from database for a specific channel (faster than API call)."""
+def get_bot_user_id_from_db(channel_id: str, agent_name: Optional[str] = None) -> Optional[str]:
+    """
+    Get bot user ID from database for a specific channel or agent.
+    
+    When we have separate bots for each agent, we need to get the correct bot user ID.
+    If agent_name is provided, we prioritize that agent's bot user ID.
+    
+    Args:
+        channel_id: Slack channel ID
+        agent_name: Optional agent name to get specific bot user ID
+    
+    Returns:
+        Bot user ID string or None if not found
+    """
     try:
         from src.database.models import AgentEmployee
         from src.database.database import SessionLocal
         
         db = SessionLocal()
         try:
+            # If agent name is provided, try to find that specific agent first
+            if agent_name:
+                agent = db.query(AgentEmployee).filter(
+                    AgentEmployee.name == agent_name
+                ).first()
+                if agent and agent.slack_user_id:
+                    return agent.slack_user_id
+            
+            # Try to find agent by channel
             agent = db.query(AgentEmployee).filter(
                 AgentEmployee.slack_channel_id == channel_id
             ).first()
