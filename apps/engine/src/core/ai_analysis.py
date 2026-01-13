@@ -1622,27 +1622,120 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
             root_cause = analysis.get("root_cause", "Analysis pending...")
             action_taken = analysis.get("action_taken", None)
             
+            # IMPROVED DECISION LOGIC: Check multiple signals to determine if code changes are needed
+            # 1. Check action_taken for code-related keywords
+            # 2. Check root_cause for code-related issues
+            # 3. Check logs for code-related error patterns (stack traces, syntax errors, etc.)
+            should_generate_code = False
+            code_fix_explanation = None
+            
+            # Expanded keyword list for code-related actions
+            code_action_keywords = [
+                "fix", "update", "change", "modify", "add", "remove", "patch", "bug", "code",
+                "correct", "resolve", "address", "implement", "refactor", "rewrite", "adjust",
+                "edit", "improve", "enhance", "repair", "solve", "handle", "prevent"
+            ]
+            
+            # Keywords that indicate code-related root causes
+            code_root_cause_keywords = [
+                "bug", "error", "exception", "syntax", "logic", "function", "method", "class",
+                "variable", "parameter", "argument", "type", "null", "undefined", "reference",
+                "index", "key", "attribute", "property", "import", "module", "package",
+                "stack trace", "traceback", "line", "file", "code", "implementation"
+            ]
+            
+            # Keywords that indicate infrastructure/operational issues (NOT code)
+            operational_keywords = [
+                "restart", "reboot", "redeploy", "scale", "capacity", "resource", "memory",
+                "cpu", "disk", "network", "timeout", "connection", "configuration", "config",
+                "environment", "env", "secret", "credential", "permission", "access", "auth",
+                "external", "dependency", "service", "api", "endpoint", "infrastructure"
+            ]
+            
+            # Check 1: action_taken for code-related keywords
+            action_suggests_code = False
+            if action_taken:
+                action_lower = action_taken.lower()
+                action_suggests_code = any(keyword in action_lower for keyword in code_action_keywords)
+                # Exclude if it's clearly operational
+                is_operational = any(keyword in action_lower for keyword in operational_keywords)
+                if is_operational and not any(c in action_lower for c in ["code", "bug", "fix", "patch"]):
+                    action_suggests_code = False
+            
+            # Check 2: root_cause for code-related issues
+            root_cause_suggests_code = False
+            if root_cause:
+                root_cause_lower = root_cause.lower()
+                root_cause_suggests_code = any(keyword in root_cause_lower for keyword in code_root_cause_keywords)
+            
+            # Check 3: logs for code-related error patterns
+            logs_suggest_code = False
+            if logs:
+                for log in logs[:20]:  # Check first 20 logs
+                    if log and log.message:
+                        log_msg = log.message.lower()
+                        # Look for stack traces, syntax errors, code-related exceptions
+                        code_patterns = [
+                            "traceback", "stack trace", "at ", "file \"", "line ", "syntaxerror",
+                            "typeerror", "valueerror", "attributeerror", "keyerror", "indexerror",
+                            "nameerror", "indentationerror", "importerror", "modulenotfounderror",
+                            "function", "method", "class", "undefined", "null pointer", "none"
+                        ]
+                        if any(pattern in log_msg for pattern in code_patterns):
+                            logs_suggest_code = True
+                            break
+            
+            # Decision: Generate code if ANY signal suggests code changes
+            # But exclude if action_taken is clearly operational (unless root_cause strongly suggests code)
+            should_generate_code = (
+                action_suggests_code or 
+                (root_cause_suggests_code and not any(op in (action_taken or "").lower() for op in ["restart", "reboot", "redeploy"])) or
+                logs_suggest_code
+            )
+            
+            # Debug logging for decision transparency
+            print(f"🔍 Code generation decision for incident {incident.id}:")
+            print(f"   - Action suggests code: {action_suggests_code}")
+            print(f"   - Root cause suggests code: {root_cause_suggests_code}")
+            print(f"   - Logs suggest code: {logs_suggest_code}")
+            print(f"   - Final decision: {'GENERATE CODE' if should_generate_code else 'SKIP CODE GENERATION'}")
+            
+            # Build result dictionary with decision metadata
             result = {
                 "root_cause": root_cause,
                 "action_taken": action_taken,
                 "cost_estimate": estimated_cost,
                 "tokens_used": total_tokens,
-                "model_used": model_config.get("model", "unknown") if isinstance(model_config, dict) else "unknown"
+                "model_used": model_config.get("model", "unknown") if isinstance(model_config, dict) else "unknown",
+                # Decision metadata for debugging and transparency
+                "code_generation_decision": {
+                    "should_generate_code": should_generate_code,
+                    "action_suggests_code": action_suggests_code,
+                    "root_cause_suggests_code": root_cause_suggests_code,
+                    "logs_suggest_code": logs_suggest_code
+                }
             }
-            
-            # COST OPTIMIZATION: Only create PR if action_taken suggests code changes
-            # Skip expensive code generation for simple fixes like "restart service"
-            should_generate_code = False
-            code_fix_explanation = None
-            if action_taken:
-                code_action_keywords = ["fix", "update", "change", "modify", "add", "remove", "patch", "bug", "code"]
-                should_generate_code = any(keyword in action_taken.lower() for keyword in code_action_keywords)
             
             # If GitHub integration is available and code changes are needed, try to analyze repo and create PR
             if not incident.integration_id:
                 code_fix_explanation = "No GitHub integration configured for this incident. Please set up a GitHub integration to enable automatic code fixes."
             elif not should_generate_code:
-                code_fix_explanation = f"The recommended action '{action_taken}' does not require code changes. This appears to be an infrastructure or operational issue that needs manual intervention (e.g., restart service, check configuration, verify external dependencies)."
+                # Provide more detailed explanation
+                reasons = []
+                if not action_suggests_code and action_taken:
+                    reasons.append(f"action '{action_taken}' suggests operational/infrastructure fix")
+                if not root_cause_suggests_code and root_cause:
+                    reasons.append("root cause analysis doesn't indicate code issues")
+                if not logs_suggest_code:
+                    reasons.append("logs don't show code-related error patterns")
+                
+                reason_text = ", ".join(reasons) if reasons else "analysis indicates operational/infrastructure issue"
+                code_fix_explanation = (
+                    f"Code changes not generated: {reason_text}. "
+                    f"This appears to require manual intervention (e.g., restart service, check configuration, "
+                    f"verify external dependencies, scale resources). If you believe this needs a code fix, "
+                    f"please review the root cause and action taken fields."
+                )
             elif incident.integration_id and should_generate_code:
                 try:
                     integration = db.query(Integration).filter(Integration.id == incident.integration_id).first()

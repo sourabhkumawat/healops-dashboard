@@ -646,14 +646,14 @@ async def slack_events(request: Request):
             used_secret_name = None
             
             for secret_name, signing_secret in signing_secrets:
-            # Verify signature
-            sig_basestring = f"v0:{timestamp}:{body_str}"
-            computed_signature = "v0=" + hmac.new(
-                signing_secret.encode(),
-                sig_basestring.encode(),
-                hashlib.sha256
-            ).hexdigest()
-            
+                # Verify signature
+                sig_basestring = f"v0:{timestamp}:{body_str}"
+                computed_signature = "v0=" + hmac.new(
+                    signing_secret.encode(),
+                    sig_basestring.encode(),
+                    hashlib.sha256
+                ).hexdigest()
+                
                 if hmac.compare_digest(computed_signature, signature):
                     signature_valid = True
                     used_secret_name = secret_name
