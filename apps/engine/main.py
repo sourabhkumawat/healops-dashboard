@@ -3631,8 +3631,8 @@ def list_incidents(
             }
         else:
             # Return all incidents if pagination not specified (backward compatibility)
-        incidents = query.order_by(Incident.last_seen_at.desc()).all()
-        return incidents
+            incidents = query.order_by(Incident.last_seen_at.desc()).all()
+            return incidents
     except HTTPException:
         raise
     except Exception as e:
