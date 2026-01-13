@@ -605,9 +605,23 @@ async def slack_events(request: Request):
                 raise HTTPException(status_code=400, detail="Challenge parameter missing")
         
         # For all other requests, verify Slack request signature
-        signing_secret = os.getenv("SLACK_SIGNING_SECRET")
-        if not signing_secret:
-            print("⚠️  WARNING: SLACK_SIGNING_SECRET not set - skipping signature verification")
+        # Support multiple signing secrets for separate bots (Alex and Morgan)
+        signing_secrets = []
+        
+        # Try agent-specific signing secrets first
+        alex_secret = os.getenv("SLACK_SIGNING_SECRET_ALEX")
+        morgan_secret = os.getenv("SLACK_SIGNING_SECRET_MORGAN")
+        generic_secret = os.getenv("SLACK_SIGNING_SECRET")
+        
+        if alex_secret:
+            signing_secrets.append(("SLACK_SIGNING_SECRET_ALEX", alex_secret))
+        if morgan_secret:
+            signing_secrets.append(("SLACK_SIGNING_SECRET_MORGAN", morgan_secret))
+        if generic_secret:
+            signing_secrets.append(("SLACK_SIGNING_SECRET", generic_secret))
+        
+        if not signing_secrets:
+            print("⚠️  WARNING: No SLACK_SIGNING_SECRET set - skipping signature verification")
         else:
             timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
             signature = request.headers.get("X-Slack-Signature", "")
@@ -627,6 +641,11 @@ async def slack_events(request: Request):
                 print(f"❌ Invalid timestamp format: {timestamp} - {e}")
                 raise HTTPException(status_code=400, detail="Invalid timestamp format")
             
+            # Try each signing secret until one matches
+            signature_valid = False
+            used_secret_name = None
+            
+            for secret_name, signing_secret in signing_secrets:
             # Verify signature
             sig_basestring = f"v0:{timestamp}:{body_str}"
             computed_signature = "v0=" + hmac.new(
@@ -635,12 +654,17 @@ async def slack_events(request: Request):
                 hashlib.sha256
             ).hexdigest()
             
-            if not hmac.compare_digest(computed_signature, signature):
-                print(f"❌ Invalid Slack signature - computed: {computed_signature[:20]}..., received: {signature[:20]}...")
+                if hmac.compare_digest(computed_signature, signature):
+                    signature_valid = True
+                    used_secret_name = secret_name
+                    print(f"✅ Slack signature verified successfully using {secret_name}")
+                    break
+            
+            if not signature_valid:
+                print(f"❌ Invalid Slack signature - tried {len(signing_secrets)} secret(s)")
                 print(f"   Timestamp: {timestamp}, Body length: {len(body_str)}")
+                print(f"   Received signature: {signature[:20]}...")
                 raise HTTPException(status_code=401, detail="Invalid Slack signature")
-            else:
-                print("✅ Slack signature verified successfully")
         
         # Handle event callbacks
         if data.get("type") == "event_callback":
@@ -858,12 +882,29 @@ async def slack_interactive(request: Request):
         body_str = body_bytes.decode('utf-8')
         
         # Verify Slack request signature
-        signing_secret = os.getenv("SLACK_SIGNING_SECRET")
-        if signing_secret:
+        # Support multiple signing secrets for separate bots (Alex and Morgan)
+        signing_secrets = []
+        
+        # Try agent-specific signing secrets first
+        alex_secret = os.getenv("SLACK_SIGNING_SECRET_ALEX")
+        morgan_secret = os.getenv("SLACK_SIGNING_SECRET_MORGAN")
+        generic_secret = os.getenv("SLACK_SIGNING_SECRET")
+        
+        if alex_secret:
+            signing_secrets.append(("SLACK_SIGNING_SECRET_ALEX", alex_secret))
+        if morgan_secret:
+            signing_secrets.append(("SLACK_SIGNING_SECRET_MORGAN", morgan_secret))
+        if generic_secret:
+            signing_secrets.append(("SLACK_SIGNING_SECRET", generic_secret))
+        
+        if signing_secrets:
             timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
             signature = request.headers.get("X-Slack-Signature", "")
             
             if timestamp and signature:
+                # Try each signing secret until one matches
+                signature_valid = False
+                for secret_name, signing_secret in signing_secrets:
                 # Verify signature (body is already in form-encoded format)
                 sig_basestring = f"v0:{timestamp}:{body_str}"
                 computed_signature = "v0=" + hmac.new(
@@ -872,7 +913,13 @@ async def slack_interactive(request: Request):
                     hashlib.sha256
                 ).hexdigest()
                 
-                if not hmac.compare_digest(computed_signature, signature):
+                    if hmac.compare_digest(computed_signature, signature):
+                        signature_valid = True
+                        print(f"✅ Slack interactive signature verified using {secret_name}")
+                        break
+                
+                if not signature_valid:
+                    print(f"❌ Invalid Slack interactive signature - tried {len(signing_secrets)} secret(s)")
                     raise HTTPException(status_code=401, detail="Invalid Slack signature")
         
         # Parse form data (need to restore body for FastAPI form parser)
@@ -3584,8 +3631,8 @@ def list_incidents(
             }
         else:
             # Return all incidents if pagination not specified (backward compatibility)
-            incidents = query.order_by(Incident.last_seen_at.desc()).all()
-            return incidents
+        incidents = query.order_by(Incident.last_seen_at.desc()).all()
+        return incidents
     except HTTPException:
         raise
     except Exception as e:
