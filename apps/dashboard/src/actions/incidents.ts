@@ -4,12 +4,28 @@ import { API_BASE } from '@/lib/config';
 import { Incident } from '@/components/incident-table';
 import { fetchWithAuth } from '@/lib/api-client';
 
-export async function getIncidents(filters?: {
-    status?: string;
-    severity?: string;
-    source?: string;
-    service?: string;
-}): Promise<Incident[]> {
+export interface PaginatedIncidentsResponse {
+    data: Incident[];
+    pagination: {
+        page: number;
+        page_size: number;
+        total: number;
+        total_pages: number;
+    };
+}
+
+export async function getIncidents(
+    filters?: {
+        status?: string;
+        severity?: string;
+        source?: string;
+        service?: string;
+    },
+    pagination?: {
+        page?: number;
+        page_size?: number;
+    }
+): Promise<Incident[] | PaginatedIncidentsResponse> {
     try {
         let url = `${API_BASE}/incidents`;
         const params = new URLSearchParams();
@@ -25,6 +41,14 @@ export async function getIncidents(filters?: {
         }
         if (filters?.service) {
             params.append('service', filters.service);
+        }
+
+        // Add pagination parameters if provided
+        if (pagination?.page !== undefined) {
+            params.append('page', pagination.page.toString());
+        }
+        if (pagination?.page_size !== undefined) {
+            params.append('page_size', pagination.page_size.toString());
         }
 
         if (params.toString()) {
@@ -47,10 +71,29 @@ export async function getIncidents(filters?: {
             } catch {
                 // Silently fail if error logging itself fails
             }
+            // Return appropriate structure based on whether pagination was requested
+            if (pagination?.page !== undefined) {
+                return {
+                    data: [],
+                    pagination: {
+                        page: pagination.page || 1,
+                        page_size: pagination.page_size || 10,
+                        total: 0,
+                        total_pages: 0
+                    }
+                };
+            }
             return [];
         }
 
         const data = await response.json();
+        
+        // If pagination was requested, return the paginated response structure
+        if (pagination?.page !== undefined && data && typeof data === 'object' && 'data' in data) {
+            return data as PaginatedIncidentsResponse;
+        }
+        
+        // Otherwise return array for backward compatibility
         return Array.isArray(data) ? data : [];
     } catch (error) {
         // Use a try-catch to prevent error logging from causing recursive issues
@@ -59,6 +102,18 @@ export async function getIncidents(filters?: {
         } catch {
             // Silently fail if error logging itself fails
         }
+        // Return appropriate structure based on whether pagination was requested
+        if (pagination?.page !== undefined) {
+            return {
+                data: [],
+                pagination: {
+                    page: pagination.page || 1,
+                    page_size: pagination.page_size || 10,
+                    total: 0,
+                    total_pages: 0
+                }
+            };
+        }
         return [];
     }
 }
@@ -66,7 +121,9 @@ export async function getIncidents(filters?: {
 export async function getRecentIncidents(
     limit: number = 5
 ): Promise<Incident[]> {
-    const allIncidents = await getIncidents();
+    const result = await getIncidents();
+    // getIncidents returns array when pagination is not provided
+    const allIncidents = Array.isArray(result) ? result : result.data;
     // API already returns incidents ordered by last_seen_at desc, so just take first N
     return allIncidents.slice(0, limit);
 }

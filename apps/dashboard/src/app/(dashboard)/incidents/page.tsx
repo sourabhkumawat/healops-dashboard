@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useMemo } from 'react';
 import { IncidentTable, Incident } from '@/components/incident-table';
 import { Loader2 } from 'lucide-react';
-import { getIncidents } from '@/actions/incidents';
+import { getIncidents, PaginatedIncidentsResponse } from '@/actions/incidents';
 import {
     Select,
     SelectContent,
@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
 import { X } from 'lucide-react';
+import { Pagination } from '@/components/ui/pagination';
 
 export default function IncidentsPage() {
     const [incidents, setIncidents] = useState<Incident[]>([]);
@@ -26,10 +27,37 @@ export default function IncidentsPage() {
         source?: string;
         service?: string;
     }>({});
+    
+    // Pagination state
+    const [currentPage, setCurrentPage] = useState(1);
+    const [pageSize, setPageSize] = useState(10);
+    const [pagination, setPagination] = useState<{
+        total: number;
+        totalPages: number;
+    } | null>(null);
 
-    // Fetch all incidents to get unique values for filters
+    // Fetch all incidents to get unique values for filters (only on initial load)
     const [allIncidents, setAllIncidents] = useState<Incident[]>([]);
+    const filtersLoadedRef = useRef(false);
 
+    // Fetch all incidents for filter options (only once on initial load)
+    useEffect(() => {
+        const fetchFilterOptions = async () => {
+            if (filtersLoadedRef.current) return;
+            try {
+                const result = await getIncidents();
+                // getIncidents returns array when pagination is not provided
+                const allData = Array.isArray(result) ? result : result.data;
+                setAllIncidents(allData);
+                filtersLoadedRef.current = true;
+            } catch (error) {
+                console.error('Failed to fetch incidents for filters:', error);
+            }
+        };
+        fetchFilterOptions();
+    }, []);
+
+    // Fetch paginated incidents
     useEffect(() => {
         let intervalId: NodeJS.Timeout | null = null;
 
@@ -43,13 +71,34 @@ export default function IncidentsPage() {
             }
 
             try {
-                // Fetch all incidents for filter options (only on initial load or when filters change)
-                const allData = await getIncidents();
-                setAllIncidents(allData);
+                // Fetch paginated incidents
+                const response = await getIncidents(filters, {
+                    page: currentPage,
+                    page_size: pageSize
+                });
 
-                // Fetch filtered incidents
-                const data = await getIncidents(filters);
-                setIncidents(data);
+                if (response && typeof response === 'object' && 'data' in response) {
+                    // Paginated response
+                    const paginatedResponse = response as PaginatedIncidentsResponse;
+                    setIncidents(paginatedResponse.data);
+                    setPagination({
+                        total: paginatedResponse.pagination.total,
+                        totalPages: paginatedResponse.pagination.total_pages
+                    });
+                } else if (Array.isArray(response)) {
+                    // Fallback to array response (backward compatibility)
+                    setIncidents(response);
+                    setPagination({
+                        total: response.length,
+                        totalPages: 1
+                    });
+                } else {
+                    setIncidents([]);
+                    setPagination({
+                        total: 0,
+                        totalPages: 0
+                    });
+                }
 
                 // Mark that we've loaded data at least once
                 hasLoadedRef.current = true;
@@ -57,6 +106,10 @@ export default function IncidentsPage() {
                 console.error('Failed to fetch incidents:', error);
                 // Set empty arrays on error to prevent stale data
                 setIncidents([]);
+                setPagination({
+                    total: 0,
+                    totalPages: 0
+                });
             } finally {
                 setLoading(false);
                 setIsRefreshing(false);
@@ -75,6 +128,11 @@ export default function IncidentsPage() {
                 clearInterval(intervalId);
             }
         };
+    }, [filters, currentPage, pageSize]);
+
+    // Reset to page 1 when filters change
+    useEffect(() => {
+        setCurrentPage(1);
     }, [filters]);
 
     // Extract unique values for filter options
@@ -111,6 +169,11 @@ export default function IncidentsPage() {
 
     const clearFilters = () => {
         setFilters({});
+        setCurrentPage(1);
+    };
+
+    const handlePageChange = (page: number) => {
+        setCurrentPage(page);
     };
 
     return (
@@ -240,11 +303,47 @@ export default function IncidentsPage() {
                         </div>
                     </div>
                 ) : (
-                    <IncidentTable
-                        incidents={incidents}
-                        fullHeight={true}
-                        isLoading={isRefreshing}
-                    />
+                    <>
+                        <IncidentTable
+                            incidents={incidents}
+                            fullHeight={true}
+                            isLoading={isRefreshing}
+                        />
+                        {pagination && pagination.totalPages > 1 && (
+                            <div className="flex items-center justify-between border-t pt-4 mt-4">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm text-muted-foreground">
+                                        Showing {(currentPage - 1) * pageSize + 1} to{' '}
+                                        {Math.min(currentPage * pageSize, pagination.total)} of{' '}
+                                        {pagination.total} incidents
+                                    </span>
+                                    <Select
+                                        value={pageSize.toString()}
+                                        onValueChange={(value) => {
+                                            setPageSize(Number(value));
+                                            setCurrentPage(1);
+                                        }}
+                                    >
+                                        <SelectTrigger className="w-[100px]">
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="10">10</SelectItem>
+                                            <SelectItem value="25">25</SelectItem>
+                                            <SelectItem value="50">50</SelectItem>
+                                            <SelectItem value="100">100</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                    <span className="text-sm text-muted-foreground">per page</span>
+                                </div>
+                                <Pagination
+                                    currentPage={currentPage}
+                                    totalPages={pagination.totalPages}
+                                    onPageChange={handlePageChange}
+                                />
+                            </div>
+                        )}
+                    </>
                 )}
             </div>
         </div>

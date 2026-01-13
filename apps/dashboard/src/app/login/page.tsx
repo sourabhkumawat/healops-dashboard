@@ -1,6 +1,6 @@
 'use client';
 
-import { useActionState, useEffect } from 'react';
+import { useActionState, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 import { SubmitButton } from '@/components/submit-button';
@@ -15,7 +15,7 @@ import {
     CardHeader,
     CardTitle
 } from '@/components/ui/card';
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, Loader2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
 const initialState = {
@@ -25,15 +25,27 @@ const initialState = {
 export default function LoginPage() {
     const router = useRouter();
     const [state, formAction] = useActionState(loginAction, initialState);
+    const [isRedirecting, setIsRedirecting] = useState(false);
 
     useEffect(() => {
         if (state?.success) {
+            setIsRedirecting(true);
             router.push(state.redirect || '/');
         }
     }, [state, router]);
 
     return (
-        <div className="flex h-screen w-full items-center justify-center bg-zinc-950">
+        <div className="flex h-screen w-full items-center justify-center bg-zinc-950 relative">
+            {isRedirecting && (
+                <div className="absolute inset-0 bg-zinc-950/95 backdrop-blur-sm z-50 flex items-center justify-center">
+                    <div className="flex flex-col items-center gap-4">
+                        <Loader2 className="h-12 w-12 animate-spin text-green-600" />
+                        <p className="text-zinc-100 text-lg font-medium">
+                            Redirecting...
+                        </p>
+                    </div>
+                </div>
+            )}
             <Card className="w-[350px] border-zinc-800 bg-zinc-900 text-zinc-100">
                 <CardHeader className="space-y-1">
                     <div className="flex justify-center mb-4">

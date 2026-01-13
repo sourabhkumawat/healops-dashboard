@@ -3517,10 +3517,12 @@ def list_incidents(
     severity: Optional[str] = None,
     source: Optional[str] = None,
     service: Optional[str] = None,
+    page: Optional[int] = None,
+    page_size: Optional[int] = None,
     request: Request = None,
     db: Session = Depends(get_db)
 ):
-    """List incidents for the authenticated user only."""
+    """List incidents for the authenticated user only with optional pagination."""
     try:
         # Get authenticated user (middleware ensures this is set)
         user_id = get_user_id_from_request(request, db=db)
@@ -3556,8 +3558,34 @@ def list_incidents(
         if service:
             query = query.filter(Incident.service_name == service)
 
-        incidents = query.order_by(Incident.last_seen_at.desc()).all()
-        return incidents
+        # Get total count before pagination
+        total_count = query.count()
+
+        # Apply pagination if provided
+        if page is not None and page_size is not None:
+            # Validate pagination parameters
+            if page < 1:
+                raise HTTPException(status_code=400, detail="Page must be >= 1")
+            if page_size < 1 or page_size > 100:
+                raise HTTPException(status_code=400, detail="Page size must be between 1 and 100")
+            
+            offset = (page - 1) * page_size
+            incidents = query.order_by(Incident.last_seen_at.desc()).offset(offset).limit(page_size).all()
+            
+            # Return paginated response with metadata
+            return {
+                "data": incidents,
+                "pagination": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total": total_count,
+                    "total_pages": (total_count + page_size - 1) // page_size if page_size > 0 else 0
+                }
+            }
+        else:
+            # Return all incidents if pagination not specified (backward compatibility)
+            incidents = query.order_by(Incident.last_seen_at.desc()).all()
+            return incidents
     except HTTPException:
         raise
     except Exception as e:
