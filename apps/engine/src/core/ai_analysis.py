@@ -1074,7 +1074,6 @@ Only include files that need changes. Provide the COMPLETE file content for each
                             # Get integration_id from the github_integration if possible
                             integration_id = None
                             if hasattr(github_integration, 'installation_id') and github_integration.installation_id:
-                                from src.database.models import Integration
                                 integration = db.query(Integration).filter(
                                     Integration.installation_id == github_integration.installation_id
                                 ).first()
@@ -1885,7 +1884,6 @@ This PR was generated using the enhanced multi-agent system with:
                                                         import asyncio
                                                         integration_id = None
                                                         if hasattr(github_integration, 'installation_id') and github_integration.installation_id:
-                                                            from src.database.models import Integration
                                                             integration = db.query(Integration).filter(
                                                                 Integration.installation_id == github_integration.installation_id
                                                             ).first()
