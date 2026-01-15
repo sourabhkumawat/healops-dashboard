@@ -707,7 +707,8 @@ async def slack_events(request: Request):
                 event_text = event.get("text", "")
                 channel_id = event.get("channel")  # Extract channel_id from event
                 
-                print(f"📨 Processing channel message: user={event_user_id}, subtype={subtype}, text={event_text[:100]}...")
+                event_ts = event.get("ts")
+                print(f"📨 Processing channel message: user={event_user_id}, subtype={subtype}, ts={event_ts[:10] if event_ts else 'None'}..., text={event_text[:100]}...")
                 
                 # Skip bot messages, message updates, and system messages
                 if subtype == "bot_message" or subtype == "message_changed" or not event_user_id:
@@ -715,15 +716,24 @@ async def slack_events(request: Request):
                     return {"status": "ok"}
                 
                 # Skip messages we're currently updating (prevent duplicate processing)
-                event_ts = event.get("ts")
                 if event_ts and event_ts in _updating_messages:
                     print(f"⏭️  Skipping message we're currently updating (ts: {event_ts[:10]}...)")
                     return {"status": "ok"}
                 
                 # Skip messages we just posted (prevent recursive responses)
+                # BUT: Only skip if this is actually a bot message (check user_id against bot user IDs)
                 if event_ts and event_ts in _recently_posted_messages:
-                    print(f"⏭️  Skipping message we just posted (ts: {event_ts[:10]}...)")
-                    return {"status": "ok"}
+                    # Double-check: Is this actually from a bot? If it's from a real user, don't skip it
+                    # This prevents incorrectly skipping user messages that happen to have the same timestamp
+                    bot_user_id = get_bot_user_id_from_db(channel_id) or get_bot_user_id()
+                    if bot_user_id and event_user_id == bot_user_id:
+                        print(f"⏭️  Skipping message we just posted (ts: {event_ts[:10]}..., confirmed bot user_id: {bot_user_id})")
+                        return {"status": "ok"}
+                    else:
+                        # This is a user message, not a bot message - don't skip it even if timestamp matches
+                        print(f"⚠️  Message ts {event_ts[:10]}... is in recently_posted, but user_id {event_user_id} != bot_user_id {bot_user_id}, processing anyway")
+                        # Remove from tracking to prevent future false positives
+                        _recently_posted_messages.discard(event_ts)
                 
                 # Also skip if message looks like our thinking indicator (extra safeguard)
                 if "💭 Thinking" in event_text or "Thinking..." in event_text:
@@ -805,7 +815,8 @@ async def slack_events(request: Request):
                 else:
                     # Handle regular channel messages that mention agent names (not in thread)
                     # Use improved matching logic similar to handle_slack_mention
-                    print(f"📢 Checking channel message for agent mentions: {event_text[:100]}...")
+                    print(f"📢 Checking channel message for agent mentions (not in thread): {event_text[:100]}...")
+                    print(f"   Full text with mentions: {event_text}")
                     try:
                         from src.database.models import AgentEmployee
                         from src.database.database import SessionLocal
@@ -821,6 +832,8 @@ async def slack_events(request: Request):
                                 agents = db.query(AgentEmployee).all()
                             
                             print(f"🔍 Found {len(agents)} agent(s) for channel {channel_id}")
+                            for agent in agents:
+                                print(f"   - Agent: {agent.name} (role: {agent.role}, slack_user_id: {agent.slack_user_id[:10] if agent.slack_user_id else 'None'}...)")
                             
                             # Extract Slack user mentions BEFORE cleaning to match by display name
                             mentioned_user_ids = []
@@ -833,6 +846,8 @@ async def slack_events(request: Request):
                                 if display_name:
                                     mentioned_display_names.append(display_name.lower())
                             
+                            if mentioned_user_ids:
+                                print(f"🔍 Found Slack mentions with user IDs: {mentioned_user_ids}")
                             if mentioned_display_names:
                                 print(f"🔍 Found Slack mentions with display names: {mentioned_display_names}")
                             
