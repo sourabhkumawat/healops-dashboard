@@ -707,6 +707,8 @@ async def slack_events(request: Request):
                 event_text = event.get("text", "")
                 channel_id = event.get("channel")  # Extract channel_id from event
                 
+                print(f"📨 Processing channel message: user={event_user_id}, subtype={subtype}, text={event_text[:100]}...")
+                
                 # Skip bot messages, message updates, and system messages
                 if subtype == "bot_message" or subtype == "message_changed" or not event_user_id:
                     print(f"⏭️  Skipping bot/system message (subtype: {subtype}, user_id: {event_user_id})")
@@ -802,12 +804,13 @@ async def slack_events(request: Request):
                         print(f"📢 Channel message in thread (no bot context, no agent mention): {event_text[:100]}...")
                 else:
                     # Handle regular channel messages that mention agent names (not in thread)
-                    # Check if message mentions an agent name
-                    event_text_lower = event_text.lower()
-                    mentions_agent = False
+                    # Use improved matching logic similar to handle_slack_mention
+                    print(f"📢 Checking channel message for agent mentions: {event_text[:100]}...")
                     try:
                         from src.database.models import AgentEmployee
                         from src.database.database import SessionLocal
+                        import re
+                        
                         db = SessionLocal()
                         try:
                             agents = db.query(AgentEmployee).filter(
@@ -817,38 +820,125 @@ async def slack_events(request: Request):
                             if not agents:
                                 agents = db.query(AgentEmployee).all()
                             
-                            for agent in agents:
-                                if not agent.name:
-                                    continue
+                            print(f"🔍 Found {len(agents)} agent(s) for channel {channel_id}")
+                            
+                            # Extract Slack user mentions BEFORE cleaning to match by display name
+                            mentioned_user_ids = []
+                            mentioned_display_names = []
+                            mention_pattern = r'<@([A-Z0-9]+)(?:\|([^>]+))?>'
+                            for match in re.finditer(mention_pattern, event_text):
+                                user_id = match.group(1)
+                                display_name = match.group(2) if match.group(2) else None
+                                mentioned_user_ids.append(user_id)
+                                if display_name:
+                                    mentioned_display_names.append(display_name.lower())
+                            
+                            if mentioned_display_names:
+                                print(f"🔍 Found Slack mentions with display names: {mentioned_display_names}")
+                            
+                            event_text_lower = event_text.lower()
+                            matched_agent = None
+                            
+                            # First, try to match by Slack user ID (most reliable)
+                            if mentioned_user_ids:
+                                for agent in agents:
+                                    if agent.slack_user_id and agent.slack_user_id in mentioned_user_ids:
+                                        matched_agent = agent
+                                        print(f"✅ Channel message matched agent by Slack user ID: {agent.name} (ID: {agent.slack_user_id})")
+                                        break
+                            
+                            # If no match by user ID, try to match by display name from Slack mention
+                            if not matched_agent and mentioned_display_names:
+                                for agent in agents:
+                                    if not agent.name:
+                                        continue
+                                    agent_full_name = agent.name.lower()
+                                    agent_first_name = agent.name.split()[0].lower() if agent.name else ""
                                     
-                                agent_first_name = agent.name.split()[0].lower() if agent.name else ""
-                                agent_full_name = agent.name.lower() if agent.name else ""
+                                    for display_name in mentioned_display_names:
+                                        if display_name == agent_full_name:
+                                            matched_agent = agent
+                                            print(f"✅ Channel message matched agent by exact display name: {agent.name} (display: '{display_name}')")
+                                            break
+                                        elif agent_first_name and display_name == agent_first_name:
+                                            matched_agent = agent
+                                            print(f"✅ Channel message matched agent by first name from display: {agent.name} (display: '{display_name}')")
+                                            break
+                                        elif agent_full_name in display_name or display_name in agent_full_name:
+                                            matched_agent = agent
+                                            print(f"✅ Channel message matched agent by partial display name: {agent.name} (display: '{display_name}')")
+                                            break
+                                    
+                                    if matched_agent:
+                                        break
+                            
+                            # If still no match, try to match from text content (prioritize exact matches)
+                            if not matched_agent:
+                                agent_scores = []
                                 
-                                # Handle common nicknames/variations (same as mention handler)
-                                name_variations = [agent_first_name, agent_full_name]
-                                if agent_first_name == "alexandra":
-                                    name_variations.extend(["alex", " alex ", "alex "])
-                                elif agent_first_name == "morgan":
-                                    name_variations.append("morgan taylor")
+                                for agent in agents:
+                                    if not agent.name:
+                                        continue
+                                    
+                                    score = 0
+                                    matched_pattern = None
+                                    
+                                    agent_first_name = agent.name.split()[0].lower() if agent.name else ""
+                                    agent_full_name = agent.name.lower()
+                                    
+                                    # Priority 1: Exact full name match (highest priority)
+                                    if agent_full_name in event_text_lower:
+                                        full_name_pattern = r'\b' + re.escape(agent_full_name) + r'\b'
+                                        if re.search(full_name_pattern, event_text_lower):
+                                            score = 100
+                                            matched_pattern = f"exact full name: '{agent_full_name}'"
+                                    
+                                    # Priority 2: Full name with "morgan taylor" format
+                                    if score == 0 and agent_first_name == "morgan" and "morgan taylor" in event_text_lower:
+                                        score = 90
+                                        matched_pattern = "full name format: 'morgan taylor'"
+                                    
+                                    # Priority 3: First name match (with word boundaries)
+                                    if score == 0:
+                                        first_name_pattern = r'\b' + re.escape(agent_first_name) + r'\b'
+                                        if re.search(first_name_pattern, event_text_lower):
+                                            score = 50
+                                            matched_pattern = f"first name: '{agent_first_name}'"
+                                    
+                                    # Priority 4: Nickname matches (for Alex)
+                                    if score == 0 and agent_first_name == "alexandra":
+                                        if re.search(r'\balex\b', event_text_lower):
+                                            score = 60
+                                            matched_pattern = "nickname: 'alex'"
+                                    
+                                    if score > 0:
+                                        agent_scores.append((score, agent, matched_pattern))
                                 
-                                # Check if any variation matches
-                                for variation in name_variations:
-                                    if variation and variation in event_text_lower:
-                                        mentions_agent = True
-                                        print(f"✅ Channel message mentions agent: {agent.name} (matched: '{variation}')")
-                                        # Treat as a mention even if bot wasn't @mentioned
-                                        print(f"💬 Processing channel message as mention: {event_text[:100]}...")
-                                        await handle_slack_mention(event, data.get("team_id"))
-                                        return {"status": "ok"}
-                                
-                                if mentions_agent:
-                                    break
+                                # Sort by score and pick the best match
+                                if agent_scores:
+                                    agent_scores.sort(key=lambda x: x[0], reverse=True)
+                                    best_score, matched_agent, matched_pattern = agent_scores[0]
+                                    print(f"✅ Channel message matched agent by text: {matched_agent.name} (score: {best_score}, pattern: {matched_pattern})")
+                                    
+                                    # Prefer exact matches if there's a tie
+                                    if len(agent_scores) > 1 and agent_scores[1][0] >= best_score * 0.8:
+                                        exact_matches = [a for a in agent_scores if a[0] >= 90]
+                                        if exact_matches:
+                                            matched_agent = exact_matches[0][1]
+                                            print(f"✅ Preferring exact match: {matched_agent.name}")
+                            
+                            if matched_agent:
+                                print(f"💬 Processing channel message as mention for {matched_agent.name}: {event_text[:100]}...")
+                                await handle_slack_mention(event, data.get("team_id"))
+                                return {"status": "ok"}
+                            else:
+                                print(f"📢 Channel message (not in thread, no agent mention detected): {event_text[:100]}...")
                         finally:
                             db.close()
                     except Exception as e:
                         print(f"⚠️  Error checking agent mentions in channel: {e}")
-                    
-                    print(f"📢 Channel message (not in thread, no agent mention): {event_text[:100]}...")
+                        import traceback
+                        traceback.print_exc()
                 pass
         
         # Log if we receive an unexpected event type
