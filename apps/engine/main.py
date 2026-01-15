@@ -728,7 +728,7 @@ async def slack_events(request: Request):
                     bot_user_id = get_bot_user_id_from_db(channel_id) or get_bot_user_id()
                     if bot_user_id and event_user_id == bot_user_id:
                         print(f"⏭️  Skipping message we just posted (ts: {event_ts[:10]}..., confirmed bot user_id: {bot_user_id})")
-                    return {"status": "ok"}
+                        return {"status": "ok"}
                     else:
                         # This is a user message, not a bot message - don't skip it even if timestamp matches
                         print(f"⚠️  Message ts {event_ts[:10]}... is in recently_posted, but user_id {event_user_id} != bot_user_id {bot_user_id}, processing anyway")
@@ -945,7 +945,7 @@ async def slack_events(request: Request):
                                     score = 0
                                     matched_pattern = None
                                     
-                                agent_first_name = agent.name.split()[0].lower() if agent.name else ""
+                                    agent_first_name = agent.name.split()[0].lower() if agent.name else ""
                                     agent_full_name = agent.name.lower()
                                     
                                     # Priority 1: Exact full name match (highest priority)
@@ -991,8 +991,8 @@ async def slack_events(request: Request):
                             
                             if matched_agent:
                                 print(f"💬 Processing channel message as mention for {matched_agent.name}: {event_text[:100]}...")
-                                        await handle_slack_mention(event, data.get("team_id"))
-                                        return {"status": "ok"}
+                                await handle_slack_mention(event, data.get("team_id"))
+                                return {"status": "ok"}
                             else:
                                 print(f"📢 Channel message (not in thread, no agent mention detected): {event_text[:100]}...")
                         finally:
@@ -1265,11 +1265,11 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     score = 0
                     matched_pattern = None
                     
-                # Check for agent name in mention
-                agent_first_name = agent.name.split()[0].lower() if agent.name else ""
-                agent_last_name = agent.name.split()[-1].lower() if len(agent.name.split()) > 1 else ""
-                agent_full_name = agent.name.lower()
-                
+                    # Check for agent name in mention
+                    agent_first_name = agent.name.split()[0].lower() if agent.name else ""
+                    agent_last_name = agent.name.split()[-1].lower() if len(agent.name.split()) > 1 else ""
+                    agent_full_name = agent.name.lower()
+                    
                     # Priority 1: Exact full name match (highest priority)
                     if agent_full_name in original_text_lower:
                         # Check for word boundaries to avoid partial matches
@@ -1349,7 +1349,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     return  # Don't process - avoid wrong agent responding
                 elif agents:
                     # No mentions detected at all - safe to use first agent as fallback
-                agent_name_match = agents[0]
+                    agent_name_match = agents[0]
                     print(f"✅ No agent mentioned, using first agent in channel: {agent_name_match.name}")
             
             if not agent_name_match:
@@ -1845,7 +1845,7 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
                     return  # Don't process - avoid wrong agent responding
                 elif agents:
                     # No mentions detected at all - safe to use first agent as fallback
-                agent = agents[0]
+                    agent = agents[0]
                     print(f"✅ No agent mentioned in thread reply, using first agent in channel: {agent.name}")
             
             # Get bot token using helper function (checks agent-specific tokens)
