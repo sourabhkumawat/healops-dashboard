@@ -728,7 +728,7 @@ async def slack_events(request: Request):
                     bot_user_id = get_bot_user_id_from_db(channel_id) or get_bot_user_id()
                     if bot_user_id and event_user_id == bot_user_id:
                         print(f"⏭️  Skipping message we just posted (ts: {event_ts[:10]}..., confirmed bot user_id: {bot_user_id})")
-                        return {"status": "ok"}
+                    return {"status": "ok"}
                     else:
                         # This is a user message, not a bot message - don't skip it even if timestamp matches
                         print(f"⚠️  Message ts {event_ts[:10]}... is in recently_posted, but user_id {event_user_id} != bot_user_id {bot_user_id}, processing anyway")
@@ -855,22 +855,42 @@ async def slack_events(request: Request):
                             matched_agent = None
                             
                             # First, try to match by Slack user ID (most reliable)
+                            # IMPORTANT: Check ALL agents, not just those for this channel, because
+                            # the mentioned agent might be in a different channel or have no channel set
                             if mentioned_user_ids:
+                                print(f"🔍 Attempting to match by user IDs: {mentioned_user_ids}")
+                                # First check agents in channel
                                 for agent in agents:
                                     if agent.slack_user_id and agent.slack_user_id in mentioned_user_ids:
                                         matched_agent = agent
-                                        print(f"✅ Channel message matched agent by Slack user ID: {agent.name} (ID: {agent.slack_user_id})")
+                                        print(f"✅ Channel message matched agent by Slack user ID (in channel): {agent.name} (ID: {agent.slack_user_id})")
                                         break
+                                
+                                # If not found in channel agents, check ALL agents
+                                if not matched_agent:
+                                    print(f"   Not found in channel agents, checking all agents...")
+                                    all_agents = db.query(AgentEmployee).all()
+                                    for agent in all_agents:
+                                        if agent.slack_user_id and agent.slack_user_id in mentioned_user_ids:
+                                            matched_agent = agent
+                                            print(f"✅ Channel message matched agent by Slack user ID (all agents): {agent.name} (ID: {agent.slack_user_id})")
+                                            print(f"   Note: Agent {agent.name} is not in channel {channel_id} but was mentioned by user ID")
+                                            break
                             
                             # If no match by user ID, try to match by display name from Slack mention
                             if not matched_agent and mentioned_display_names:
+                                print(f"🔍 Attempting to match by display names: {mentioned_display_names}")
+                                # First check agents in channel
                                 for agent in agents:
                                     if not agent.name:
                                         continue
                                     agent_full_name = agent.name.lower()
                                     agent_first_name = agent.name.split()[0].lower() if agent.name else ""
                                     
+                                    print(f"   Checking agent: {agent.name} (full: '{agent_full_name}', first: '{agent_first_name}')")
+                                    
                                     for display_name in mentioned_display_names:
+                                        print(f"      Comparing display_name '{display_name}' with agent '{agent.name}'")
                                         if display_name == agent_full_name:
                                             matched_agent = agent
                                             print(f"✅ Channel message matched agent by exact display name: {agent.name} (display: '{display_name}')")
@@ -886,6 +906,33 @@ async def slack_events(request: Request):
                                     
                                     if matched_agent:
                                         break
+                                
+                                # If not found in channel agents, check ALL agents
+                                if not matched_agent:
+                                    print(f"   Not found in channel agents, checking all agents for display name match...")
+                                    all_agents = db.query(AgentEmployee).all()
+                                    for agent in all_agents:
+                                        if not agent.name:
+                                            continue
+                                        agent_full_name = agent.name.lower()
+                                        agent_first_name = agent.name.split()[0].lower() if agent.name else ""
+                                        
+                                        for display_name in mentioned_display_names:
+                                            if display_name == agent_full_name:
+                                                matched_agent = agent
+                                                print(f"✅ Channel message matched agent by exact display name (all agents): {agent.name} (display: '{display_name}')")
+                                                break
+                                            elif agent_first_name and display_name == agent_first_name:
+                                                matched_agent = agent
+                                                print(f"✅ Channel message matched agent by first name from display (all agents): {agent.name} (display: '{display_name}')")
+                                                break
+                                            elif agent_full_name in display_name or display_name in agent_full_name:
+                                                matched_agent = agent
+                                                print(f"✅ Channel message matched agent by partial display name (all agents): {agent.name} (display: '{display_name}')")
+                                                break
+                                        
+                                        if matched_agent:
+                                            break
                             
                             # If still no match, try to match from text content (prioritize exact matches)
                             if not matched_agent:
@@ -898,7 +945,7 @@ async def slack_events(request: Request):
                                     score = 0
                                     matched_pattern = None
                                     
-                                    agent_first_name = agent.name.split()[0].lower() if agent.name else ""
+                                agent_first_name = agent.name.split()[0].lower() if agent.name else ""
                                     agent_full_name = agent.name.lower()
                                     
                                     # Priority 1: Exact full name match (highest priority)
@@ -944,8 +991,8 @@ async def slack_events(request: Request):
                             
                             if matched_agent:
                                 print(f"💬 Processing channel message as mention for {matched_agent.name}: {event_text[:100]}...")
-                                await handle_slack_mention(event, data.get("team_id"))
-                                return {"status": "ok"}
+                                        await handle_slack_mention(event, data.get("team_id"))
+                                        return {"status": "ok"}
                             else:
                                 print(f"📢 Channel message (not in thread, no agent mention detected): {event_text[:100]}...")
                         finally:
@@ -1149,20 +1196,34 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     print(f"   Agent {idx}: {agent.name} (role: {agent.role}, slack_user_id: {agent.slack_user_id[:10] if agent.slack_user_id else 'None'}...)")
             
             # First, try to match by Slack user ID (most reliable)
+            # IMPORTANT: Check ALL agents, not just those for this channel, because
+            # the mentioned agent might be in a different channel or have no channel set
             if mentioned_user_ids:
                 print(f"🔍 Attempting to match by user IDs: {mentioned_user_ids}")
+                # First check agents in channel
                 for agent in agents:
                     if agent.slack_user_id and agent.slack_user_id in mentioned_user_ids:
                         agent_name_match = agent
-                        print(f"✅ Matched agent by Slack user ID: {agent.name} (ID: {agent.slack_user_id})")
+                        print(f"✅ Matched agent by Slack user ID (in channel): {agent.name} (ID: {agent.slack_user_id})")
                         break
+                
+                # If not found in channel agents, check ALL agents
+                if not agent_name_match:
+                    print(f"   Not found in channel agents, checking all agents...")
+                    all_agents = db.query(AgentEmployee).all()
+                    for agent in all_agents:
+                        if agent.slack_user_id and agent.slack_user_id in mentioned_user_ids:
+                            agent_name_match = agent
+                            print(f"✅ Matched agent by Slack user ID (all agents): {agent.name} (ID: {agent.slack_user_id})")
+                            print(f"   Note: Agent {agent.name} is not in channel {channel_id} but was mentioned by user ID")
+                            break
             
             # If no match by user ID, try to match by display name from Slack mention
             if not agent_name_match and mentioned_display_names:
                 print(f"🔍 Attempting to match by display names: {mentioned_display_names}")
-                for agent in agents:
-                    if not agent.name:
-                        continue
+            for agent in agents:
+                if not agent.name:
+                    continue
                     agent_full_name = agent.name.lower()
                     agent_first_name = agent.name.split()[0].lower() if agent.name else ""
                     
@@ -1204,11 +1265,11 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     score = 0
                     matched_pattern = None
                     
-                    # Check for agent name in mention
-                    agent_first_name = agent.name.split()[0].lower() if agent.name else ""
-                    agent_last_name = agent.name.split()[-1].lower() if len(agent.name.split()) > 1 else ""
-                    agent_full_name = agent.name.lower()
-                    
+                # Check for agent name in mention
+                agent_first_name = agent.name.split()[0].lower() if agent.name else ""
+                agent_last_name = agent.name.split()[-1].lower() if len(agent.name.split()) > 1 else ""
+                agent_full_name = agent.name.lower()
+                
                     # Priority 1: Exact full name match (highest priority)
                     if agent_full_name in original_text_lower:
                         # Check for word boundaries to avoid partial matches
@@ -1288,7 +1349,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     return  # Don't process - avoid wrong agent responding
                 elif agents:
                     # No mentions detected at all - safe to use first agent as fallback
-                    agent_name_match = agents[0]
+                agent_name_match = agents[0]
                     print(f"✅ No agent mentioned, using first agent in channel: {agent_name_match.name}")
             
             if not agent_name_match:
@@ -1296,10 +1357,19 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                 print(f"   Query text: {query}")
                 print(f"   Channel ID received: {channel_id}")
                 
-                # Try to find any agent (fallback if channel_id doesn't match)
+                # Only use fallback if NO mentions were detected
+                # If mentions were detected but didn't match, that's an error
+                if mentioned_user_ids or mentioned_display_names:
+                    print(f"❌ ERROR: Detected agent mentions but couldn't match to any agent!")
+                    print(f"   Mentioned user IDs: {mentioned_user_ids}")
+                    print(f"   Mentioned display names: {mentioned_display_names}")
+                    print(f"   This message will NOT be processed to avoid wrong agent responding")
+                    return  # Don't process - avoid wrong agent responding
+                
+                # Try to find any agent (fallback if channel_id doesn't match AND no mentions detected)
                 all_agents = db.query(AgentEmployee).all()
                 if all_agents:
-                    print(f"   Attempting to use first available agent from {len(all_agents)} total agents")
+                    print(f"   Attempting to use first available agent from {len(all_agents)} total agents (no mentions detected)")
                     agent_name_match = all_agents[0]
                     print(f"   Using agent: {agent_name_match.name} (channel: {agent_name_match.slack_channel_id})")
                 else:
@@ -1621,23 +1691,43 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
             agent = None
             
             # First, try to match by Slack user ID (most reliable)
+            # IMPORTANT: Check ALL agents, not just those for this channel, because
+            # the mentioned agent might be in a different channel or have no channel set
             if mentioned_user_ids:
+                print(f"🔍 Attempting to match by user IDs: {mentioned_user_ids}")
+                # First check agents in channel
                 for candidate_agent in agents:
                     if candidate_agent.slack_user_id and candidate_agent.slack_user_id in mentioned_user_ids:
                         agent = candidate_agent
-                        print(f"✅ Thread reply matched agent by Slack user ID: {agent.name} (ID: {candidate_agent.slack_user_id})")
+                        print(f"✅ Thread reply matched agent by Slack user ID (in channel): {agent.name} (ID: {candidate_agent.slack_user_id})")
                         break
+                
+                # If not found in channel agents, check ALL agents
+                if not agent:
+                    print(f"   Not found in channel agents, checking all agents...")
+                    all_agents = db.query(AgentEmployee).all()
+                    for candidate_agent in all_agents:
+                        if candidate_agent.slack_user_id and candidate_agent.slack_user_id in mentioned_user_ids:
+                            agent = candidate_agent
+                            print(f"✅ Thread reply matched agent by Slack user ID (all agents): {agent.name} (ID: {candidate_agent.slack_user_id})")
+                            print(f"   Note: Agent {agent.name} is not in channel {channel_id} but was mentioned by user ID")
+                            break
             
             # If no match by user ID, try to match by display name from Slack mention
             if not agent and mentioned_display_names:
+                print(f"🔍 Attempting to match by display names: {mentioned_display_names}")
+                # First check agents in channel
                 for candidate_agent in agents:
                     if not candidate_agent.name:
                         continue
                     agent_full_name = candidate_agent.name.lower()
                     agent_first_name = candidate_agent.name.split()[0].lower() if candidate_agent.name else ""
                     
+                    print(f"   Checking agent: {candidate_agent.name} (full: '{agent_full_name}', first: '{agent_first_name}')")
+                    
                     # Check if any mentioned display name matches the agent's name
                     for display_name in mentioned_display_names:
+                        print(f"      Comparing display_name '{display_name}' with agent '{candidate_agent.name}'")
                         # Exact match on full name (highest priority)
                         if display_name == agent_full_name:
                             agent = candidate_agent
@@ -1656,6 +1746,33 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
                     
                     if agent:
                         break
+                
+                # If not found in channel agents, check ALL agents
+                if not agent:
+                    print(f"   Not found in channel agents, checking all agents for display name match...")
+                    all_agents = db.query(AgentEmployee).all()
+                    for candidate_agent in all_agents:
+                        if not candidate_agent.name:
+                            continue
+                        agent_full_name = candidate_agent.name.lower()
+                        agent_first_name = candidate_agent.name.split()[0].lower() if candidate_agent.name else ""
+                        
+                        for display_name in mentioned_display_names:
+                            if display_name == agent_full_name:
+                                agent = candidate_agent
+                                print(f"✅ Thread reply matched agent by exact display name (all agents): {agent.name} (display: '{display_name}')")
+                                break
+                            elif agent_first_name and display_name == agent_first_name:
+                                agent = candidate_agent
+                                print(f"✅ Thread reply matched agent by first name from display (all agents): {agent.name} (display: '{display_name}')")
+                                break
+                            elif agent_full_name in display_name or display_name in agent_full_name:
+                                agent = candidate_agent
+                                print(f"✅ Thread reply matched agent by partial display name (all agents): {agent.name} (display: '{display_name}')")
+                                break
+                        
+                        if agent:
+                            break
             
             # If still no match, try to match from text content (prioritize exact matches)
             if not agent:
@@ -1728,7 +1845,7 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
                     return  # Don't process - avoid wrong agent responding
                 elif agents:
                     # No mentions detected at all - safe to use first agent as fallback
-                    agent = agents[0]
+                agent = agents[0]
                     print(f"✅ No agent mentioned in thread reply, using first agent in channel: {agent.name}")
             
             # Get bot token using helper function (checks agent-specific tokens)
