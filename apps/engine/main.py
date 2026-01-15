@@ -997,15 +997,30 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
         # Or: "@healops-agent ask Morgan what are you working on?"
         agent_name_match = None
         
-        # Clean text: Remove Slack user mention formatting like <@U123456|displayname>
+        # Extract Slack user mentions BEFORE cleaning to match by display name
         import re
+        mentioned_user_ids = []
+        mentioned_display_names = []
+        # Extract Slack user mentions: <@U123456> or <@U123456|Display Name>
+        mention_pattern = r'<@([A-Z0-9]+)(?:\|([^>]+))?>'
+        for match in re.finditer(mention_pattern, text):
+            user_id = match.group(1)
+            display_name = match.group(2) if match.group(2) else None
+            mentioned_user_ids.append(user_id)
+            if display_name:
+                mentioned_display_names.append(display_name.lower())
+        
+        # Clean text: Remove Slack user mention formatting like <@U123456|displayname>
         # Remove Slack user mentions: <@U123456> or <@U123456|Display Name>
         cleaned_text = re.sub(r'<@[A-Z0-9]+\|?[^>]*>', '', text)
         # Remove extra whitespace
         cleaned_text = ' '.join(cleaned_text.split())
         query = cleaned_text.lower()
+        original_text_lower = text.lower()  # Keep original for matching
         
         print(f"🔍 Query after cleaning: {query[:100]}...")
+        if mentioned_display_names:
+            print(f"🔍 Found Slack mentions with display names: {mentioned_display_names}")
         
         # Find agent mentions in text (format: @agent-name or agent name)
         db = SessionLocal()
@@ -1023,89 +1038,113 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                 print(f"   Channel IDs in DB: {[a.slack_channel_id for a in all_agents if a.slack_channel_id]}")
                 agents = all_agents  # Use all agents as fallback
             
-            # Try to match agent name from text
-            # Check for various patterns: "morgan", "morgan taylor", "ask morgan", "tell morgan", etc.
-            # Also handles: "alex", "alexandra", "alexandra chen", etc.
-            for agent in agents:
-                if not agent.name:
-                    continue
-                    
-                # Check for agent name in mention
-                agent_first_name = agent.name.split()[0].lower() if agent.name else ""
-                agent_last_name = agent.name.split()[-1].lower() if len(agent.name.split()) > 1 else ""
-                agent_full_name = agent.name.lower()
-                
-                # Handle common nicknames/variations
-                # "alex" for "Alexandra", "alexandra" for "Alexandra Chen"
-                name_variations = [agent_first_name, agent_full_name]
-                if agent_first_name == "alexandra":
-                    name_variations.extend(["alex", " alex ", "alex "])
-                elif agent_first_name == "morgan":
-                    # Morgan doesn't have a common nickname, but check full name
-                    name_variations.append("morgan taylor")
-                
-                # Also check role keywords (e.g., "qa" for Morgan, "coding" for Alex)
-                agent_role_keywords = []
-                if agent.role:
-                    role_lower = agent.role.lower()
-                    if "qa" in role_lower or "quality" in role_lower:
-                        agent_role_keywords.append("qa")
-                    if "engineer" in role_lower:
-                        agent_role_keywords.append("engineer")
-                    if "software" in role_lower or "coding" in role_lower:
-                        agent_role_keywords.append("coding")
-                        agent_role_keywords.append("software")
-                
-                # Check multiple patterns
-                name_patterns = []
-                for variation in name_variations:
-                    if variation:
-                        name_patterns.extend([
-                            variation,
-                            f" {variation} ",  # With spaces on both sides
-                            f" {variation}",   # With space before
-                            f"{variation} ",   # With space after
-                        ])
-                
-                # Also check for "ask X", "tell X", "@X" patterns
-                if agent_first_name:
-                    # Add patterns for first name
-                    name_patterns.extend([
-                        f"ask {agent_first_name}",
-                        f"tell {agent_first_name}",
-                        f"@ {agent_first_name}",
-                        f"@{agent_first_name}",
-                    ])
-                    # Add patterns for nickname if applicable
-                    if agent_first_name == "alexandra":
-                        name_patterns.extend([
-                            "ask alex",
-                            "tell alex",
-                            "@ alex",
-                            "@alex",
-                            " alex ",
-                        ])
-                
-                # Check if any pattern matches
-                matched = False
-                for pattern in name_patterns:
-                    if pattern and pattern in query:
-                        matched = True
-                        print(f"✅ Matched pattern '{pattern}' for agent {agent.name}")
+            # First, try to match by Slack user ID (most reliable)
+            if mentioned_user_ids:
+                for agent in agents:
+                    if agent.slack_user_id and agent.slack_user_id in mentioned_user_ids:
+                        agent_name_match = agent
+                        print(f"✅ Matched agent by Slack user ID: {agent.name} (ID: {agent.slack_user_id})")
                         break
-                
-                # Also check role keywords (but only if no name match yet)
-                if not matched and agent_role_keywords:
-                    for keyword in agent_role_keywords:
-                        if keyword in query:
-                            matched = True
-                            print(f"✅ Matched agent by role keyword '{keyword}': {agent.name}")
+            
+            # If no match by user ID, try to match by display name from Slack mention
+            if not agent_name_match and mentioned_display_names:
+                for agent in agents:
+                    if not agent.name:
+                        continue
+                    agent_full_name = agent.name.lower()
+                    agent_first_name = agent.name.split()[0].lower() if agent.name else ""
+                    
+                    # Check if any mentioned display name matches the agent's name
+                    for display_name in mentioned_display_names:
+                        # Exact match on full name (highest priority)
+                        if display_name == agent_full_name:
+                            agent_name_match = agent
+                            print(f"✅ Matched agent by exact display name: {agent.name} (display: '{display_name}')")
                             break
+                        # Match on first name (e.g., "morgan" matches "Morgan Taylor")
+                        elif agent_first_name and display_name == agent_first_name:
+                            agent_name_match = agent
+                            print(f"✅ Matched agent by first name from display: {agent.name} (display: '{display_name}')")
+                            break
+                        # Partial match (e.g., "morgan taylor" in display name)
+                        elif agent_full_name in display_name or display_name in agent_full_name:
+                            agent_name_match = agent
+                            print(f"✅ Matched agent by partial display name: {agent.name} (display: '{display_name}')")
+                            break
+                    
+                    if agent_name_match:
+                        break
+            
+            # If still no match, try to match from text content (prioritize exact matches)
+            if not agent_name_match:
+                # Build match scores for each agent (higher score = better match)
+                agent_scores = []
                 
-                if matched:
-                    agent_name_match = agent
-                    print(f"✅ Matched agent by name: {agent.name} (role: {agent.role})")
-                    break
+                for agent in agents:
+                    if not agent.name:
+                        continue
+                    
+                    score = 0
+                    matched_pattern = None
+                    
+                    # Check for agent name in mention
+                    agent_first_name = agent.name.split()[0].lower() if agent.name else ""
+                    agent_last_name = agent.name.split()[-1].lower() if len(agent.name.split()) > 1 else ""
+                    agent_full_name = agent.name.lower()
+                    
+                    # Priority 1: Exact full name match (highest priority)
+                    if agent_full_name in original_text_lower:
+                        # Check for word boundaries to avoid partial matches
+                        full_name_pattern = r'\b' + re.escape(agent_full_name) + r'\b'
+                        if re.search(full_name_pattern, original_text_lower):
+                            score = 100
+                            matched_pattern = f"exact full name: '{agent_full_name}'"
+                    
+                    # Priority 2: Full name with "morgan taylor" format (for Morgan)
+                    if score == 0 and agent_first_name == "morgan" and "morgan taylor" in original_text_lower:
+                        score = 90
+                        matched_pattern = "full name format: 'morgan taylor'"
+                    
+                    # Priority 3: First name match (but lower priority to avoid false matches)
+                    if score == 0:
+                        first_name_pattern = r'\b' + re.escape(agent_first_name) + r'\b'
+                        if re.search(first_name_pattern, original_text_lower):
+                            # Check if it's not a substring of another word
+                            score = 50
+                            matched_pattern = f"first name: '{agent_first_name}'"
+                    
+                    # Priority 4: Nickname matches (for Alex)
+                    if score == 0 and agent_first_name == "alexandra":
+                        if re.search(r'\balex\b', original_text_lower):
+                            score = 60
+                            matched_pattern = "nickname: 'alex'"
+                    
+                    # Priority 5: Role keywords (lowest priority)
+                    if score == 0 and agent.role:
+                        role_lower = agent.role.lower()
+                        if "qa" in role_lower and "qa" in original_text_lower:
+                            score = 20
+                            matched_pattern = "role keyword: 'qa'"
+                        elif "engineer" in role_lower and "engineer" in original_text_lower:
+                            score = 10
+                            matched_pattern = "role keyword: 'engineer'"
+                    
+                    if score > 0:
+                        agent_scores.append((score, agent, matched_pattern))
+                
+                # Sort by score (highest first) and pick the best match
+                if agent_scores:
+                    agent_scores.sort(key=lambda x: x[0], reverse=True)
+                    best_score, agent_name_match, matched_pattern = agent_scores[0]
+                    print(f"✅ Matched agent by text: {agent_name_match.name} (score: {best_score}, pattern: {matched_pattern})")
+                    
+                    # If there's a tie or close scores, prefer exact matches
+                    if len(agent_scores) > 1 and agent_scores[1][0] >= best_score * 0.8:
+                        # Check if we have an exact full name match
+                        exact_matches = [a for a in agent_scores if a[0] >= 90]
+                        if exact_matches:
+                            agent_name_match = exact_matches[0][1]
+                            print(f"✅ Preferring exact match: {agent_name_match.name}")
             
             # If no specific agent mentioned, use first agent in channel
             if not agent_name_match and agents:
@@ -1425,32 +1464,116 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
                 return
             
             # Try to match agent name from text (similar to mention handler)
-            agent = None
-            text_lower = text.lower()
+            # Extract Slack user mentions BEFORE cleaning to match by display name
+            import re
+            mentioned_user_ids = []
+            mentioned_display_names = []
+            # Extract Slack user mentions: <@U123456> or <@U123456|Display Name>
+            mention_pattern = r'<@([A-Z0-9]+)(?:\|([^>]+))?>'
+            for match in re.finditer(mention_pattern, text):
+                user_id = match.group(1)
+                display_name = match.group(2) if match.group(2) else None
+                mentioned_user_ids.append(user_id)
+                if display_name:
+                    mentioned_display_names.append(display_name.lower())
             
-            for candidate_agent in agents:
-                if not candidate_agent.name:
-                    continue
-                    
-                agent_first_name = candidate_agent.name.split()[0].lower() if candidate_agent.name else ""
-                agent_full_name = candidate_agent.name.lower()
-                
-                # Handle common nicknames/variations
-                name_variations = [agent_first_name, agent_full_name]
-                if agent_first_name == "alexandra":
-                    name_variations.extend(["alex", " alex ", "alex "])
-                elif agent_first_name == "morgan":
-                    name_variations.append("morgan taylor")
-                
-                # Check if any variation matches
-                for variation in name_variations:
-                    if variation and variation in text_lower:
+            text_lower = text.lower()
+            agent = None
+            
+            # First, try to match by Slack user ID (most reliable)
+            if mentioned_user_ids:
+                for candidate_agent in agents:
+                    if candidate_agent.slack_user_id and candidate_agent.slack_user_id in mentioned_user_ids:
                         agent = candidate_agent
-                        print(f"✅ Thread reply matched agent: {agent.name} (matched: '{variation}')")
+                        print(f"✅ Thread reply matched agent by Slack user ID: {agent.name} (ID: {candidate_agent.slack_user_id})")
                         break
+            
+            # If no match by user ID, try to match by display name from Slack mention
+            if not agent and mentioned_display_names:
+                for candidate_agent in agents:
+                    if not candidate_agent.name:
+                        continue
+                    agent_full_name = candidate_agent.name.lower()
+                    agent_first_name = candidate_agent.name.split()[0].lower() if candidate_agent.name else ""
+                    
+                    # Check if any mentioned display name matches the agent's name
+                    for display_name in mentioned_display_names:
+                        # Exact match on full name (highest priority)
+                        if display_name == agent_full_name:
+                            agent = candidate_agent
+                            print(f"✅ Thread reply matched agent by exact display name: {agent.name} (display: '{display_name}')")
+                            break
+                        # Match on first name (e.g., "morgan" matches "Morgan Taylor")
+                        elif agent_first_name and display_name == agent_first_name:
+                            agent = candidate_agent
+                            print(f"✅ Thread reply matched agent by first name from display: {agent.name} (display: '{display_name}')")
+                            break
+                        # Partial match (e.g., "morgan taylor" in display name)
+                        elif agent_full_name in display_name or display_name in agent_full_name:
+                            agent = candidate_agent
+                            print(f"✅ Thread reply matched agent by partial display name: {agent.name} (display: '{display_name}')")
+                            break
+                    
+                    if agent:
+                        break
+            
+            # If still no match, try to match from text content (prioritize exact matches)
+            if not agent:
+                # Build match scores for each agent (higher score = better match)
+                agent_scores = []
                 
-                if agent:
-                    break
+                for candidate_agent in agents:
+                    if not candidate_agent.name:
+                        continue
+                    
+                    score = 0
+                    matched_pattern = None
+                    
+                    agent_first_name = candidate_agent.name.split()[0].lower() if candidate_agent.name else ""
+                    agent_full_name = candidate_agent.name.lower()
+                    
+                    # Priority 1: Exact full name match (highest priority)
+                    if agent_full_name in text_lower:
+                        # Check for word boundaries to avoid partial matches
+                        full_name_pattern = r'\b' + re.escape(agent_full_name) + r'\b'
+                        if re.search(full_name_pattern, text_lower):
+                            score = 100
+                            matched_pattern = f"exact full name: '{agent_full_name}'"
+                    
+                    # Priority 2: Full name with "morgan taylor" format (for Morgan)
+                    if score == 0 and agent_first_name == "morgan" and "morgan taylor" in text_lower:
+                        score = 90
+                        matched_pattern = "full name format: 'morgan taylor'"
+                    
+                    # Priority 3: First name match (but lower priority to avoid false matches)
+                    if score == 0:
+                        first_name_pattern = r'\b' + re.escape(agent_first_name) + r'\b'
+                        if re.search(first_name_pattern, text_lower):
+                            score = 50
+                            matched_pattern = f"first name: '{agent_first_name}'"
+                    
+                    # Priority 4: Nickname matches (for Alex)
+                    if score == 0 and agent_first_name == "alexandra":
+                        if re.search(r'\balex\b', text_lower):
+                            score = 60
+                            matched_pattern = "nickname: 'alex'"
+                    
+                    if score > 0:
+                        agent_scores.append((score, candidate_agent, matched_pattern))
+                
+                # Sort by score (highest first) and pick the best match
+                if agent_scores:
+                    agent_scores.sort(key=lambda x: x[0], reverse=True)
+                    best_score, agent, matched_pattern = agent_scores[0]
+                    print(f"✅ Thread reply matched agent by text: {agent.name} (score: {best_score}, pattern: {matched_pattern})")
+                    
+                    # If there's a tie or close scores, prefer exact matches
+                    if len(agent_scores) > 1 and agent_scores[1][0] >= best_score * 0.8:
+                        # Check if we have an exact full name match
+                        exact_matches = [a for a in agent_scores if a[0] >= 90]
+                        if exact_matches:
+                            agent = exact_matches[0][1]
+                            print(f"✅ Preferring exact match: {agent.name}")
             
             # If no specific agent mentioned, use first agent in channel
             if not agent:
