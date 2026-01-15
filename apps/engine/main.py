@@ -1136,15 +1136,21 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
             ).all()
             
             print(f"🔍 Found {len(agents)} agent(s) for channel {channel_id}")
+            for idx, agent in enumerate(agents):
+                print(f"   Agent {idx}: {agent.name} (role: {agent.role}, slack_user_id: {agent.slack_user_id[:10] if agent.slack_user_id else 'None'}...)")
+            
             if not agents:
                 # Try to find agents without channel filter (in case channel_id format is different)
                 all_agents = db.query(AgentEmployee).all()
                 print(f"⚠️  No agents found for channel {channel_id}, but {len(all_agents)} agent(s) exist total")
                 print(f"   Channel IDs in DB: {[a.slack_channel_id for a in all_agents if a.slack_channel_id]}")
                 agents = all_agents  # Use all agents as fallback
+                for idx, agent in enumerate(agents):
+                    print(f"   Agent {idx}: {agent.name} (role: {agent.role}, slack_user_id: {agent.slack_user_id[:10] if agent.slack_user_id else 'None'}...)")
             
             # First, try to match by Slack user ID (most reliable)
             if mentioned_user_ids:
+                print(f"🔍 Attempting to match by user IDs: {mentioned_user_ids}")
                 for agent in agents:
                     if agent.slack_user_id and agent.slack_user_id in mentioned_user_ids:
                         agent_name_match = agent
@@ -1153,14 +1159,18 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
             
             # If no match by user ID, try to match by display name from Slack mention
             if not agent_name_match and mentioned_display_names:
+                print(f"🔍 Attempting to match by display names: {mentioned_display_names}")
                 for agent in agents:
                     if not agent.name:
                         continue
                     agent_full_name = agent.name.lower()
                     agent_first_name = agent.name.split()[0].lower() if agent.name else ""
                     
+                    print(f"   Checking agent: {agent.name} (full: '{agent_full_name}', first: '{agent_first_name}')")
+                    
                     # Check if any mentioned display name matches the agent's name
                     for display_name in mentioned_display_names:
+                        print(f"      Comparing display_name '{display_name}' with agent '{agent.name}'")
                         # Exact match on full name (highest priority)
                         if display_name == agent_full_name:
                             agent_name_match = agent
@@ -1182,6 +1192,8 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
             
             # If still no match, try to match from text content (prioritize exact matches)
             if not agent_name_match:
+                print(f"🔍 No match by user ID or display name, trying text content matching")
+                print(f"   Original text (lower): {original_text_lower[:200]}")
                 # Build match scores for each agent (higher score = better match)
                 agent_scores = []
                 
@@ -1236,9 +1248,13 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     
                     if score > 0:
                         agent_scores.append((score, agent, matched_pattern))
+                        print(f"   Agent {agent.name} scored {score} (pattern: {matched_pattern})")
+                    else:
+                        print(f"   Agent {agent.name} scored 0 (no match)")
                 
                 # Sort by score (highest first) and pick the best match
                 if agent_scores:
+                    print(f"🔍 Found {len(agent_scores)} agent(s) with matches, scores: {[f'{a[1].name}:{a[0]}' for a in agent_scores]}")
                     agent_scores.sort(key=lambda x: x[0], reverse=True)
                     best_score, agent_name_match, matched_pattern = agent_scores[0]
                     print(f"✅ Matched agent by text: {agent_name_match.name} (score: {best_score}, pattern: {matched_pattern})")
@@ -1250,11 +1266,30 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                         if exact_matches:
                             agent_name_match = exact_matches[0][1]
                             print(f"✅ Preferring exact match: {agent_name_match.name}")
+                else:
+                    # No matches found in text - log why
+                    print(f"⚠️  No agent matches found in text content")
+                    print(f"   Original text: {text[:200]}")
+                    print(f"   Original text (lower): {original_text_lower[:200]}")
+                    print(f"   Mentioned user IDs: {mentioned_user_ids}")
+                    print(f"   Mentioned display names: {mentioned_display_names}")
+                    print(f"   Available agents: {[a.name for a in agents]}")
             
-            # If no specific agent mentioned, use first agent in channel
-            if not agent_name_match and agents:
-                agent_name_match = agents[0]
-                print(f"✅ Using first agent in channel: {agent_name_match.name}")
+            # Only use fallback to first agent if NO mentions were detected at all
+            # If mentions were detected but didn't match, that's an error - don't default
+            if not agent_name_match:
+                if mentioned_user_ids or mentioned_display_names:
+                    # We detected mentions but couldn't match them - this is an error
+                    print(f"❌ ERROR: Detected agent mentions but couldn't match to any agent!")
+                    print(f"   Mentioned user IDs: {mentioned_user_ids}")
+                    print(f"   Mentioned display names: {mentioned_display_names}")
+                    print(f"   Available agents: {[(a.name, a.slack_user_id) for a in agents]}")
+                    print(f"   This message will NOT be processed to avoid wrong agent responding")
+                    return  # Don't process - avoid wrong agent responding
+                elif agents:
+                    # No mentions detected at all - safe to use first agent as fallback
+                    agent_name_match = agents[0]
+                    print(f"✅ No agent mentioned, using first agent in channel: {agent_name_match.name}")
             
             if not agent_name_match:
                 print(f"⚠️  No agent found for channel {channel_id}")
@@ -1680,10 +1715,21 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
                             agent = exact_matches[0][1]
                             print(f"✅ Preferring exact match: {agent.name}")
             
-            # If no specific agent mentioned, use first agent in channel
+            # Only use fallback to first agent if NO mentions were detected at all
+            # If mentions were detected but didn't match, that's an error - don't default
             if not agent:
-                agent = agents[0]
-                print(f"✅ Using first agent in channel for thread reply: {agent.name}")
+                if mentioned_user_ids or mentioned_display_names:
+                    # We detected mentions but couldn't match them - this is an error
+                    print(f"❌ ERROR: Detected agent mentions in thread reply but couldn't match to any agent!")
+                    print(f"   Mentioned user IDs: {mentioned_user_ids}")
+                    print(f"   Mentioned display names: {mentioned_display_names}")
+                    print(f"   Available agents: {[(a.name, a.slack_user_id) for a in agents]}")
+                    print(f"   This thread reply will NOT be processed to avoid wrong agent responding")
+                    return  # Don't process - avoid wrong agent responding
+                elif agents:
+                    # No mentions detected at all - safe to use first agent as fallback
+                    agent = agents[0]
+                    print(f"✅ No agent mentioned in thread reply, using first agent in channel: {agent.name}")
             
             # Get bot token using helper function (checks agent-specific tokens)
             bot_token = get_bot_token_for_agent(
