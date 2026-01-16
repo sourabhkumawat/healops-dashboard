@@ -870,12 +870,59 @@ async def slack_events(request: Request):
                                 if not matched_agent:
                                     print(f"   Not found in channel agents, checking all agents...")
                                     all_agents = db.query(AgentEmployee).all()
+                                    print(f"   Checking {len(all_agents)} total agent(s):")
                                     for agent in all_agents:
+                                        agent_id_display = agent.slack_user_id[:10] + "..." if agent.slack_user_id else "None"
+                                        print(f"      - {agent.name}: slack_user_id={agent.slack_user_id if agent.slack_user_id else 'None'}")
                                         if agent.slack_user_id and agent.slack_user_id in mentioned_user_ids:
                                             matched_agent = agent
                                             print(f"✅ Channel message matched agent by Slack user ID (all agents): {agent.name} (ID: {agent.slack_user_id})")
                                             print(f"   Note: Agent {agent.name} is not in channel {channel_id} but was mentioned by user ID")
                                             break
+                                    
+                                    # If still no match and we have mentioned user IDs, try to resolve by fetching bot_user_id from Slack
+                                    if not matched_agent and mentioned_user_ids:
+                                        print(f"   ⚠️  No match found. Attempting to resolve user ID {mentioned_user_ids[0]} by checking agents' bot tokens...")
+                                        for agent in all_agents:
+                                            # Skip if agent already has a slack_user_id that doesn't match
+                                            if agent.slack_user_id and agent.slack_user_id not in mentioned_user_ids:
+                                                continue
+                                            
+                                            # Try to get bot token and fetch bot_user_id from Slack
+                                            # This works even if agent doesn't have token in DB - get_bot_token_for_agent checks env vars
+                                            try:
+                                                from src.auth.crypto_utils import decrypt_token
+                                                bot_token = get_bot_token_for_agent(
+                                                    agent_name=agent.name,
+                                                    agent_role=agent.role,
+                                                    agent_stored_token=agent.slack_bot_token
+                                                )
+                                                if bot_token:
+                                                    from src.services.slack.service import SlackService
+                                                    slack_service = SlackService(bot_token)
+                                                    auth_test = slack_service.test_connection()
+                                                    if auth_test.get("ok"):
+                                                        bot_user_id = auth_test.get("user_id")
+                                                        print(f"      📡 Fetched bot_user_id for {agent.name}: {bot_user_id}")
+                                                        
+                                                        # Update agent's slack_user_id in database
+                                                        if bot_user_id:
+                                                            agent.slack_user_id = bot_user_id
+                                                            # Also update channel_id if not set and we have one
+                                                            if not agent.slack_channel_id and channel_id:
+                                                                agent.slack_channel_id = channel_id
+                                                                print(f"      💾 Updated {agent.name}'s slack_channel_id to {channel_id}")
+                                                            db.commit()
+                                                            print(f"      💾 Updated {agent.name}'s slack_user_id to {bot_user_id}")
+                                                        
+                                                        # Check if this matches the mentioned user ID
+                                                        if bot_user_id in mentioned_user_ids:
+                                                            matched_agent = agent
+                                                            print(f"✅ Channel message matched agent by resolving bot_user_id: {agent.name} (ID: {bot_user_id})")
+                                                            break
+                                            except Exception as e:
+                                                print(f"      ⚠️  Could not resolve bot_user_id for {agent.name}: {e}")
+                                                continue
                             
                             # If no match by user ID, try to match by display name from Slack mention
                             if not matched_agent and mentioned_display_names:
@@ -981,6 +1028,20 @@ async def slack_events(request: Request):
                                     agent_scores.sort(key=lambda x: x[0], reverse=True)
                                     best_score, matched_agent, matched_pattern = agent_scores[0]
                                     print(f"✅ Channel message matched agent by text: {matched_agent.name} (score: {best_score}, pattern: {matched_pattern})")
+                                    
+                                    # If agent doesn't have slack_user_id but we have a mentioned user ID, store it
+                                    if not matched_agent.slack_user_id and mentioned_user_ids:
+                                        matched_agent.slack_user_id = mentioned_user_ids[0]
+                                        print(f"      💾 Stored mentioned user ID {mentioned_user_ids[0]} for {matched_agent.name}")
+                                    # Also update channel_id if not set
+                                    if not matched_agent.slack_channel_id and channel_id:
+                                        matched_agent.slack_channel_id = channel_id
+                                        print(f"      💾 Stored channel_id {channel_id} for {matched_agent.name}")
+                                    if not matched_agent.slack_user_id or not matched_agent.slack_channel_id:
+                                        try:
+                                            db.commit()
+                                        except Exception as e:
+                                            print(f"      ⚠️  Could not save agent updates: {e}")
                                     
                                     # Prefer exact matches if there's a tie
                                     if len(agent_scores) > 1 and agent_scores[1][0] >= best_score * 0.8:
@@ -1211,12 +1272,57 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                 if not agent_name_match:
                     print(f"   Not found in channel agents, checking all agents...")
                     all_agents = db.query(AgentEmployee).all()
+                    print(f"   Checking {len(all_agents)} total agent(s):")
                     for agent in all_agents:
+                        print(f"      - {agent.name}: slack_user_id={agent.slack_user_id if agent.slack_user_id else 'None'}")
                         if agent.slack_user_id and agent.slack_user_id in mentioned_user_ids:
                             agent_name_match = agent
                             print(f"✅ Matched agent by Slack user ID (all agents): {agent.name} (ID: {agent.slack_user_id})")
                             print(f"   Note: Agent {agent.name} is not in channel {channel_id} but was mentioned by user ID")
                             break
+                    
+                    # If still no match and we have mentioned user IDs, try to resolve by fetching bot_user_id from Slack
+                    if not agent_name_match and mentioned_user_ids:
+                        print(f"   ⚠️  No match found. Attempting to resolve user ID {mentioned_user_ids[0]} by checking agents' bot tokens...")
+                        for agent in all_agents:
+                            # Skip if agent already has a slack_user_id that doesn't match
+                            if agent.slack_user_id:
+                                continue
+                            
+                            # Try to get bot token and fetch bot_user_id from Slack
+                            try:
+                                from src.auth.crypto_utils import decrypt_token
+                                bot_token = get_bot_token_for_agent(
+                                    agent_name=agent.name,
+                                    agent_role=agent.role,
+                                    agent_stored_token=agent.slack_bot_token
+                                )
+                                if bot_token:
+                                    from src.services.slack.service import SlackService
+                                    slack_service = SlackService(bot_token)
+                                    auth_test = slack_service.test_connection()
+                                    if auth_test.get("ok"):
+                                        bot_user_id = auth_test.get("user_id")
+                                        print(f"      📡 Fetched bot_user_id for {agent.name}: {bot_user_id}")
+                                        
+                                        # Update agent's slack_user_id in database
+                                        if bot_user_id:
+                                            agent.slack_user_id = bot_user_id
+                                            # Also update channel_id if not set and we have one
+                                            if not agent.slack_channel_id and channel_id:
+                                                agent.slack_channel_id = channel_id
+                                                print(f"      💾 Updated {agent.name}'s slack_channel_id to {channel_id}")
+                                            db.commit()
+                                            print(f"      💾 Updated {agent.name}'s slack_user_id to {bot_user_id}")
+                                        
+                                        # Check if this matches the mentioned user ID
+                                        if bot_user_id in mentioned_user_ids:
+                                            agent_name_match = agent
+                                            print(f"✅ Matched agent by resolving bot_user_id: {agent.name} (ID: {bot_user_id})")
+                                            break
+                            except Exception as e:
+                                print(f"      ⚠️  Could not resolve bot_user_id for {agent.name}: {e}")
+                                continue
             
             # If no match by user ID, try to match by display name from Slack mention
             if not agent_name_match and mentioned_display_names:
@@ -1319,6 +1425,20 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     agent_scores.sort(key=lambda x: x[0], reverse=True)
                     best_score, agent_name_match, matched_pattern = agent_scores[0]
                     print(f"✅ Matched agent by text: {agent_name_match.name} (score: {best_score}, pattern: {matched_pattern})")
+                    
+                    # If agent doesn't have slack_user_id but we have a mentioned user ID, store it
+                    if not agent_name_match.slack_user_id and mentioned_user_ids:
+                        agent_name_match.slack_user_id = mentioned_user_ids[0]
+                        print(f"      💾 Stored mentioned user ID {mentioned_user_ids[0]} for {agent_name_match.name}")
+                    # Also update channel_id if not set
+                    if not agent_name_match.slack_channel_id and channel_id:
+                        agent_name_match.slack_channel_id = channel_id
+                        print(f"      💾 Stored channel_id {channel_id} for {agent_name_match.name}")
+                    if (not agent_name_match.slack_user_id and mentioned_user_ids) or (not agent_name_match.slack_channel_id and channel_id):
+                        try:
+                            db.commit()
+                        except Exception as e:
+                            print(f"      ⚠️  Could not save agent updates: {e}")
                     
                     # If there's a tie or close scores, prefer exact matches
                     if len(agent_scores) > 1 and agent_scores[1][0] >= best_score * 0.8:
@@ -1706,12 +1826,53 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
                 if not agent:
                     print(f"   Not found in channel agents, checking all agents...")
                     all_agents = db.query(AgentEmployee).all()
+                    print(f"   Checking {len(all_agents)} total agent(s):")
                     for candidate_agent in all_agents:
+                        print(f"      - {candidate_agent.name}: slack_user_id={candidate_agent.slack_user_id if candidate_agent.slack_user_id else 'None'}")
                         if candidate_agent.slack_user_id and candidate_agent.slack_user_id in mentioned_user_ids:
                             agent = candidate_agent
                             print(f"✅ Thread reply matched agent by Slack user ID (all agents): {agent.name} (ID: {candidate_agent.slack_user_id})")
                             print(f"   Note: Agent {agent.name} is not in channel {channel_id} but was mentioned by user ID")
                             break
+                    
+                    # If still no match and we have mentioned user IDs, try to resolve by fetching bot_user_id from Slack
+                    if not agent and mentioned_user_ids:
+                        print(f"   ⚠️  No match found. Attempting to resolve user ID {mentioned_user_ids[0]} by checking agents' bot tokens...")
+                        for candidate_agent in all_agents:
+                            # Skip if agent already has a slack_user_id that doesn't match
+                            if candidate_agent.slack_user_id:
+                                continue
+                            
+                            # Try to get bot token and fetch bot_user_id from Slack
+                            try:
+                                from src.auth.crypto_utils import decrypt_token
+                                bot_token = get_bot_token_for_agent(
+                                    agent_name=candidate_agent.name,
+                                    agent_role=candidate_agent.role,
+                                    agent_stored_token=candidate_agent.slack_bot_token
+                                )
+                                if bot_token:
+                                    from src.services.slack.service import SlackService
+                                    slack_service = SlackService(bot_token)
+                                    auth_test = slack_service.test_connection()
+                                    if auth_test.get("ok"):
+                                        bot_user_id = auth_test.get("user_id")
+                                        print(f"      📡 Fetched bot_user_id for {candidate_agent.name}: {bot_user_id}")
+                                        
+                                        # Update agent's slack_user_id in database
+                                        if bot_user_id:
+                                            candidate_agent.slack_user_id = bot_user_id
+                                            db.commit()
+                                            print(f"      💾 Updated {candidate_agent.name}'s slack_user_id to {bot_user_id}")
+                                        
+                                        # Check if this matches the mentioned user ID
+                                        if bot_user_id in mentioned_user_ids:
+                                            agent = candidate_agent
+                                            print(f"✅ Thread reply matched agent by resolving bot_user_id: {agent.name} (ID: {bot_user_id})")
+                                            break
+                            except Exception as e:
+                                print(f"      ⚠️  Could not resolve bot_user_id for {candidate_agent.name}: {e}")
+                                continue
             
             # If no match by user ID, try to match by display name from Slack mention
             if not agent and mentioned_display_names:
