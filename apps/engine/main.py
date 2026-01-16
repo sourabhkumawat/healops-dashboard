@@ -1245,7 +1245,12 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
             
             print(f"🔍 Found {len(agents)} agent(s) for channel {channel_id}")
             for idx, agent in enumerate(agents):
-                print(f"   Agent {idx}: {agent.name} (role: {agent.role}, slack_user_id: {agent.slack_user_id[:10] if agent.slack_user_id else 'None'}...)")
+                slack_id_display = f"{agent.slack_user_id[:10]}..." if agent.slack_user_id else "None"
+                print(f"   Agent {idx}: {agent.name} (role: {agent.role}, slack_user_id: {slack_id_display})")
+            
+            # Also log mentioned user IDs for debugging
+            if mentioned_user_ids:
+                print(f"🔍 Looking for agent with slack_user_id matching: {mentioned_user_ids}")
             
             if not agents:
                 # Try to find agents without channel filter (in case channel_id format is different)
@@ -1285,11 +1290,12 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     if not agent_name_match and mentioned_user_ids:
                         print(f"   ⚠️  No match found. Attempting to resolve user ID {mentioned_user_ids[0]} by checking agents' bot tokens...")
                         for agent in all_agents:
-                            # Skip if agent already has a slack_user_id that doesn't match
-                            if agent.slack_user_id:
+                            # Skip if agent's slack_user_id already matches (we already checked above)
+                            if agent.slack_user_id and agent.slack_user_id in mentioned_user_ids:
                                 continue
                             
                             # Try to get bot token and fetch bot_user_id from Slack
+                            # This works even if agent doesn't have token in DB - get_bot_token_for_agent checks env vars
                             try:
                                 from src.auth.crypto_utils import decrypt_token
                                 bot_token = get_bot_token_for_agent(
@@ -1327,9 +1333,10 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
             # If no match by user ID, try to match by display name from Slack mention
             if not agent_name_match and mentioned_display_names:
                 print(f"🔍 Attempting to match by display names: {mentioned_display_names}")
-            for agent in agents:
-                if not agent.name:
-                    continue
+                # First check agents in channel
+                for agent in agents:
+                    if not agent.name:
+                        continue
                     agent_full_name = agent.name.lower()
                     agent_first_name = agent.name.split()[0].lower() if agent.name else ""
                     
