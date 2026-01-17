@@ -683,7 +683,8 @@ async def slack_events(request: Request):
                     return {"status": "ok"}
                 
                 print(f"🔔 App mention detected from user {user_id}: {event.get('text', '')[:100]}...")
-                await handle_slack_mention(event, data.get("team_id"))
+                # Pass which signing secret was used to identify which bot received this event
+                await handle_slack_mention(event, data.get("team_id"), used_secret_name=used_secret_name if 'used_secret_name' in locals() else None)
                 return {"status": "ok"}
             
             # Handle direct messages
@@ -696,7 +697,8 @@ async def slack_events(request: Request):
                     return {"status": "ok"}
                 
                 print(f"💬 Direct message detected from user {user_id}: {event.get('text', '')[:100]}...")
-                await handle_slack_dm(event, data.get("team_id"))
+                # Pass which signing secret was used to identify which bot received this event
+                await handle_slack_dm(event, data.get("team_id"), used_secret_name=used_secret_name if 'used_secret_name' in locals() else None)
                 return {"status": "ok"}
             
             # Handle channel messages in threads (when user replies to bot's message)
@@ -1052,7 +1054,8 @@ async def slack_events(request: Request):
                             
                             if matched_agent:
                                 print(f"💬 Processing channel message as mention for {matched_agent.name}: {event_text[:100]}...")
-                                await handle_slack_mention(event, data.get("team_id"))
+                                # Pass which signing secret was used to identify which bot received this event
+                                await handle_slack_mention(event, data.get("team_id"), used_secret_name=used_secret_name if 'used_secret_name' in locals() else None)
                                 return {"status": "ok"}
                             else:
                                 print(f"📢 Channel message (not in thread, no agent mention detected): {event_text[:100]}...")
@@ -1073,10 +1076,12 @@ async def slack_events(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error handling Slack event: {e}")
         import traceback
+        error_msg = str(e) if e else "Unknown error (exception object is empty or None)"
+        error_type = type(e).__name__ if e else "UnknownException"
+        print(f"❌ Error handling Slack event: {error_type}: {error_msg}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error processing Slack event: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing Slack event: {error_msg}")
 
 
 @app.post("/slack/interactive")
@@ -1164,13 +1169,14 @@ async def slack_interactive(request: Request):
         raise HTTPException(status_code=500, detail=f"Error processing Slack interaction: {str(e)}")
 
 
-async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
+async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str], used_secret_name: Optional[str] = None):
     """
     Handle when the bot is mentioned in a channel.
     
     Args:
         event: Slack event data
         team_id: Slack workspace team ID
+        used_secret_name: Which signing secret was used (identifies which bot received the event)
     """
     try:
         from src.services.slack.service import SlackService
@@ -1579,6 +1585,33 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
                     except Exception as e:
                         print(f"⚠️  Could not store bot user ID: {e}")
             
+            # CRITICAL: If a specific agent was mentioned by user ID, verify this bot is the correct one
+            # This prevents Alex's bot from responding when Morgan is mentioned (and vice versa)
+            if mentioned_user_ids and used_secret_name:
+                # Determine which bot received this event based on the signing secret used
+                # Get this bot's actual user ID (not the matched agent's token user ID)
+                receiving_bot_user_id = None
+                if "ALEX" in used_secret_name.upper():
+                    # This event was received by Alex's bot - get Alex's bot user ID
+                    alex_token = os.getenv("SLACK_BOT_TOKEN_ALEX")
+                    if alex_token:
+                        alex_service = SlackService(alex_token)
+                        receiving_bot_user_id = alex_service.bot_user_id
+                elif "MORGAN" in used_secret_name.upper():
+                    # This event was received by Morgan's bot - get Morgan's bot user ID
+                    morgan_token = os.getenv("SLACK_BOT_TOKEN_MORGAN")
+                    if morgan_token:
+                        morgan_service = SlackService(morgan_token)
+                        receiving_bot_user_id = morgan_service.bot_user_id
+                
+                # If we know which bot received this, verify it's the one that was mentioned
+                if receiving_bot_user_id:
+                    if receiving_bot_user_id not in mentioned_user_ids:
+                        # This bot was NOT the one mentioned - another bot should handle this
+                        print(f"⏭️  Skipping: This bot ({used_secret_name}, user_id: {receiving_bot_user_id}) was not mentioned. Mentioned IDs: {mentioned_user_ids}")
+                        print(f"   Another bot (the one with ID matching {mentioned_user_ids}) should respond instead")
+                        return
+            
             # Check if message is from this specific bot (prevent recursive responses)
             if bot_user_id and user_id == bot_user_id:
                 print(f"⏭️  Skipping message from bot itself (user_id: {user_id}, bot_user_id: {bot_user_id} for {agent_name_match.name})")
@@ -1720,18 +1753,19 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
             pass  # Don't fail if we can't send error message
 
 
-async def handle_slack_dm(event: Dict[str, Any], team_id: Optional[str]):
+async def handle_slack_dm(event: Dict[str, Any], team_id: Optional[str], used_secret_name: Optional[str] = None):
     """
     Handle direct messages to the bot.
     
     Args:
         event: Slack event data
         team_id: Slack workspace team ID
+        used_secret_name: Which signing secret was used (identifies which bot received the event)
     """
     try:
         # Similar to handle_slack_mention but for DMs
         # For now, redirect to mention handler
-        await handle_slack_mention(event, team_id)
+        await handle_slack_mention(event, team_id, used_secret_name=used_secret_name)
     except Exception as e:
         print(f"❌ Error handling Slack DM: {e}")
         import traceback
