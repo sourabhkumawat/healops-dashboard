@@ -840,9 +840,9 @@ async def slack_events(request: Request):
                             mentioned_display_names = []
                             mention_pattern = r'<@([A-Z0-9]+)(?:\|([^>]+))?>'
                             for match in re.finditer(mention_pattern, event_text):
-                                user_id = match.group(1)
+                                mentioned_user_id = match.group(1)  # Use separate variable to avoid confusion
                                 display_name = match.group(2) if match.group(2) else None
-                                mentioned_user_ids.append(user_id)
+                                mentioned_user_ids.append(mentioned_user_id)
                                 if display_name:
                                     mentioned_display_names.append(display_name.lower())
                             
@@ -1217,9 +1217,9 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str]):
         # Extract Slack user mentions: <@U123456> or <@U123456|Display Name>
         mention_pattern = r'<@([A-Z0-9]+)(?:\|([^>]+))?>'
         for match in re.finditer(mention_pattern, text):
-            user_id = match.group(1)
+            mentioned_user_id = match.group(1)  # Don't overwrite user_id (the actual message sender)
             display_name = match.group(2) if match.group(2) else None
-            mentioned_user_ids.append(user_id)
+            mentioned_user_ids.append(mentioned_user_id)
             if display_name:
                 mentioned_display_names.append(display_name.lower())
         
@@ -1808,9 +1808,9 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
             # Extract Slack user mentions: <@U123456> or <@U123456|Display Name>
             mention_pattern = r'<@([A-Z0-9]+)(?:\|([^>]+))?>'
             for match in re.finditer(mention_pattern, text):
-                user_id = match.group(1)
+                mentioned_user_id = match.group(1)  # Don't overwrite user_id (the actual message sender)
                 display_name = match.group(2) if match.group(2) else None
-                mentioned_user_ids.append(user_id)
+                mentioned_user_ids.append(mentioned_user_id)
                 if display_name:
                     mentioned_display_names.append(display_name.lower())
             
