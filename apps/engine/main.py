@@ -1876,8 +1876,10 @@ def complete_integration_setup(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
-    """Complete integration setup - delegates to IntegrationsController."""
-    return IntegrationsController.complete_integration_setup(integration_id, setup_data, request, db)
+    """Complete integration setup and trigger CocoIndex indexing in background."""
+    return IntegrationsController.complete_integration_setup_with_indexing(
+        integration_id, setup_data, request, background_tasks, db
+    )
 
 @app.get("/integrations/{integration_id}")
 def get_integration_details(

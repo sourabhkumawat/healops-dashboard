@@ -6,7 +6,7 @@ import json
 import time
 import secrets
 import base64
-from fastapi import Request, HTTPException, Query
+from fastapi import Request, HTTPException, Query, BackgroundTasks
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -848,6 +848,51 @@ class IntegrationsController:
                 "service_mappings": integration.config.get("service_mappings", {})
             }
         }
+    
+    @staticmethod
+    def complete_integration_setup_with_indexing(integration_id: int, setup_data: dict, request: Request, background_tasks: BackgroundTasks, db: Session):
+        """
+        Complete the initial setup of a GitHub integration and trigger CocoIndex indexing.
+        This is the version that includes background indexing.
+        """
+        # First complete the setup
+        result = IntegrationsController.complete_integration_setup(integration_id, setup_data, request, db)
+        
+        # Get the integration again to ensure we have the latest data
+        integration = db.query(Integration).filter(Integration.id == integration_id).first()
+        if not integration:
+            return result
+        
+        # Trigger CocoIndex repository indexing in background (async, non-blocking)
+        default_repo = setup_data.get("default_repo") or setup_data.get("repository")
+        if default_repo and integration.status == "ACTIVE":
+            try:
+                from src.memory.cocoindex_flow import execute_flow_update
+                
+                def index_repository_background():
+                    """Background task to index repository with CocoIndex."""
+                    try:
+                        print(f"🔄 Starting CocoIndex indexing for repository: {default_repo}")
+                        execute_flow_update(
+                            repo_name=default_repo,
+                            integration_id=integration.id,
+                            ref="main"
+                        )
+                        print(f"✅ CocoIndex indexing completed for repository: {default_repo}")
+                    except Exception as e:
+                        print(f"⚠️  CocoIndex indexing failed for {default_repo}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                
+                # Add to FastAPI background tasks (non-blocking)
+                background_tasks.add_task(index_repository_background)
+            except Exception as e:
+                # Don't fail setup if indexing trigger fails
+                print(f"Warning: Failed to trigger CocoIndex indexing: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        return result
     
     @staticmethod
     def get_integration_details(integration_id: int, request: Request, db: Session):

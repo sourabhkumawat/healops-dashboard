@@ -21,6 +21,13 @@ def code_to_embedding(text: cocoindex.DataSlice[str]) -> cocoindex.DataSlice[lis
     )
 
 
+# Shared function for extracting file extensions (defined at module level to avoid registration conflicts)
+@cocoindex.op.function()
+def extract_extension(path: str) -> str:
+    """Extract file extension from path."""
+    return os.path.splitext(path)[1]
+
+
 @cocoindex.flow_def(name="GitHubCodeEmbedding")
 def github_code_embedding_flow(
     flow_builder: cocoindex.FlowBuilder,
@@ -82,6 +89,7 @@ def github_code_embedding_flow(
                 location=chunk["location"],  # Chunk location (e.g., "lines:45-78")
                 code=chunk["text"],  # Actual code content
                 embedding=chunk["embedding"],  # Vector embedding
+                type="code",  # Metadata type for filtering
             )
     
     # 5. Export to PostgreSQL with pgvector
@@ -134,20 +142,94 @@ def execute_flow_update(repo_name: str, integration_id: int, ref: str = "main"):
         from src.database.database import DATABASE_URL
         os.environ["COCOINDEX_DATABASE_URL"] = DATABASE_URL
     
+    # Initialize CocoIndex if not already initialized
+    try:
+        cocoindex.init()
+    except Exception:
+        pass  # Already initialized or not needed
+    
     # Execute flow update
     # CocoIndex handles incremental updates automatically (only changed files)
     try:
-        # Note: Flow execution syntax may vary - this is conceptual
-        # Actual execution depends on CocoIndex API
-        cocoindex.update(
-            flow=github_code_embedding_flow,
-            params={
-                "repo_name": repo_name,
-                "integration_id": integration_id,
-                "ref": ref,
-            },
-        )
+        # Create a flow instance with the parameters
+        # The flow function accepts repo_name, integration_id, ref as parameters
+        # We need to create a flow using open_flow with the flow definition
+        # Sanitize flow name: only letters, digits, and underscores allowed
+        # Replace invalid characters with underscores
+        import re
+        sanitized_repo = re.sub(r'[^a-zA-Z0-9_]', '_', repo_name)
+        flow_name = f"GitHubCodeEmbedding_{integration_id}_{sanitized_repo}"
+        
+        # Create flow function with bound parameters using a closure
+        # Note: github_code_embedding_flow is already a Flow object (decorated),
+        # so we can't call it. Instead, we inline the flow definition here.
+        def flow_func(flow_builder: cocoindex.FlowBuilder, data_scope: cocoindex.DataScope):
+            # 1. Add GitHub source
+            data_scope["files"] = flow_builder.add_source(
+                GitHubSource(
+                    repo_name=repo_name,
+                    ref=ref,
+                    integration_id=integration_id,
+                )
+            )
+            
+            # Collector for code embeddings
+            code_embeddings = data_scope.add_collector()
+            
+            # 2. Extract file extension for language detection (using module-level function)
+            # 3. Process each file: chunk using Tree-sitter, embed, collect
+            with data_scope["files"].row() as file:
+                # Extract extension for language detection
+                file["extension"] = file["path"].transform(extract_extension)
+                
+                # Use Tree-sitter for AST-aware chunking
+                file["chunks"] = file["content"].transform(
+                    cocoindex.functions.SplitRecursively(),
+                    language=file["extension"],
+                    chunk_size=1000,
+                    chunk_overlap=300,
+                )
+                
+                # 4. Embed each chunk
+                with file["chunks"].row() as chunk:
+                    # Use shared embedding transform for consistency
+                    chunk["embedding"] = chunk["text"].call(code_to_embedding)
+                    
+                    # Collect chunk with metadata
+                    code_embeddings.collect(
+                        filename=file["path"],
+                        location=chunk["location"],
+                        code=chunk["text"],
+                        embedding=chunk["embedding"],
+                        type="code",
+                    )
+            
+            # 5. Export to PostgreSQL with pgvector
+            code_embeddings.export(
+                "code_embeddings",
+                cocoindex.storages.Postgres(),
+                primary_key_fields=["filename", "location"],
+                vector_indexes=[
+                    cocoindex.VectorIndexDef(
+                        field_name="embedding",
+                        metric=cocoindex.VectorSimilarityMetric.COSINE_SIMILARITY,
+                    )
+                ],
+            )
+        
+        # Open/create the flow with parameters
+        # open_flow signature: open_flow(name: str, fl_def: Callable) -> Flow
+        flow = cocoindex.open_flow(flow_name, flow_func)
+        
+        # Setup the flow (creates tables, indexes, etc.)
+        flow.setup(report_to_stdout=False)
+        
+        # Execute the flow update
+        stats = flow.update()
+        
         print(f"✅ CocoIndex flow update completed for {repo_name}")
+        if stats:
+            print(f"   Stats: {stats}")
         return True
     except Exception as e:
         print(f"❌ CocoIndex flow update failed for {repo_name}: {e}")

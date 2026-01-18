@@ -105,13 +105,14 @@ class KnowledgeRetriever:
         
         # For now, we'll add fixes to the same table with metadata
         # This requires embedding each fix and inserting into PostgreSQL
+        if not COCOINDEX_AVAILABLE or code_to_embedding is None:
+            print("Warning: CocoIndex not available, skipping fix indexing")
+            return
+        
         try:
+            import numpy as np
             # Get embedding for each fix
             for fix in fixes[:100]:  # Limit to 100 fixes
-                if not COCOINDEX_AVAILABLE or code_to_embedding is None:
-                    print("Warning: CocoIndex not available, skipping fix indexing")
-                    return
-                
                 fix_text = f"""
 Fix Description: {fix.get('description', '')}
 Code Patch: {fix.get('patch', '')[:1000]}
@@ -119,6 +120,10 @@ Error Signature: {fix.get('error_signature', '')}
 """
                 # Embed the fix text
                 embedding = code_to_embedding.eval(fix_text)
+                
+                # Convert numpy array to list if needed for pgvector
+                if isinstance(embedding, np.ndarray):
+                    embedding = embedding.tolist()
                 
                 # Insert into database using SQLAlchemy with raw connection for pgvector
                 from sqlalchemy import text
@@ -143,8 +148,10 @@ Error Signature: {fix.get('error_signature', '')}
                                 "fix"
                             ))
                         raw_conn.commit()
-                    finally:
+                    except Exception as e:
                         raw_conn.rollback()
+                        print(f"Warning: Failed to insert fix: {e}")
+                        raise
             
             self.indexed = True
         except Exception as e:
@@ -201,8 +208,13 @@ Error Signature: {fix.get('error_signature', '')}
             return []
         
         try:
+            import numpy as np
             # Get embedding for query
             query_vector = code_to_embedding.eval(query)
+            
+            # Convert numpy array to list if needed for pgvector
+            if isinstance(query_vector, np.ndarray):
+                query_vector = query_vector.tolist()
             
             # Query PostgreSQL vector store using raw connection for pgvector
             # Get raw psycopg2 connection from SQLAlchemy engine

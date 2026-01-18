@@ -39,7 +39,7 @@ class FileKey(NamedTuple):
 class FileValue:
     """Value type for file content."""
     content: str
-    path: str
+    # Note: path is available from FileKey, don't duplicate here to avoid field name conflicts
     updated_at: Optional[datetime] = None
 
 
@@ -86,37 +86,45 @@ class GitHubSourceConnector:
         Filters for code files (skips binary, excludes node_modules, etc.)
         """
         if self._file_list is None:
-            # Get file list from GitHub (this is synchronous, so we'll call it)
-            gh = self._get_github_integration()
-            
-            # Get repository structure (filters out node_modules, etc. internally)
-            all_files = gh.get_repo_structure(
-                repo_name=self.repo_name,
-                path="",
-                ref=self.ref,
-                max_depth=10  # Deep enough to get all files
-            )
-            
-            # Filter for code files only
-            code_extensions = {
-                '.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rs', '.cpp', '.c', '.h',
-                '.cs', '.rb', '.php', '.swift', '.kt', '.scala', '.clj', '.sh', '.yaml', '.yml',
-                '.json', '.md', '.txt', '.sql', '.r', '.m', '.mm', '.pl', '.pm', '.lua'
-            }
-            
-            self._file_list = [
-                f for f in all_files
-                if any(f.endswith(ext) for ext in code_extensions)
-                and not any(skip in f for skip in ['node_modules', '__pycache__', '.git'])
-            ]
+            try:
+                # Get file list from GitHub (this is synchronous, so we'll call it)
+                gh = self._get_github_integration()
+                
+                # Get repository structure (filters out node_modules, etc. internally)
+                all_files = gh.get_repo_structure(
+                    repo_name=self.repo_name,
+                    path="",
+                    ref=self.ref,
+                    max_depth=10  # Deep enough to get all files
+                )
+                
+                # Filter for code files only
+                code_extensions = {
+                    '.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rs', '.cpp', '.c', '.h',
+                    '.cs', '.rb', '.php', '.swift', '.kt', '.scala', '.clj', '.sh', '.yaml', '.yml',
+                    '.json', '.md', '.txt', '.sql', '.r', '.m', '.mm', '.pl', '.pm', '.lua'
+                }
+                
+                self._file_list = [
+                    f for f in all_files
+                    if any(f.endswith(ext) for ext in code_extensions)
+                    and not any(skip in f for skip in ['node_modules', '__pycache__', '.git'])
+                ]
+            except Exception as e:
+                print(f"Error fetching repository structure for {self.repo_name}: {e}")
+                import traceback
+                traceback.print_exc()
+                self._file_list = []  # Set empty list on error
         
         # Yield file keys
-        for file_path in self._file_list:
+        for idx, file_path in enumerate(self._file_list):
             key = FileKey(path=file_path)
             data = PartialSourceRowData[FileValue]()
             
             # We don't have reliable timestamps from GitHub tree API without extra calls
-            # So we skip ordinal for now (CocoIndex can use content fingerprinting)
+            # Use a simple counter as ordinal for batch updates (CocoIndex will use content fingerprints for change detection)
+            # Set ordinal to a sequential number to satisfy CocoIndex requirements
+            data.ordinal = idx  # Use index as ordinal for initial indexing
             
             yield PartialSourceRow(key=key, data=data)
     
@@ -128,13 +136,19 @@ class GitHubSourceConnector:
         """
         Fetch file content from GitHub.
         """
-        gh = self._get_github_integration()
-        
-        content = gh.get_file_contents(
-            repo_name=self.repo_name,
-            file_path=key.path,
-            ref=self.ref
-        )
+        try:
+            gh = self._get_github_integration()
+            
+            content = gh.get_file_contents(
+                repo_name=self.repo_name,
+                file_path=key.path,
+                ref=self.ref
+            )
+        except Exception as e:
+            print(f"Error fetching file {key.path} from {self.repo_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            content = None
         
         if content is None:
             return PartialSourceRowData(
@@ -145,7 +159,6 @@ class GitHubSourceConnector:
         
         value = FileValue(
             content=content,
-            path=key.path,
             updated_at=None,  # We could fetch commit info, but it's expensive
         )
         
