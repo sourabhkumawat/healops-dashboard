@@ -4,20 +4,6 @@ Implements Manus-style architecture with iterative agent loop, explicit planning
 
 This is the main entry point for running the agent system to resolve incidents.
 """
-# Initialize Langtrace before imports
-try:
-    from langtrace_python_sdk import langtrace
-    import os
-    
-    langtrace_api_key = os.getenv("LANGTRACE_API_KEY")
-    if langtrace_api_key:
-        try:
-            langtrace.init(api_key=langtrace_api_key)
-        except Exception:
-            pass
-except ImportError:
-    pass
-
 from typing import Dict, Any, List, Optional, Callable, Tuple
 import os
 import json
@@ -250,12 +236,16 @@ def run_robust_crew(
         print(f"Warning: Failed to retrieve learning pattern: {e}")
     
     # Index knowledge base
+    # Note: Full repository indexing happens at connection time via CocoIndex
+    # This is mainly for past fixes indexing and triggering incremental updates if needed
     try:
-        # Index codebase patterns (limited to affected files + common files)
-        files_to_index = affected_files[:20]  # Limit indexing
-        knowledge_retriever.index_codebase_patterns(files_to_index)
+        # CocoIndex handles incremental updates automatically
+        # This call may trigger updates or is a no-op if index exists
+        if affected_files:
+            files_to_index = affected_files[:20]  # For backward compatibility
+            knowledge_retriever.index_codebase_patterns(files_to_index)
         
-        # Index past fixes
+        # Index past fixes (these are added to the CocoIndex vector store)
         if memory_data.get("known_fixes"):
             knowledge_retriever.index_past_fixes(memory_data["known_fixes"])
     except Exception as e:

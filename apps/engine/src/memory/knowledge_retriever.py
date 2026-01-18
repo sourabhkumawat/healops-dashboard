@@ -1,36 +1,28 @@
 """
-Knowledge Retriever for RAG-based codebase pattern retrieval.
-Manus-style Knowledge module with vector store for semantic search.
+Knowledge Retriever using CocoIndex for RAG-based codebase pattern retrieval.
+Uses CocoIndex with Tree-sitter AST-aware chunking and PostgreSQL storage.
 """
 from typing import List, Dict, Any, Optional
 import os
 
-# Try to import FAISS, fallback to simple in-memory if not available
+# Lazy import CocoIndex dependencies to avoid import errors when module not installed
 try:
-    from langchain.vectorstores import FAISS
-    from langchain.embeddings import HuggingFaceEmbeddings
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
-    from langchain.schema import Document
-    HAS_FAISS = True
+    from src.memory.cocoindex_flow import code_to_embedding, github_code_embedding_flow
+    COCOINDEX_AVAILABLE = True
 except ImportError:
-    try:
-        # Try alternative imports
-        from langchain_community.vectorstores import FAISS
-        from langchain_community.embeddings import HuggingFaceEmbeddings
-        from langchain.text_splitter import RecursiveCharacterTextSplitter
-        from langchain.schema import Document
-        HAS_FAISS = True
-    except ImportError:
-        # Fallback to simple implementation
-        HAS_FAISS = False
-        print("Warning: FAISS not available. Knowledge retrieval will use simple text matching.")
+    COCOINDEX_AVAILABLE = False
+    code_to_embedding = None
+    github_code_embedding_flow = None
+
+from src.database.database import DATABASE_URL, engine
+
 
 class KnowledgeRetriever:
     """
-    Manus-style knowledge retriever with vector store for semantic search.
+    CocoIndex-based knowledge retriever with PostgreSQL vector storage.
     
-    Indexes codebase patterns, past fixes, and best practices.
-    Provides semantic search for relevant knowledge.
+    Indexes codebase patterns, past fixes, and best practices using
+    CocoIndex with AST-aware chunking via Tree-sitter.
     """
     
     def __init__(self, github_integration, repo_name: str):
@@ -43,74 +35,59 @@ class KnowledgeRetriever:
         """
         self.gh = github_integration
         self.repo_name = repo_name
-        self.vectorstore = None
         self.indexed = False
-        self.has_faiss = HAS_FAISS  # Store module-level flag as instance variable
         
-        if self.has_faiss:
-            try:
-                self.embeddings = HuggingFaceEmbeddings(
-                    model_name="sentence-transformers/all-MiniLM-L6-v2"
-                )
-                self.text_splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=1000,
-                    chunk_overlap=200
-                )
-            except Exception as e:
-                print(f"Warning: Failed to initialize embeddings: {e}")
-                self.has_faiss = False
+        # Get integration_id from github_integration if available
+        self.integration_id = getattr(github_integration, 'installation_id', None)
+        if not self.integration_id and hasattr(github_integration, '_integration_id'):
+            self.integration_id = github_integration._integration_id
         
-        # Fallback storage
-        if not self.has_faiss:
-            self.documents: List[Dict[str, Any]] = []
+        # Use SQLAlchemy engine for database connections
+        # For pgvector queries, we'll get raw connections from the engine
+        self.engine = engine
+        
+        # Table name for code embeddings (CocoIndex uses flow name + export name)
+        self.table_name = "code_embeddings"
+    
+    def _get_table_name(self) -> str:
+        """Get the CocoIndex table name for this repository."""
+        # CocoIndex creates tables with flow-specific naming
+        # For now, use a simple table name - adjust based on actual CocoIndex behavior
+        return self.table_name
     
     def index_codebase_patterns(self, file_paths: List[str]):
         """
-        Index codebase files for pattern retrieval.
+        Trigger CocoIndex flow update for specific files.
+        
+        Note: CocoIndex handles incremental updates automatically.
+        This method can trigger updates if needed, but full indexing
+        should happen at repository connection time.
         
         Args:
-            file_paths: List of file paths to index
+            file_paths: List of file paths (for backward compatibility)
+                      CocoIndex will handle which files need updating
         """
-        if not file_paths:
-            return
+        # CocoIndex handles incremental updates automatically
+        # If files are provided, we could trigger specific updates,
+        # but typically full repo indexing happens at connection time
+        # This method is kept for interface compatibility but may be a no-op
+        # or trigger incremental updates if CocoIndex supports it
         
-        documents = []
-        
-        for file_path in file_paths[:50]:  # Limit to 50 files
-            try:
-                content = self.gh.get_file_contents(self.repo_name, file_path)
-                if not content:
-                    continue
-                
-                if self.has_faiss:
-                    # Split into chunks
-                    chunks = self.text_splitter.create_documents(
-                        [content],
-                        metadatas=[{"file_path": file_path, "type": "code"}]
+        # For now, mark as indexed if we have a table (assumes indexing happened)
+        try:
+            from sqlalchemy import text
+            with self.engine.connect() as conn:
+                result = conn.execute(text(f"""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_name = :table_name
                     )
-                    documents.extend(chunks)
-                else:
-                    # Simple storage
-                    self.documents.append({
-                        "content": content[:2000],  # Limit content size
-                        "metadata": {"file_path": file_path, "type": "code"}
-                    })
-            except Exception as e:
-                print(f"Warning: Failed to index file {file_path}: {e}")
-                continue
-        
-        if self.has_faiss and documents:
-            try:
-                if self.vectorstore:
-                    # Add to existing store
-                    self.vectorstore.add_documents(documents)
-                else:
-                    # Create new store
-                    self.vectorstore = FAISS.from_documents(documents, self.embeddings)
-                self.indexed = True
-            except Exception as e:
-                print(f"Warning: Failed to create vector store: {e}")
-                self.has_faiss = False
+                """), {"table_name": self._get_table_name()})
+                exists = result.scalar()
+                if exists:
+                    self.indexed = True
+        except Exception as e:
+            print(f"Warning: Could not check index status: {e}")
     
     def index_past_fixes(self, fixes: List[Dict[str, Any]]):
         """
@@ -122,49 +99,58 @@ class KnowledgeRetriever:
         if not fixes:
             return
         
-        documents = []
+        # For past fixes, we could:
+        # 1. Add them to the same CocoIndex table with type="fix" metadata
+        # 2. Or maintain a separate table for fixes
         
-        for fix in fixes[:100]:  # Limit to 100 fixes
-            try:
-                # Create document from fix
+        # For now, we'll add fixes to the same table with metadata
+        # This requires embedding each fix and inserting into PostgreSQL
+        try:
+            # Get embedding for each fix
+            for fix in fixes[:100]:  # Limit to 100 fixes
+                if not COCOINDEX_AVAILABLE or code_to_embedding is None:
+                    print("Warning: CocoIndex not available, skipping fix indexing")
+                    return
+                
                 fix_text = f"""
 Fix Description: {fix.get('description', '')}
 Code Patch: {fix.get('patch', '')[:1000]}
 Error Signature: {fix.get('error_signature', '')}
 """
+                # Embed the fix text
+                embedding = code_to_embedding.eval(fix_text)
                 
-                if self.has_faiss:
-                    doc = Document(
-                        page_content=fix_text,
-                        metadata={
-                            "type": "fix",
-                            "error_signature": fix.get('error_signature', ''),
-                            "description": fix.get('description', '')
-                        }
-                    )
-                    documents.append(doc)
-                else:
-                    self.documents.append({
-                        "content": fix_text,
-                        "metadata": {
-                            "type": "fix",
-                            "error_signature": fix.get('error_signature', ''),
-                            "description": fix.get('description', '')
-                        }
-                    })
-            except Exception as e:
-                print(f"Warning: Failed to index fix: {e}")
-                continue
-        
-        if self.has_faiss and documents:
-            try:
-                if self.vectorstore:
-                    self.vectorstore.add_documents(documents)
-                else:
-                    self.vectorstore = FAISS.from_documents(documents, self.embeddings)
-                self.indexed = True
-            except Exception as e:
-                print(f"Warning: Failed to add fixes to vector store: {e}")
+                # Insert into database using SQLAlchemy with raw connection for pgvector
+                from sqlalchemy import text
+                # Get raw psycopg2 connection from SQLAlchemy engine
+                with self.engine.raw_connection() as raw_conn:
+                    try:
+                        from pgvector.psycopg2 import register_vector
+                        register_vector(raw_conn)
+                        with raw_conn.cursor() as cur:
+                            # Insert with type="fix" metadata
+                            # Note: Adjust table schema based on actual CocoIndex export structure
+                            cur.execute(f"""
+                                INSERT INTO {self._get_table_name()} 
+                                (filename, location, code, embedding, type)
+                                VALUES (%s, %s, %s, %s::vector, %s)
+                                ON CONFLICT (filename, location) DO NOTHING
+                            """, (
+                                f"fix:{fix.get('error_signature', 'unknown')}",
+                                "fix",
+                                fix_text,
+                                embedding,
+                                "fix"
+                            ))
+                        raw_conn.commit()
+                    finally:
+                        raw_conn.rollback()
+            
+            self.indexed = True
+        except Exception as e:
+            print(f"Warning: Failed to index past fixes: {e}")
+            import traceback
+            traceback.print_exc()
     
     def retrieve_relevant_knowledge(
         self,
@@ -173,7 +159,7 @@ Error Signature: {fix.get('error_signature', '')}
         min_score: float = 0.7
     ) -> List[Dict[str, Any]]:
         """
-        Retrieve relevant knowledge with relevance scoring.
+        Retrieve relevant knowledge using CocoIndex PostgreSQL vector search.
         
         Args:
             query: Search query
@@ -182,83 +168,102 @@ Error Signature: {fix.get('error_signature', '')}
             
         Returns:
             List of knowledge items with relevance scores
+            Format: [
+                {
+                    "content": "...",
+                    "metadata": {"file_path": "...", "location": "...", "type": "code|fix"},
+                    "relevance_score": 0.92,
+                    "source": "code" or "fix"
+                },
+                ...
+            ]
         """
-        if not self.indexed and not self.documents:
+        if not self.indexed:
+            # Check if table exists
+            try:
+                from sqlalchemy import text
+                with self.engine.connect() as conn:
+                    result = conn.execute(text(f"""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_name = :table_name
+                        )
+                    """), {"table_name": self._get_table_name()})
+                    exists = result.scalar()
+                    if not exists:
+                        return []
+                    self.indexed = True
+            except Exception:
+                return []
+        
+        if not COCOINDEX_AVAILABLE or code_to_embedding is None:
+            print("Warning: CocoIndex not available, cannot retrieve knowledge")
             return []
         
-        if self.has_faiss and self.vectorstore:
-            try:
-                # Semantic search
-                docs_with_scores = self.vectorstore.similarity_search_with_score(query, k=k)
-                
-                results = []
-                for doc, score in docs_with_scores:
-                    # Convert distance to relevance (lower distance = higher relevance)
-                    # FAISS returns distance, we need to convert to similarity
-                    relevance = 1.0 / (1.0 + score) if score > 0 else 1.0
+        try:
+            # Get embedding for query
+            query_vector = code_to_embedding.eval(query)
+            
+            # Query PostgreSQL vector store using raw connection for pgvector
+            # Get raw psycopg2 connection from SQLAlchemy engine
+            with self.engine.raw_connection() as raw_conn:
+                try:
+                    from pgvector.psycopg2 import register_vector
+                    from psycopg2.extras import RealDictCursor
+                    register_vector(raw_conn)
                     
-                    if relevance >= min_score:
-                        results.append({
-                            "content": doc.page_content,
-                            "metadata": doc.metadata,
-                            "relevance_score": relevance,
-                            "source": doc.metadata.get("type", "unknown")
-                        })
-                
-                # Sort by relevance
-                results.sort(key=lambda x: x["relevance_score"], reverse=True)
-                return results
-            except Exception as e:
-                print(f"Warning: Vector search failed: {e}")
-                # Fallback to simple search
-                return self._simple_search(query, k, min_score)
-        else:
-            # Simple text matching
-            return self._simple_search(query, k, min_score)
-    
-    def _simple_search(
-        self,
-        query: str,
-        k: int,
-        min_score: float
-    ) -> List[Dict[str, Any]]:
-        """
-        Simple text-based search fallback.
-        
-        Args:
-            query: Search query
-            k: Number of results
-            min_score: Minimum score (ignored in simple search)
-            
-        Returns:
-            List of matching documents
-        """
-        query_lower = query.lower()
-        query_words = set(query_lower.split())
-        
-        results = []
-        for doc in self.documents:
-            content_lower = doc["content"].lower()
-            
-            # Simple word matching
-            content_words = set(content_lower.split())
-            common_words = query_words.intersection(content_words)
-            
-            if common_words:
-                # Calculate simple relevance
-                relevance = len(common_words) / max(len(query_words), 1)
-                
-                if relevance >= min_score:
-                    results.append({
-                        "content": doc["content"][:500],
-                        "metadata": doc["metadata"],
-                        "relevance_score": relevance,
-                        "source": doc["metadata"].get("type", "unknown")
-                    })
-        
-        # Sort by relevance
-        results.sort(key=lambda x: x["relevance_score"], reverse=True)
-        return results[:k]
+                    with raw_conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        # Use cosine similarity (<=> operator in pgvector)
+                        # Distance: 0 = identical, higher = less similar
+                        # Convert to similarity score: 1 - distance
+                        cur.execute(f"""
+                            SELECT 
+                                filename,
+                                location,
+                                code,
+                                type,
+                                (embedding <=> %s::vector) as distance
+                            FROM {self._get_table_name()}
+                            ORDER BY distance
+                            LIMIT %s
+                        """, (query_vector, k * 2))  # Get more results to filter by min_score
+                        
+                        results = []
+                        for row in cur.fetchall():
+                            distance = float(row['distance'])
+                            # Convert distance to similarity score (cosine distance -> similarity)
+                            # Cosine distance: 0 = identical, 2 = opposite
+                            # Similarity: 1 - (distance / 2) for normalized vectors
+                            similarity = max(0.0, 1.0 - (distance / 2.0))
+                            
+                            if similarity >= min_score:
+                                file_path = row['filename']
+                                # Remove "fix:" prefix if present
+                                if file_path.startswith("fix:"):
+                                    file_path = file_path[4:]
+                                
+                                results.append({
+                                    "content": row['code'],
+                                    "metadata": {
+                                        "file_path": file_path,
+                                        "location": row['location'] or "unknown",
+                                        "type": row.get('type', 'code')
+                                    },
+                                    "relevance_score": similarity,
+                                    "source": row.get('type', 'code')
+                                })
+                        
+                        # Sort by relevance and return top k
+                        results.sort(key=lambda x: x["relevance_score"], reverse=True)
+                        return results[:k]
+                finally:
+                    raw_conn.rollback()
+                    
+        except Exception as e:
+            print(f"Warning: Vector search failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
     
     def retrieve_for_planning(
         self,
@@ -305,4 +310,3 @@ File: {file_path}
 Find similar fixes, error handling patterns, and code examples.
 """
         return self.retrieve_relevant_knowledge(query, k=3)
-

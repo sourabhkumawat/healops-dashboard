@@ -2,8 +2,7 @@ fastapi
 uvicorn
 crewai
 crewai-tools
-langchain-community
-langtrace_python_sdk>=3.3
+cocoindex[embeddings]>=0.1.0
 python-dotenv
 sqlalchemy
 psycopg2-binary
