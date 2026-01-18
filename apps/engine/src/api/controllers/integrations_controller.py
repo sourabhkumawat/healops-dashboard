@@ -20,6 +20,7 @@ from src.integrations.github import get_installation_info, get_installation_repo
 from src.auth import encrypt_token
 from src.utils.integrations import backfill_integration_to_incidents
 from src.api.controllers.base import get_user_id_from_request
+from src.utils.indexing_manager import indexing_manager
 
 # Configuration constants
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
@@ -610,6 +611,94 @@ class IntegrationsController:
                         "pr_number": pr_number,
                         "repo": repo_name
                     }
+            
+            # Handle push events - trigger reindexing for connected repositories
+            elif event_type == "push":
+                repo_name = payload.get("repository", {}).get("full_name")
+                ref = payload.get("ref", "").replace("refs/heads/", "")
+                commits = payload.get("commits", [])
+                
+                if not repo_name:
+                    print("⚠️  Push event received but no repository name found")
+                    return {"status": "ok", "message": "No repository name in push event"}
+                
+                print(f"📦 Push event received for {repo_name} on branch {ref}")
+                print(f"   Commits: {len(commits)}")
+                
+                # Find all active GitHub integrations that match this repository
+                active_integrations = db.query(Integration).filter(
+                    Integration.provider == "GITHUB",
+                    Integration.status == "ACTIVE"
+                ).all()
+                
+                matching_integrations = []
+                
+                for integration in active_integrations:
+                    # Check if this repo matches the integration
+                    config = integration.config or {}
+                    
+                    # Check default repo
+                    default_repo = config.get("repo_name") or config.get("repository")
+                    if default_repo == repo_name:
+                        matching_integrations.append((integration, default_repo))
+                        continue
+                    
+                    # Check project_id
+                    if integration.project_id == repo_name:
+                        matching_integrations.append((integration, integration.project_id))
+                        continue
+                    
+                    # Check service mappings
+                    service_mappings = config.get("service_mappings", {})
+                    if isinstance(service_mappings, dict):
+                        for service_name, mapped_repo in service_mappings.items():
+                            if mapped_repo == repo_name:
+                                matching_integrations.append((integration, mapped_repo))
+                                break
+                
+                if not matching_integrations:
+                    print(f"   No active integrations found for repository {repo_name}")
+                    return {
+                        "status": "ok",
+                        "message": f"No active integrations found for {repo_name}",
+                        "repo": repo_name
+                    }
+                
+                # Only index main/master branches by default (can be configured)
+                branches_to_index = ["main", "master"]
+                if ref not in branches_to_index:
+                    print(f"   Branch {ref} is not in indexable branches {branches_to_index}, skipping")
+                    return {
+                        "status": "ok",
+                        "message": f"Branch {ref} not configured for indexing",
+                        "repo": repo_name,
+                        "branch": ref
+                    }
+                
+                # Schedule reindexing for each matching integration
+                indexed_count = 0
+                for integration, matched_repo in matching_integrations:
+                    try:
+                        print(f"   Scheduling reindex for integration {integration.id} ({integration.name})")
+                        # Schedule reindex (non-blocking, uses asyncio.create_task internally)
+                        await indexing_manager.schedule_reindex(
+                            repo_name=repo_name,
+                            integration_id=integration.id,
+                            ref=ref
+                        )
+                        indexed_count += 1
+                    except Exception as e:
+                        print(f"   ⚠️  Failed to schedule reindex for integration {integration.id}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                
+                return {
+                    "status": "ok",
+                    "message": f"Reindexing scheduled for {indexed_count} integration(s)",
+                    "repo": repo_name,
+                    "branch": ref,
+                    "integrations_count": indexed_count
+                }
             
             # Handle ping event (webhook setup)
             elif event_type == "ping":

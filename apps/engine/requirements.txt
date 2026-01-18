@@ -6,6 +6,7 @@ cocoindex[embeddings]>=0.1.0
 python-dotenv
 sqlalchemy
 psycopg2-binary
+pgvector
 celery
 redis
 google-cloud-logging

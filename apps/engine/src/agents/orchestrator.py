@@ -148,8 +148,13 @@ def run_robust_crew(
     scratchpad = Scratchpad(incident.id, github_integration, repo_name)
     context_manager = ContextManager()
     
-    # Initialize knowledge retriever
-    knowledge_retriever = KnowledgeRetriever(github_integration, repo_name)
+    # Initialize knowledge retriever with integration_id for proper table name resolution
+    integration_id = incident.integration_id if incident else None
+    knowledge_retriever = KnowledgeRetriever(
+        github_integration=github_integration,
+        repo_name=repo_name,
+        integration_id=integration_id
+    )
     
     # Set up coding tools context
     tools_context = CodingToolsContext(github_integration, repo_name)

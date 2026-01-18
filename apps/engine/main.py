@@ -1848,6 +1848,14 @@ async def github_webhook(request: Request, db: Session = Depends(get_db)):
     """GitHub webhook - delegates to IntegrationsController."""
     return await IntegrationsController.github_webhook(request, db)
 
+@app.post("/webhooks/github")
+async def github_webhook_alt(request: Request, db: Session = Depends(get_db)):
+    """GitHub webhook alternative endpoint - delegates to IntegrationsController.
+    
+    This endpoint matches the webhook URL configured in GitHub App settings.
+    """
+    return await IntegrationsController.github_webhook(request, db)
+
 @app.get("/services")
 def list_services(request: Request = None, db: Session = Depends(get_db)):
     """List services - delegates to ServicesController."""

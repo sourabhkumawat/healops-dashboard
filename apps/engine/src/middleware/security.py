@@ -91,6 +91,7 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         "/integrations/github/authorize",
         # GitHub webhooks (verified via GitHub signature, not JWT)
         "/integrations/github/webhook",
+        "/webhooks/github",  # Alternative webhook endpoint
         # Slack webhooks (verified via Slack signature, not JWT)
         "/slack/events",
         "/slack/interactive",
