@@ -16,6 +16,7 @@ import time
 import logging
 from contextlib import contextmanager
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -29,6 +30,28 @@ AGENT_STATUS_DISABLED = "disabled"
 MAX_COMPLETED_TASKS = 50
 DEFAULT_PHASE = "fix_generation"
 DEFAULT_AGENT_KEY = "code_fixer_primary"
+
+# Timeout Configuration (all in seconds)
+# These can be overridden via environment variables
+# 
+# Recommended timeout values based on typical execution patterns:
+# - LLM_CALL_TIMEOUT: 60s - Complex code generation can take 20-45s
+# - CODE_EXECUTION_TIMEOUT: 30s - Most code operations complete in 5-15s
+# - AGENT_STEP_TIMEOUT: 180s (3min) - Each step = LLM call + code execution + tool calls
+# - CREW_EXECUTION_TIMEOUT: 1200s (20min) - Allows for 50 iterations × ~20s avg
+# - HTTP_LLM_API_TIMEOUT: 60s - LLM APIs need more time for complex requests
+# - HTTP_GITHUB_API_TIMEOUT: 30s - GitHub operations are usually fast
+#
+# To override, set environment variables:
+#   export LLM_CALL_TIMEOUT=90
+#   export CREW_EXECUTION_TIMEOUT=1800
+#   etc.
+LLM_CALL_TIMEOUT = int(os.getenv("LLM_CALL_TIMEOUT", "60"))  # 60 seconds for LLM API calls
+CODE_EXECUTION_TIMEOUT = int(os.getenv("CODE_EXECUTION_TIMEOUT", "30"))  # 30 seconds for code execution
+AGENT_STEP_TIMEOUT = int(os.getenv("AGENT_STEP_TIMEOUT", "180"))  # 3 minutes per agent step
+CREW_EXECUTION_TIMEOUT = int(os.getenv("CREW_EXECUTION_TIMEOUT", "1200"))  # 20 minutes for entire crew
+HTTP_LLM_API_TIMEOUT = int(os.getenv("HTTP_LLM_API_TIMEOUT", "60"))  # 60 seconds for LLM HTTP requests
+HTTP_GITHUB_API_TIMEOUT = int(os.getenv("HTTP_GITHUB_API_TIMEOUT", "30"))  # 30 seconds for GitHub API
 
 # Agent role mapping constants
 AGENT_PHASE_FIX_GENERATION = "fix_generation"
@@ -394,7 +417,7 @@ def run_robust_crew(
             db=db
         )
     
-    # Run agent loop
+    # Run agent loop with overall execution timeout
     initial_context = {
         "root_cause": root_cause,
         "affected_files": affected_files,
@@ -402,8 +425,25 @@ def run_robust_crew(
         "error_signature": error_signature
     }
     
+    crew_start_time = time.time()
+    
     try:
-        result = agent_loop.run(agent_executor, initial_context)
+        # Wrap agent loop execution with timeout
+        def _run_agent_loop():
+            return agent_loop.run(agent_executor, initial_context)
+        
+        # Use ThreadPoolExecutor for overall crew timeout
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run_agent_loop)
+            try:
+                result = future.result(timeout=CREW_EXECUTION_TIMEOUT)
+            except FutureTimeoutError:
+                future.cancel()
+                elapsed_time = time.time() - crew_start_time
+                raise TimeoutError(
+                    f"Crew execution exceeded {CREW_EXECUTION_TIMEOUT} seconds "
+                    f"(ran for {elapsed_time:.1f}s). This prevents runaway processes."
+                )
         
         # Sync workspace to scratchpad
         scratchpad.sync_from_workspace(workspace)
@@ -530,6 +570,26 @@ def run_robust_crew(
             "events": result["events"],
             "workspace_state": result["workspace_state"],
             "error_signature": error_signature
+        }
+    except TimeoutError as timeout_err:
+        # Handle timeout errors specifically
+        elapsed_time = time.time() - crew_start_time if 'crew_start_time' in locals() else 0
+        error_msg = str(timeout_err)
+        event_stream.add_event(
+            EventType.ERROR,
+            {
+                "message": f"Crew execution timeout: {error_msg}",
+                "elapsed_time": elapsed_time,
+                "timeout_type": "crew_execution_timeout"
+            }
+        )
+        return {
+            "status": "error",
+            "error": error_msg,
+            "error_type": "timeout",
+            "elapsed_time": elapsed_time,
+            "events": event_stream.get_all_events(),
+            "workspace_state": workspace.get_workspace_state()
         }
     except Exception as e:
         event_stream.add_event(
@@ -669,19 +729,33 @@ def _execute_agent_action(
     safe_context = escape_braces_for_fstring(context)
     full_context = f"{safe_system_prompt}\n\n{safe_context}"
     
-    # Try to execute agent
+    # Try to execute agent with per-step timeout
     try:
-        # Check if agent should generate code (CodeAct) or use tools
-        # For now, we'll use a hybrid approach
-        action_result = _execute_with_codeact(
-            agent=agent,
-            step=step,
-            context=full_context,
-            workspace=workspace,
-            github_integration=github_integration,
-            repo_name=repo_name,
-            available_files=available_files or []
-        )
+        # Wrap agent execution with per-step timeout
+        def _execute_step():
+            # Check if agent should generate code (CodeAct) or use tools
+            # For now, we'll use a hybrid approach
+            return _execute_with_codeact(
+                agent=agent,
+                step=step,
+                context=full_context,
+                workspace=workspace,
+                github_integration=github_integration,
+                repo_name=repo_name,
+                available_files=available_files or []
+            )
+        
+        # Use ThreadPoolExecutor for per-step timeout
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_execute_step)
+            try:
+                action_result = future.result(timeout=AGENT_STEP_TIMEOUT)
+            except FutureTimeoutError:
+                future.cancel()
+                raise TimeoutError(
+                    f"Agent step exceeded {AGENT_STEP_TIMEOUT} seconds. "
+                    f"Step: {step_description[:100]}"
+                )
         
         # Add AgentEmployee info to result
         if agent_employee:
@@ -704,6 +778,24 @@ def _execute_agent_action(
             )
         
         return action_result
+    except TimeoutError as timeout_err:
+        # Handle step timeout specifically
+        error_msg = str(timeout_err)
+        if agent_employee and db:
+            _update_agent_employee_status(
+                db=db,
+                crewai_role=agent_employee.crewai_role,
+                status=AGENT_STATUS_AVAILABLE,
+                current_task=None
+            )
+        
+        return {
+            "success": False,
+            "error": error_msg,
+            "error_type": "timeout",
+            "timeout_type": "agent_step_timeout",
+            "agent_name": agent_name or (agent.role if hasattr(agent, 'role') else "unknown")
+        }
     except Exception as e:
         # Update AgentEmployee status to "available" on error (task failed)
         if agent_employee and db:
@@ -711,7 +803,7 @@ def _execute_agent_action(
                 db=db,
                 crewai_role=agent_employee.crewai_role,
                 status=AGENT_STATUS_AVAILABLE,
-                current_task=None  # Clear current task
+                current_task=None
             )
         
         error_result = {
@@ -1113,16 +1205,17 @@ Generate the Python code to complete the step now:
             }
         
         try:
-            if hasattr(llm, 'invoke'):
-                response = llm.invoke(codeact_prompt)
-                code = response.content if hasattr(response, 'content') else str(response)
-            elif hasattr(llm, 'call'):
-                # Some LLM interfaces use 'call' method
-                response = llm.call(codeact_prompt)
-                code = response.content if hasattr(response, 'content') else str(response)
-            else:
-                # Last resort: raise error instead of trying to call as function
-                raise AttributeError("LLM object does not have 'invoke' or 'call' method. Cannot generate code.")
+            # Use timeout wrapper for LLM calls
+            try:
+                code = _call_llm_with_timeout(llm, codeact_prompt, timeout_seconds=LLM_CALL_TIMEOUT)
+            except TimeoutError as llm_timeout:
+                return {
+                    "success": False,
+                    "error": f"LLM call timeout: {str(llm_timeout)}",
+                    "error_type": "timeout",
+                    "timeout_type": "llm_call_timeout",
+                    "agent_name": agent.role if hasattr(agent, 'role') else "unknown"
+                }
             
             # Check if LLM returned an error message instead of code
             if isinstance(code, tuple):
@@ -1203,6 +1296,46 @@ Generate the Python code to complete the step now:
             "success": False,
             "error": f"CodeAct execution failed: {str(e)}"
         }
+
+
+def _call_llm_with_timeout(llm, prompt: str, timeout_seconds: int = None) -> Any:
+    """
+    Call LLM with timeout protection.
+    
+    Args:
+        llm: LLM instance (CrewAI LLM)
+        prompt: Prompt string
+        timeout_seconds: Timeout in seconds (defaults to LLM_CALL_TIMEOUT)
+        
+    Returns:
+        LLM response
+        
+    Raises:
+        TimeoutError: If LLM call exceeds timeout
+    """
+    if timeout_seconds is None:
+        timeout_seconds = LLM_CALL_TIMEOUT
+    
+    def _call_llm():
+        """Execute LLM call in thread."""
+        if hasattr(llm, 'invoke'):
+            response = llm.invoke(prompt)
+            return response.content if hasattr(response, 'content') else str(response)
+        elif hasattr(llm, 'call'):
+            response = llm.call(prompt)
+            return response.content if hasattr(response, 'content') else str(response)
+        else:
+            raise AttributeError("LLM object does not have 'invoke' or 'call' method")
+    
+    # Use ThreadPoolExecutor for timeout
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_call_llm)
+        try:
+            response = future.result(timeout=timeout_seconds)
+            return response
+        except FutureTimeoutError:
+            future.cancel()
+            raise TimeoutError(f"LLM call exceeded {timeout_seconds} seconds")
 
 
 @contextmanager
@@ -1411,8 +1544,8 @@ def _execute_code_safely(
     
     exec_locals = {}
     
-    # Get timeout from env or default to 30 seconds
-    timeout_seconds = int(os.getenv("CODE_EXECUTION_TIMEOUT", "30"))
+    # Use configured timeout constant
+    timeout_seconds = CODE_EXECUTION_TIMEOUT
     
     try:
         # Execute code with timeout

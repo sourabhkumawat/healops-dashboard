@@ -1653,7 +1653,7 @@ Keep responses conversational and friendly. If asked about specific incidents or
                 "temperature": chat_config["temperature"],
                 "max_tokens": chat_config["max_tokens"],
             },
-            timeout=15
+            timeout=int(os.getenv("HTTP_LLM_API_TIMEOUT", "60"))  # 60 seconds for LLM API calls
         )
         
         if response.status_code == 200:

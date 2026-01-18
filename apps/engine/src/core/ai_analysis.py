@@ -917,7 +917,7 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                 "temperature": model_config["temperature"],
                 "max_tokens": model_config["max_tokens"],
             },
-            timeout=30
+            timeout=int(os.getenv("HTTP_LLM_API_TIMEOUT", "60"))  # 60 seconds for LLM API calls
         )
         
         if response.status_code == 402:
