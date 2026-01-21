@@ -21,7 +21,6 @@ from src.tools.qa_review import (
 from src.integrations.github.integration import GithubIntegration
 from src.database.database import SessionLocal
 from src.database.models import AgentEmployee, Incident, LogEntry, AgentPR
-from src.services.slack.service import SlackService
 from crewai import Task, Crew
 from sqlalchemy.orm import Session
 from src.agents.orchestrator import (
@@ -148,28 +147,6 @@ async def review_pr_for_alex(
             current_task=task_description
         )
         
-        # Initialize Slack service for QA agent
-        slack_service = None
-        if qa_agent.slack_bot_token:
-            try:
-                from src.auth.crypto_utils import decrypt_token
-                bot_token = decrypt_token(qa_agent.slack_bot_token)
-                slack_service = SlackService(bot_token=bot_token)
-            except Exception as e:
-                logger.warning(f"Failed to initialize Slack service for QA agent: {e}")
-        
-        # Notify in Slack that review is starting
-        if slack_service and qa_agent.slack_channel_id:
-            try:
-                slack_service.post_message(
-                    channel_id=qa_agent.slack_channel_id,
-                    text=f"🔍 Starting review of PR #{pr_number} by Alex: {pr_details.get('title')}",
-                    agent_name=qa_agent.name,
-                    agent_department=qa_agent.department
-                )
-            except Exception as e:
-                logger.warning(f"Failed to post Slack message: {e}")
-        
         # Get PR review data
         pr_review_data = review_pr(repo_name, pr_number, user_id, integration_id)
         if not pr_review_data.get("success"):
@@ -271,7 +248,7 @@ Review each changed file thoroughly. For each file:
 After your review, provide a summary and:
 - Comment on the PR with your findings
 - Request changes if needed, or approve if everything is good
-- Notify Alex via Slack about any issues found
+- Notify Alex about any issues found
 
 Be thorough but constructive. Prioritize functional correctness and antipatterns over minor style issues.
 """,
@@ -317,44 +294,6 @@ Be thorough but constructive. Prioritize functional correctness and antipatterns
             current_task=None,  # Clear current task
             task_completed=completed_task_description
         )
-        
-        # Notify in Slack that review is complete
-        if slack_service and qa_agent.slack_channel_id:
-            try:
-                status_emoji = "✅" if review_status == "approved" else "⚠️" if review_status == "changes_requested" else "✅"
-                slack_service.post_message(
-                    channel_id=qa_agent.slack_channel_id,
-                    text=f"{status_emoji} Completed review of PR #{pr_number}. Status: {review_status}. Check GitHub for details.",
-                    agent_name=qa_agent.name,
-                    agent_department=qa_agent.department
-                )
-            except Exception as e:
-                logger.warning(f"Failed to post Slack completion message: {e}")
-        
-        # Notify Alex via Slack if issues found
-        if review_status == "changes_requested" and slack_service and alex_agent.slack_channel_id:
-            try:
-                # Get Alex's Slack service
-                if alex_agent.slack_bot_token:
-                    from src.auth.crypto_utils import decrypt_token
-                    alex_bot_token = decrypt_token(alex_agent.slack_bot_token)
-                    alex_slack = SlackService(bot_token=alex_bot_token)
-                    
-                    # Format mention if Alex has a Slack user ID
-                    alex_mention = ""
-                    if alex_agent.slack_user_id:
-                        alex_mention = f"<@{alex_agent.slack_user_id}>"
-                    else:
-                        alex_mention = "Alex"
-                    
-                    alex_slack.post_message(
-                        channel_id=alex_agent.slack_channel_id,
-                        text=f"⚠️ Hey {alex_mention}! I reviewed your PR #{pr_number} and found some issues. Please check the PR comments and fix them. PR: {pr_details.get('url', '')}",
-                        agent_name=qa_agent.name,
-                        agent_department=qa_agent.department
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to notify Alex via Slack: {e}")
         
         return {
             "success": True,

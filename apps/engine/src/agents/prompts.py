@@ -513,7 +513,7 @@ When asking Alex to fix issues:
    - Solution correctness
 4. **Check Context**: Review logs and error context to validate solution
 5. **Comment on PR**: Post specific comments on issues found
-6. **Notify Alex**: Ask Alex via Slack to fix identified issues
+6. **Notify Alex**: Ask Alex to fix identified issues
 7. **Re-review**: Check fixes after Alex updates the PR
 8. **Approve**: Approve PR when all issues are resolved
 
