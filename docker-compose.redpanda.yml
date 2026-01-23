@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: redpanda
+    restart: unless-stopped
+    ports:
+      - "19092:19092"  # Kafka API
+      - "19644:19644"  # Admin API
+      - "8080:8080"    # REST Proxy (optional)
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr=internal://0.0.0.0:8082,external://0.0.0.0:8080
+      - --advertise-pandaproxy-addr=internal://redpanda:8082,external://localhost:8080
+      - --schema-registry-addr=internal://0.0.0.0:8081,external://0.0.0.0:8081
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --mode=dev-container
+      - --smp=1
+      - --default-log-level=info
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    networks:
+      - healops-network
+    environment:
+      REDPANDA_ENVIRONMENT: development
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:latest
+    container_name: redpanda-console
+    restart: unless-stopped
+    ports:
+      - "8081:8080"  # Web UI
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      REDPANDA_ADMIN_API_URLS: http://redpanda:9644
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - healops-network
+
+volumes:
+  redpanda_data:
+
+networks:
+  healops-network:
+    external: true
+    # If the network doesn't exist, create it with:
+    # docker network create healops-network

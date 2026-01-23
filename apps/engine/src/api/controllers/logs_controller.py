@@ -9,7 +9,7 @@ from datetime import datetime
 
 from src.database.models import LogEntry, Integration
 from src.memory import ensure_partition_exists_for_timestamp
-from src.utils.websocket_managers import connection_manager as manager
+from src.utils.redpanda_websocket_manager import connection_manager as manager
 from src.api.controllers.base import get_user_id_from_request
 
 
@@ -162,12 +162,12 @@ class LogsController:
                     # Log successful persistence for debugging
                     print(f"✓ Persisted {severity_upper} log: id={db_log.id}, service={log.service_name}, message={log.message[:50]}")
                     
-                    # Trigger incident check
+                    # Trigger incident check via Redpanda
                     try:
-                        from tasks import process_log_entry
-                        background_tasks.add_task(process_log_entry, db_log.id)
+                        from src.services.redpanda_task_processor import publish_log_processing_task
+                        publish_log_processing_task(db_log.id)
                     except Exception as task_error:
-                        print(f"Warning: Failed to queue incident check task: {task_error}")
+                        print(f"Warning: Failed to queue incident check task via Redpanda: {task_error}")
                         # Don't fail the request if task queuing fails
                     
                     return {"status": "ingested", "id": db_log.id, "persisted": True, "severity": log.severity}
@@ -307,12 +307,12 @@ class LogsController:
                                 # Log successful persistence for debugging
                                 print(f"✓ Persisted {severity_upper} log: id={db_log.id}, service={log.service_name}, message={log.message[:50]}")
                                 
-                                # Trigger incident check
+                                # Trigger incident check via Redpanda
                                 try:
-                                    from tasks import process_log_entry
-                                    background_tasks.add_task(process_log_entry, db_log.id)
+                                    from src.services.redpanda_task_processor import publish_log_processing_task
+                                    publish_log_processing_task(db_log.id)
                                 except Exception as task_error:
-                                    print(f"Warning: Failed to queue incident check task: {task_error}")
+                                    print(f"Warning: Failed to queue incident check task via Redpanda: {task_error}")
                                     # Don't fail the request if task queuing fails
                                 
                                 results.append({"status": "ingested", "id": db_log.id, "persisted": True, "severity": log.severity})
@@ -490,20 +490,20 @@ class LogsController:
         if persisted_count > 0:
             db.commit()
             
-            # Trigger async analysis for persisted logs
+            # Trigger async analysis for persisted logs via Redpanda
             try:
-                from tasks import process_log_entry
+                from src.services.redpanda_task_processor import publish_log_processing_task
                 # Fetch IDs of newly inserted logs
                 recent_logs = db.query(LogEntry).filter(
                     LogEntry.service_name == payload.serviceName,
                     LogEntry.source == "otel"
                 ).order_by(LogEntry.id.desc()).limit(persisted_count).all()
-                
+
                 for log in recent_logs:
-                    background_tasks.add_task(process_log_entry, log.id)
-                    
+                    publish_log_processing_task(log.id)
+
             except Exception as e:
-                print(f"Failed to trigger tasks: {e}")
+                print(f"Failed to trigger tasks via Redpanda: {e}")
         
         return {
             "status": "success",

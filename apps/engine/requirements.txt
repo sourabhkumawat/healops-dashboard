@@ -26,3 +26,4 @@ sib-api-v3-sdk
 PyJWT
 cryptography
 slack-sdk>=3.27.0
+kafka-python
