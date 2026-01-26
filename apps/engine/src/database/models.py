@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON, ForeignKey, Enum, Text
+from sqlalchemy import Column, Integer, String, DateTime, JSON, ForeignKey, Enum, Text, UniqueConstraint, Index, and_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 import enum
@@ -298,6 +298,18 @@ class LinearResolutionAttempt(Base):
     # Audit trail
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
+
+    # Table constraints to prevent race conditions
+    __table_args__ = (
+        # Ensure only one active resolution attempt per integration-issue pair
+        # Note: This partial unique index prevents multiple active attempts for same issue
+        Index(
+            'idx_unique_active_resolution_per_issue',
+            'integration_id', 'issue_id',
+            unique=True,
+            postgresql_where="status IN ('CLAIMED', 'ANALYZING', 'IMPLEMENTING', 'TESTING')"
+        ),
+    )
 
 # Import new memory models so they are registered with Base
 from src.memory.models import AgentMemoryError, AgentMemoryFix, AgentRepoContext

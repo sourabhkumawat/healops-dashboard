@@ -15,6 +15,7 @@ REDPANDA_BROKERS = os.getenv("REDPANDA_BROKERS", "localhost:9092")
 REDPANDA_LOG_TOPIC = os.getenv("REDPANDA_LOG_TOPIC", "healops-logs")
 REDPANDA_INCIDENT_TOPIC = os.getenv("REDPANDA_INCIDENT_TOPIC", "healops-incidents")
 REDPANDA_TICKET_TASKS_TOPIC = os.getenv("REDPANDA_TICKET_TASKS_TOPIC", "linear-ticket-tasks")
+REDPANDA_DEAD_LETTER_TOPIC = os.getenv("REDPANDA_DEAD_LETTER_TOPIC", "healops-dead-letters")
 
 def wait_for_redpanda(max_retries=30, retry_interval=2):
     """Wait for Redpanda to be available."""
@@ -77,6 +78,16 @@ def create_topics():
                     'retention.ms': '604800000',  # 7 days retention
                     'compression.type': 'snappy'
                 }
+            ),
+            NewTopic(
+                name=REDPANDA_DEAD_LETTER_TOPIC,
+                num_partitions=1,  # Single partition to maintain order for failed messages
+                replication_factor=1,
+                topic_configs={
+                    'cleanup.policy': 'delete',
+                    'retention.ms': '2592000000',  # 30 days retention for investigation
+                    'compression.type': 'gzip'  # Better compression for failed messages
+                }
             )
         ]
 
@@ -112,7 +123,7 @@ def verify_topics():
         topics = metadata.topics
 
         print("\nVerifying topics:")
-        for topic_name in [REDPANDA_LOG_TOPIC, REDPANDA_INCIDENT_TOPIC, REDPANDA_TICKET_TASKS_TOPIC]:
+        for topic_name in [REDPANDA_LOG_TOPIC, REDPANDA_INCIDENT_TOPIC, REDPANDA_TICKET_TASKS_TOPIC, REDPANDA_DEAD_LETTER_TOPIC]:
             if topic_name in topics:
                 partitions = len(topics[topic_name].partitions)
                 print(f"✓ {topic_name} ({partitions} partitions)")
@@ -170,7 +181,7 @@ def main():
     print("Healops Redpanda Setup")
     print("======================")
     print(f"Broker: {REDPANDA_BROKERS}")
-    print(f"Topics: {REDPANDA_LOG_TOPIC}, {REDPANDA_INCIDENT_TOPIC}, {REDPANDA_TICKET_TASKS_TOPIC}")
+    print(f"Topics: {REDPANDA_LOG_TOPIC}, {REDPANDA_INCIDENT_TOPIC}, {REDPANDA_TICKET_TASKS_TOPIC}, {REDPANDA_DEAD_LETTER_TOPIC}")
     print()
 
     # Step 1: Wait for Redpanda

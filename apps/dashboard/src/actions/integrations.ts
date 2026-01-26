@@ -468,3 +468,31 @@ export async function reconnectLinearIntegration(integrationId: number) {
         return { error: 'Failed to reconnect Linear integration' };
     }
 }
+
+export async function disconnectIntegration(integrationId: number) {
+    try {
+        const apiUrl = `${API_BASE}/integrations/${integrationId}`;
+        console.log('Disconnecting integration:', apiUrl);
+        const headers = await getAuthHeaders();
+
+        const response = await fetchWithAuth(apiUrl, {
+            method: 'DELETE',
+            headers
+        });
+
+        console.log('Disconnect response status:', response.status);
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('Failed to disconnect integration:', response.status, errorText);
+            return { error: errorText || 'Failed to disconnect integration' };
+        }
+
+        const data = await response.json();
+        console.log('Integration disconnected successfully:', data);
+        return data;
+    } catch (error) {
+        console.error('Error disconnecting integration:', error);
+        return { error: 'Failed to disconnect integration' };
+    }
+}

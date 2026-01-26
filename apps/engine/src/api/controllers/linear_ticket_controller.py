@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, desc
 from pydantic import BaseModel, Field
 
-from src.database.database import get_db
+from src.database.database import get_db, SessionLocal
 from src.database.models import (
     Integration, LinearResolutionAttempt, LinearResolutionAttemptStatus, User
 )
@@ -23,6 +23,7 @@ from src.services.linear_ticket_resolver import LinearTicketResolver, LinearTick
 from src.services.linear_polling_service import polling_service_manager, PollingConfig
 from src.api.controllers.auth_controller import get_current_user
 from src.utils.integrations import get_linear_integration_for_user
+from src.services.redpanda_service import redpanda_service
 
 
 router = APIRouter(prefix="/linear-tickets", tags=["Linear Ticket Resolution"])
@@ -602,3 +603,178 @@ async def health_check():
         )
     finally:
         db.close()
+
+
+# Dead Letter Queue Management Endpoints
+@router.get("/dlq/messages")
+async def get_dead_letter_messages(
+    limit: int = Query(default=50, le=500, description="Maximum number of messages to retrieve"),
+    current_user: User = Depends(get_current_user)
+):
+    """Get messages from the dead letter queue for inspection."""
+    try:
+        messages = redpanda_service.get_dead_letter_messages(limit=limit)
+        return {
+            "messages": messages,
+            "count": len(messages),
+            "retrieved_at": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving DLQ messages: {str(e)}")
+
+
+@router.post("/dlq/replay/{message_offset}")
+async def replay_message_from_dlq(
+    message_offset: int,
+    current_user: User = Depends(get_current_user)
+):
+    """Replay a specific message from the dead letter queue back to its original topic."""
+    try:
+        # Get the specific message from DLQ
+        messages = redpanda_service.get_dead_letter_messages(limit=1000)  # Get recent messages
+
+        target_message = None
+        for msg in messages:
+            if msg['offset'] == message_offset:
+                target_message = msg['value']
+                break
+
+        if not target_message:
+            raise HTTPException(status_code=404, detail=f"Message with offset {message_offset} not found in DLQ")
+
+        # Replay the message
+        success = redpanda_service.replay_message_from_dlq(target_message)
+
+        if success:
+            return {
+                "message": "Message replayed successfully",
+                "original_offset": message_offset,
+                "replayed_at": datetime.utcnow().isoformat(),
+                "original_topic": target_message.get('original_topic')
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to replay message")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error replaying message: {str(e)}")
+
+
+@router.post("/dlq/replay-all")
+async def replay_all_dlq_messages(
+    max_age_hours: int = Query(default=24, description="Only replay messages newer than this"),
+    current_user: User = Depends(get_current_user)
+):
+    """Replay all eligible messages from the dead letter queue."""
+    try:
+        messages = redpanda_service.get_dead_letter_messages(limit=1000)
+
+        # Filter by age
+        cutoff_time = datetime.utcnow() - timedelta(hours=max_age_hours)
+        eligible_messages = []
+
+        for msg in messages:
+            # Check message timestamp (milliseconds since epoch)
+            if msg['timestamp']:
+                msg_time = datetime.fromtimestamp(msg['timestamp'] / 1000)
+                if msg_time >= cutoff_time:
+                    eligible_messages.append(msg['value'])
+
+        # Replay each message
+        success_count = 0
+        error_count = 0
+        errors = []
+
+        for dlq_message in eligible_messages:
+            try:
+                success = redpanda_service.replay_message_from_dlq(dlq_message)
+                if success:
+                    success_count += 1
+                else:
+                    error_count += 1
+                    errors.append(f"Failed to replay message: {dlq_message.get('original_message', {}).get('ticket_identifier', 'unknown')}")
+            except Exception as e:
+                error_count += 1
+                errors.append(f"Error replaying message: {str(e)}")
+
+        return {
+            "message": "Batch replay completed",
+            "total_eligible": len(eligible_messages),
+            "successful_replays": success_count,
+            "failed_replays": error_count,
+            "errors": errors,
+            "replayed_at": datetime.utcnow().isoformat()
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error in batch replay: {str(e)}")
+
+
+class DLQStatsModel(BaseModel):
+    """Dead letter queue statistics."""
+    total_messages: int
+    messages_by_topic: Dict[str, int]
+    messages_by_error_type: Dict[str, int]
+    oldest_message_age_hours: Optional[float]
+    newest_message_age_hours: Optional[float]
+
+
+@router.get("/dlq/stats", response_model=DLQStatsModel)
+async def get_dlq_stats(
+    current_user: User = Depends(get_current_user)
+):
+    """Get statistics about messages in the dead letter queue."""
+    try:
+        messages = redpanda_service.get_dead_letter_messages(limit=1000)
+
+        if not messages:
+            return DLQStatsModel(
+                total_messages=0,
+                messages_by_topic={},
+                messages_by_error_type={},
+                oldest_message_age_hours=None,
+                newest_message_age_hours=None
+            )
+
+        # Analyze messages
+        now = datetime.utcnow()
+        topics = {}
+        error_types = {}
+        timestamps = []
+
+        for msg in messages:
+            # Count by original topic
+            original_topic = msg['value'].get('original_topic', 'unknown')
+            topics[original_topic] = topics.get(original_topic, 0) + 1
+
+            # Count by error type
+            error_info = msg['value'].get('error_info', {})
+            error_type = error_info.get('error_type', 'unknown')
+            error_types[error_type] = error_types.get(error_type, 0) + 1
+
+            # Collect timestamps
+            if msg['timestamp']:
+                timestamps.append(msg['timestamp'] / 1000)  # Convert to seconds
+
+        # Calculate age ranges
+        oldest_age_hours = None
+        newest_age_hours = None
+
+        if timestamps:
+            oldest_timestamp = min(timestamps)
+            newest_timestamp = max(timestamps)
+
+            oldest_age_hours = (now.timestamp() - oldest_timestamp) / 3600
+            newest_age_hours = (now.timestamp() - newest_timestamp) / 3600
+
+        return DLQStatsModel(
+            total_messages=len(messages),
+            messages_by_topic=topics,
+            messages_by_error_type=error_types,
+            oldest_message_age_hours=oldest_age_hours,
+            newest_message_age_hours=newest_age_hours
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting DLQ stats: {str(e)}")

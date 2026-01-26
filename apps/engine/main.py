@@ -1906,6 +1906,15 @@ def get_integration_details(
     """Get integration details - delegates to IntegrationsController."""
     return IntegrationsController.get_integration_details(integration_id, request, db)
 
+@app.delete("/integrations/{integration_id}")
+def disconnect_integration(
+    integration_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Disconnect integration - delegates to IntegrationsController."""
+    return IntegrationsController.disconnect_integration(integration_id, request, db)
+
 @app.get("/stats")
 def get_system_stats(request: Request = None, db: Session = Depends(get_db)):
     """Get system stats - delegates to StatsController."""

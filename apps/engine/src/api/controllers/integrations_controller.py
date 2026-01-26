@@ -1324,3 +1324,46 @@ class IntegrationsController:
             "updated_at": integration.updated_at.isoformat() if integration.updated_at else None,
             "last_verified": integration.last_verified.isoformat() if integration.last_verified else None
         }
+
+    @staticmethod
+    def disconnect_integration(integration_id: int, request: Request, db: Session):
+        """
+        Disconnect (delete) an integration.
+
+        This endpoint marks an integration as DISCONNECTED and clears sensitive data
+        like tokens while preserving the integration record for audit purposes.
+        """
+        user_id = get_user_id_from_request(request, db=db)
+
+        integration = db.query(Integration).filter(
+            Integration.id == integration_id,
+            Integration.user_id == user_id
+        ).first()
+
+        if not integration:
+            raise HTTPException(status_code=404, detail="Integration not found")
+
+        # Mark as disconnected and clear sensitive data
+        integration.status = "DISCONNECTED"
+        integration.access_token = None
+        integration.refresh_token = None
+        integration.token_expiry = None
+        integration.installation_id = None
+        integration.updated_at = datetime.utcnow()
+
+        # Optionally clear config data that might contain sensitive info
+        # but preserve service mappings for potential reconnection
+        if integration.config:
+            # Keep basic config but clear sensitive data
+            sensitive_keys = ["workspace_id", "user_id", "user_email", "team_id"]
+            for key in sensitive_keys:
+                integration.config.pop(key, None)
+            flag_modified(integration, "config")
+
+        db.commit()
+
+        return {
+            "status": "success",
+            "message": f"Integration {integration.name} has been disconnected successfully",
+            "integration_id": integration_id
+        }

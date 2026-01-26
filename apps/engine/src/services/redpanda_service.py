@@ -7,7 +7,7 @@ import os
 import asyncio
 import threading
 import time
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, List
 from datetime import datetime
 from kafka import KafkaProducer, KafkaConsumer, TopicPartition
 from kafka.errors import KafkaError, NoBrokersAvailable
@@ -22,6 +22,12 @@ REDPANDA_BROKERS = os.getenv("REDPANDA_BROKERS", "localhost:19092")
 REDPANDA_LOG_TOPIC = os.getenv("REDPANDA_LOG_TOPIC", "healops-logs")
 REDPANDA_INCIDENT_TOPIC = os.getenv("REDPANDA_INCIDENT_TOPIC", "healops-incidents")
 REDPANDA_TICKET_TASKS_TOPIC = os.getenv("REDPANDA_TICKET_TASKS_TOPIC", "linear-ticket-tasks")
+REDPANDA_DEAD_LETTER_TOPIC = os.getenv("REDPANDA_DEAD_LETTER_TOPIC", "healops-dead-letters")
+
+# Retry Configuration
+MAX_RETRY_ATTEMPTS = int(os.getenv("REDPANDA_MAX_RETRIES", "3"))
+RETRY_BACKOFF_BASE = float(os.getenv("REDPANDA_RETRY_BACKOFF_BASE", "2.0"))  # Exponential backoff base
+RETRY_INITIAL_DELAY = int(os.getenv("REDPANDA_RETRY_INITIAL_DELAY", "5"))  # Initial delay in seconds
 
 class RedpandaProducer:
     """Produces messages to Redpanda topics with automatic retries and error handling."""
@@ -220,6 +226,62 @@ class RedpandaProducer:
             self._connect()
             return False
 
+    def publish_to_dead_letter_queue(self,
+                                   original_message: Dict[str, Any],
+                                   original_topic: str,
+                                   error_info: Dict[str, Any],
+                                   retry_count: int = 0) -> bool:
+        """
+        Publish a failed message to the dead letter queue for later investigation or replay.
+
+        Args:
+            original_message: The original message that failed processing
+            original_topic: The topic the message originally came from
+            error_info: Information about the error that occurred
+            retry_count: Number of retry attempts made
+
+        Returns:
+            bool: True if published to DLQ successfully, False otherwise
+        """
+        if not self.producer:
+            self._connect()
+            if not self.producer:
+                logger.error("Cannot publish to dead letter queue: Redpanda producer not available")
+                return False
+
+        try:
+            # Create dead letter message with metadata
+            dlq_message = {
+                'original_message': original_message,
+                'original_topic': original_topic,
+                'error_info': error_info,
+                'retry_count': retry_count,
+                'failed_at': datetime.utcnow().isoformat(),
+                'redpanda_timestamp': datetime.utcnow().isoformat(),
+                'topic': REDPANDA_DEAD_LETTER_TOPIC
+            }
+
+            # Use original message key or generate one
+            message_key = original_message.get('ticket_identifier') or \
+                         original_message.get('incident_id') or \
+                         f"failed_{datetime.utcnow().timestamp()}"
+
+            future = self.producer.send(
+                REDPANDA_DEAD_LETTER_TOPIC,
+                value=dlq_message,
+                key=message_key
+            )
+
+            record_metadata = future.get(timeout=1)
+            logger.warning(f"⚠️ Message sent to dead letter queue: topic {record_metadata.topic}, "
+                         f"partition {record_metadata.partition}, offset {record_metadata.offset}")
+            return True
+
+        except Exception as e:
+            logger.error(f"✗ Failed to publish to dead letter queue: {e}")
+            # Don't try to reconnect here to avoid infinite recursion
+            return False
+
     def close(self):
         """Close the producer connection."""
         if self.producer:
@@ -309,10 +371,10 @@ class RedpandaConsumer:
                         try:
                             # Log message consumption for debugging
                             logger.debug(f"Consuming message from topic '{self.topic}', offset {message.offset}, key: {message.key}")
-                            
-                            # Process message
-                            self.message_handler(message.value)
-                            
+
+                            # Process message with retry logic
+                            self._process_message_with_retry(message)
+
                             logger.debug(f"✓ Successfully processed message from offset {message.offset}")
 
                         except Exception as e:
@@ -328,6 +390,77 @@ class RedpandaConsumer:
                 self._connect()  # Try to reconnect
 
         logger.info("Consumer loop stopped")
+
+    def _process_message_with_retry(self, message):
+        """
+        Process a message with retry logic and dead letter queue fallback.
+
+        Args:
+            message: Kafka message to process
+        """
+        retry_count = message.value.get('retry_count', 0)
+        max_retries = MAX_RETRY_ATTEMPTS
+
+        for attempt in range(max_retries + 1):
+            try:
+                # Add retry metadata to message
+                enhanced_message = {
+                    **message.value,
+                    'retry_count': retry_count + attempt,
+                    'current_attempt': attempt + 1
+                }
+
+                # Process the message
+                self.message_handler(enhanced_message)
+
+                # If we reach here, processing succeeded
+                if attempt > 0:
+                    logger.info(f"✓ Message processed successfully on retry attempt {attempt}")
+                return
+
+            except Exception as e:
+                logger.error(f"✗ Message processing failed (attempt {attempt + 1}/{max_retries + 1}): {e}")
+
+                # If this is the last attempt, send to dead letter queue
+                if attempt == max_retries:
+                    logger.error(f"💀 Sending message to dead letter queue after {max_retries} failed attempts")
+
+                    # Get producer instance from service (we'll need to pass this)
+                    try:
+                        from src.services.redpanda_service import redpanda_service
+                        error_info = {
+                            'error_message': str(e),
+                            'error_type': type(e).__name__,
+                            'consumer_topic': self.topic,
+                            'consumer_group': self.group_id,
+                            'message_offset': message.offset,
+                            'message_partition': message.partition,
+                            'timestamp': datetime.utcnow().isoformat()
+                        }
+
+                        success = redpanda_service.producer.publish_to_dead_letter_queue(
+                            original_message=message.value,
+                            original_topic=self.topic,
+                            error_info=error_info,
+                            retry_count=retry_count + max_retries
+                        )
+
+                        if success:
+                            logger.warning(f"⚠️ Message sent to dead letter queue for topic '{self.topic}'")
+                        else:
+                            logger.error(f"❌ Failed to send message to dead letter queue - message lost!")
+
+                    except Exception as dlq_error:
+                        logger.error(f"❌ Error sending to dead letter queue: {dlq_error}")
+
+                    # Re-raise the original exception for logging
+                    raise e
+
+                else:
+                    # Calculate exponential backoff delay
+                    delay = RETRY_INITIAL_DELAY * (RETRY_BACKOFF_BASE ** attempt)
+                    logger.info(f"⏳ Retrying in {delay:.1f} seconds... (attempt {attempt + 2}/{max_retries + 1})")
+                    time.sleep(delay)
 
     def stop_consuming(self):
         """Stop consuming messages and close consumer."""
@@ -348,6 +481,7 @@ class RedpandaService:
         self.log_consumer = None
         self.incident_consumer = None
         self.ticket_consumer = None
+        self.dlq_consumer = None
         self.websocket_broadcaster = None
 
     def setup_log_consumer(self, websocket_broadcaster: Callable[[Dict[str, Any]], None]):
@@ -374,6 +508,63 @@ class RedpandaService:
             group_id="healops-ticket-resolver",
             message_handler=ticket_processor
         )
+
+    def setup_dead_letter_consumer(self, dlq_processor: Callable[[Dict[str, Any]], None]):
+        """Setup consumer for dead letter queue processing and replay."""
+        self.dlq_consumer = RedpandaConsumer(
+            topic=REDPANDA_DEAD_LETTER_TOPIC,
+            group_id="healops-dlq-processor",
+            message_handler=dlq_processor
+        )
+
+    def replay_message_from_dlq(self, dlq_message: Dict[str, Any]) -> bool:
+        """
+        Replay a message from the dead letter queue back to its original topic.
+
+        Args:
+            dlq_message: Dead letter queue message containing original_message and metadata
+
+        Returns:
+            bool: True if replayed successfully, False otherwise
+        """
+        try:
+            original_message = dlq_message.get('original_message', {})
+            original_topic = dlq_message.get('original_topic')
+            retry_count = dlq_message.get('retry_count', 0)
+
+            if not original_message or not original_topic:
+                logger.error("❌ Invalid DLQ message: missing original_message or original_topic")
+                return False
+
+            # Add replay metadata
+            replay_message = {
+                **original_message,
+                'retry_count': retry_count,
+                'replayed_at': datetime.utcnow().isoformat(),
+                'replayed_from_dlq': True
+            }
+
+            # Determine which publish method to use based on original topic
+            if original_topic == REDPANDA_TICKET_TASKS_TOPIC:
+                success = self.producer.publish_ticket_task(replay_message)
+            elif original_topic == REDPANDA_INCIDENT_TOPIC:
+                success = self.producer.publish_incident_task(replay_message)
+            elif original_topic == REDPANDA_LOG_TOPIC:
+                success = self.producer.publish_log(replay_message)
+            else:
+                logger.error(f"❌ Unknown original topic for replay: {original_topic}")
+                return False
+
+            if success:
+                logger.info(f"✓ Successfully replayed message from DLQ to topic '{original_topic}'")
+            else:
+                logger.error(f"❌ Failed to replay message to topic '{original_topic}'")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"❌ Error replaying message from DLQ: {e}")
+            return False
 
     def _handle_log_message(self, log_data: Dict[str, Any]):
         """Handle log messages from Redpanda for WebSocket broadcasting."""
@@ -424,7 +615,10 @@ class RedpandaService:
         if self.ticket_consumer:
             self.ticket_consumer.start_consuming()
             started.append("ticket_consumer")
-        
+        if self.dlq_consumer:
+            self.dlq_consumer.start_consuming()
+            started.append("dlq_consumer")
+
         if started:
             logger.info(f"✓ Started Redpanda consumers: {', '.join(started)}")
         else:
@@ -437,6 +631,69 @@ class RedpandaService:
         if self.incident_consumer:
             self.incident_consumer.stop_consuming()
         if self.ticket_consumer:
+            self.ticket_consumer.stop_consuming()
+        if self.dlq_consumer:
+            self.dlq_consumer.stop_consuming()
+
+    def close(self):
+        """Close all connections."""
+        self.stop_consumers()
+        if self.producer:
+            self.producer.close()
+
+    def is_healthy(self) -> bool:
+        """Check if the Redpanda service is healthy."""
+        return self.producer is not None and self.producer.producer is not None
+
+    def get_dead_letter_messages(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Get messages from the dead letter queue for inspection or replay.
+
+        Args:
+            limit: Maximum number of messages to retrieve
+
+        Returns:
+            List of dead letter messages
+        """
+        # This is a utility function - in production you'd want a dedicated consumer
+        # or admin tool for this functionality
+        try:
+            from kafka import KafkaConsumer
+            import uuid
+
+            temp_consumer = KafkaConsumer(
+                REDPANDA_DEAD_LETTER_TOPIC,
+                bootstrap_servers=[REDPANDA_BROKERS],
+                group_id=f"dlq_inspector_{uuid.uuid4().hex[:8]}",
+                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                auto_offset_reset='earliest',
+                enable_auto_commit=False,
+                consumer_timeout_ms=5000
+            )
+
+            messages = []
+            count = 0
+
+            for message in temp_consumer:
+                if count >= limit:
+                    break
+
+                messages.append({
+                    'partition': message.partition,
+                    'offset': message.offset,
+                    'timestamp': message.timestamp,
+                    'key': message.key,
+                    'value': message.value
+                })
+                count += 1
+
+            temp_consumer.close()
+            logger.info(f"Retrieved {len(messages)} messages from dead letter queue")
+            return messages
+
+        except Exception as e:
+            logger.error(f"Error retrieving dead letter messages: {e}")
+            return []
             self.ticket_consumer.stop_consuming()
 
     def is_healthy(self) -> bool:

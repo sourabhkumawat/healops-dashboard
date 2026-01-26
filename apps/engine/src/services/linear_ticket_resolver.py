@@ -8,10 +8,14 @@ feeds them into the proven agent resolution system.
 import os
 import json
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor, Future, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
+from sqlalchemy.exc import IntegrityError
+import logging
 
 from src.database.models import (
     Integration, LinearResolutionAttempt, LinearResolutionAttemptStatus,
@@ -24,6 +28,15 @@ from src.utils.integrations import get_linear_integration_for_user
 from src.integrations.github.integration import GithubIntegration
 from src.database.database import SessionLocal
 from src.services.redpanda_service import redpanda_service
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+# Global thread pool for ticket resolution
+_resolution_executor = ThreadPoolExecutor(
+    max_workers=5,  # Limit concurrent resolutions
+    thread_name_prefix="linear-resolver"
+)
 
 
 class LinearTicketResolver:
@@ -198,7 +211,7 @@ class LinearTicketResolver:
             print(f"   ⚡ Complexity: {analysis.get('complexity', 'unknown')}")
 
         try:
-            # 1. Create resolution attempt record
+            # 1. Create resolution attempt record with race condition protection
             attempt = LinearResolutionAttempt(
                 integration_id=self.integration_id,
                 user_id=self.user_id,
@@ -222,9 +235,47 @@ class LinearTicketResolver:
                     "ticket_data": ticket
                 }
 
-            self.db.add(attempt)
-            self.db.commit()
-            self.db.refresh(attempt)
+            # Use try-except to handle race conditions
+            try:
+                self.db.add(attempt)
+                self.db.commit()
+                self.db.refresh(attempt)
+                logger.info(f"Successfully claimed ticket {ticket_identifier} for resolution")
+
+            except IntegrityError as e:
+                # Another agent already claimed this ticket
+                self.db.rollback()
+                logger.warning(f"Ticket {ticket_identifier} already claimed by another agent")
+
+                # Check existing attempt
+                existing_attempt = self.db.query(LinearResolutionAttempt).filter(
+                    and_(
+                        LinearResolutionAttempt.integration_id == self.integration_id,
+                        LinearResolutionAttempt.issue_id == ticket_id,
+                        LinearResolutionAttempt.status.in_([
+                            LinearResolutionAttemptStatus.CLAIMED,
+                            LinearResolutionAttemptStatus.ANALYZING,
+                            LinearResolutionAttemptStatus.IMPLEMENTING,
+                            LinearResolutionAttemptStatus.TESTING
+                        ])
+                    )
+                ).first()
+
+                error_msg = f"Ticket {ticket_identifier} is already being resolved"
+                if existing_attempt:
+                    error_msg += f" by {existing_attempt.agent_name} (status: {existing_attempt.status})"
+
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "ticket_id": ticket_id,
+                    "ticket_identifier": ticket_identifier,
+                    "error_context": {
+                        "phase": "ticket_claiming",
+                        "reason": "already_claimed",
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                }
 
             # 2. Update Linear ticket status to "In Progress"
             await self._update_ticket_status(ticket_id, "In Progress",
@@ -845,7 +896,7 @@ def process_ticket_task_from_redpanda(task_data: Dict[str, Any]):
     """
     Process Linear ticket resolution task from Redpanda message.
     This function is called by the Redpanda consumer when a ticket task is received.
-    
+
     Args:
         task_data: Dictionary containing task information:
             - task_type: "resolve_linear_ticket"
@@ -858,57 +909,117 @@ def process_ticket_task_from_redpanda(task_data: Dict[str, Any]):
     """
     task_type = task_data.get('task_type')
     if task_type != 'resolve_linear_ticket':
-        print(f"⚠️  Unknown task type: {task_type}")
+        logger.warning(f"Unknown task type: {task_type}")
         return
-    
+
     integration_id = task_data.get('integration_id')
     ticket_data = task_data.get('ticket_data')
     analysis = task_data.get('analysis', {})
     ticket_identifier = task_data.get('ticket_identifier', 'Unknown')
-    
+
     if not integration_id or not ticket_data:
-        print(f"⚠️  Missing required data: integration_id={integration_id}, ticket_data={bool(ticket_data)}")
+        logger.error(f"Missing required data: integration_id={integration_id}, ticket_data={bool(ticket_data)}")
         return
-    
-    print(f"🔄 [Redpanda Consumer] Processing ticket resolution task for {ticket_identifier}...")
-    
-    db = SessionLocal()
-    try:
-        # Create resolver instance
-        resolver = LinearTicketResolver(integration_id=integration_id, db=db)
-        
-        # Resolve the ticket (async function, need to run in event loop)
-        # Since this is called from a Redpanda consumer thread, we need to handle async properly
-        def run_resolution():
+
+    logger.info(f"🔄 [Redpanda Consumer] Processing ticket resolution task for {ticket_identifier}...")
+
+    # Submit to thread pool with timeout and proper error handling
+    def run_resolution_with_timeout():
+        """Run resolution in a proper async context with timeout."""
+        db = SessionLocal()
+        try:
+            # Create resolver instance
+            resolver = LinearTicketResolver(integration_id=integration_id, db=db)
+
+            # Create event loop for this thread (ThreadPoolExecutor provides clean thread)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             try:
-                # Create new event loop for this thread
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    result = loop.run_until_complete(
-                        resolver.resolve_ticket(ticket_data, analysis)
+                # Run with timeout to prevent hanging
+                result = loop.run_until_complete(
+                    asyncio.wait_for(
+                        resolver.resolve_ticket(ticket_data, analysis),
+                        timeout=1800  # 30 minutes max per resolution
                     )
-                    print(f"✅ Completed ticket resolution for {ticket_identifier}: {result.get('success', False)}")
-                    return result
-                finally:
-                    loop.close()
+                )
+                logger.info(f"✅ Completed ticket resolution for {ticket_identifier}: {result.get('success', False)}")
+                return result
+            except asyncio.TimeoutError:
+                logger.error(f"❌ Ticket resolution timed out for {ticket_identifier} after 30 minutes")
+                # Update attempt status to failed due to timeout
+                _mark_attempt_as_failed(
+                    db, integration_id, ticket_data.get('id'),
+                    "Resolution timed out after 30 minutes"
+                )
+                return {"success": False, "error": "Resolution timeout", "ticket_identifier": ticket_identifier}
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"❌ Error in ticket resolution for {ticket_identifier}: {e}", exc_info=True)
+            # Update attempt status to failed
+            _mark_attempt_as_failed(
+                db, integration_id, ticket_data.get('id'),
+                f"Resolution failed: {str(e)[:500]}"
+            )
+            return {"success": False, "error": str(e), "ticket_identifier": ticket_identifier}
+        finally:
+            db.close()
+
+    try:
+        # Submit to thread pool (non-blocking)
+        future: Future = _resolution_executor.submit(run_resolution_with_timeout)
+
+        # Store future for optional tracking (don't wait for result)
+        logger.info(f"✓ Submitted ticket resolution task for {ticket_identifier} to thread pool")
+
+        # Optional: Add callback for completion logging (non-blocking)
+        def on_completion(fut: Future):
+            try:
+                result = fut.result(timeout=0.1)  # Non-blocking check
+                if result and result.get('success'):
+                    logger.info(f"🎉 Resolution successful for {ticket_identifier}")
+                else:
+                    logger.warning(f"⚠️ Resolution failed for {ticket_identifier}: {result.get('error', 'Unknown error')}")
+            except FuturesTimeoutError:
+                pass  # Still running, which is fine
             except Exception as e:
-                print(f"❌ Error in ticket resolution thread for {ticket_identifier}: {e}")
-                import traceback
-                traceback.print_exc()
-                return None
-        
-        # Run in a separate thread to avoid blocking the consumer
-        import threading
-        thread = threading.Thread(target=run_resolution, daemon=True)
-        thread.start()
-        
-        # Don't wait for completion to avoid blocking the consumer
-        print(f"✓ Started ticket resolution thread for {ticket_identifier}")
-        
+                logger.error(f"❌ Resolution completed with error for {ticket_identifier}: {e}")
+
+        future.add_done_callback(on_completion)
+
     except Exception as e:
-        print(f"✗ Error processing ticket task from Redpanda: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        db.close()
+        logger.error(f"✗ Error submitting ticket task to thread pool: {e}", exc_info=True)
+
+
+def _mark_attempt_as_failed(db: Session, integration_id: int, issue_id: str, failure_reason: str):
+    """Helper to mark resolution attempt as failed."""
+    try:
+        attempt = db.query(LinearResolutionAttempt).filter(
+            and_(
+                LinearResolutionAttempt.integration_id == integration_id,
+                LinearResolutionAttempt.issue_id == issue_id,
+                LinearResolutionAttempt.status.in_([
+                    LinearResolutionAttemptStatus.CLAIMED,
+                    LinearResolutionAttemptStatus.ANALYZING,
+                    LinearResolutionAttemptStatus.IMPLEMENTING,
+                    LinearResolutionAttemptStatus.TESTING
+                ])
+            )
+        ).first()
+
+        if attempt:
+            attempt.status = LinearResolutionAttemptStatus.FAILED
+            attempt.failure_reason = failure_reason
+            attempt.completed_at = datetime.utcnow()
+            db.commit()
+            logger.info(f"Marked resolution attempt as failed for issue {issue_id}")
+    except Exception as e:
+        logger.error(f"Error marking attempt as failed: {e}")
+        db.rollback()
+
+
+def shutdown_resolution_executor():
+    """Gracefully shutdown the resolution thread pool."""
+    logger.info("Shutting down Linear ticket resolution executor...")
+    _resolution_executor.shutdown(wait=True)
+    logger.info("Linear ticket resolution executor shutdown complete")
