@@ -157,6 +157,25 @@ def run_migration():
             "columns": ["user_id", "status"],
             "description": "Index for filtering linear attempts by user and status"
         },
+        # Performance optimization indexes for redpanda task processor
+        {
+            "name": "idx_incident_status_service_user_source",
+            "table": "incidents",
+            "columns": ["status", "service_name", "source", "user_id", "last_seen_at"],
+            "description": "Composite index for incident deduplication query (line 179 in redpanda_task_processor.py)"
+        },
+        {
+            "name": "idx_integration_user_service",
+            "table": "integrations",
+            "columns": ["user_id", "service_name", "status"],
+            "description": "Index for integration lookups by user and service during log processing"
+        },
+        {
+            "name": "idx_log_integration_user",
+            "table": "logs",
+            "columns": ["integration_id", "user_id"],
+            "description": "Index for log queries during integration processing"
+        },
     ]
 
     try:
@@ -234,6 +253,9 @@ def rollback_migration():
         "idx_agent_prs_incident_id",
         "idx_agent_prs_qa_status",
         "idx_linear_attempts_user_status",
+        "idx_incident_status_service_user_source",
+        "idx_integration_user_service",
+        "idx_log_integration_user",
     ]
 
     try:
