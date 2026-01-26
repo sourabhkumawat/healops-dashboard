@@ -2,302 +2,366 @@
 
 import { useState } from 'react';
 import Image from 'next/image';
-import {
-    Card,
-    CardContent,
-    CardDescription,
-    CardHeader,
-    CardTitle
-} from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import {
-    Cloud,
-    Server,
-    Box,
-    CheckCircle2,
-    Copy,
-    ExternalLink,
-    Loader2
-} from 'lucide-react';
-import { generateApiKey, getAgentInstallCommand } from '@/actions/integrations';
+import { Loader2, Check, ArrowRight, Github } from 'lucide-react';
+import { generateApiKey } from '@/actions/integrations';
+import { useRouter } from 'next/navigation';
 
-type Provider = 'agent' | null;
+// Helper Component defined outside render to avoid recreation
+const FadeIn = ({
+    children,
+    delay = 0
+}: {
+    children: React.ReactNode;
+    delay?: number;
+}) => (
+    <div
+        className="animate-slide-up opacity-0"
+        style={{
+            animationDelay: `${delay}ms`
+        }}
+    >
+        {children}
+    </div>
+);
 
 export default function OnboardingPage() {
-    const [step, setStep] = useState(1);
-    const [selectedProvider, setSelectedProvider] = useState<Provider>(null);
-    const [apiKey, setApiKey] = useState('');
+    const router = useRouter();
+    const [step, setStep] = useState<'welcome' | 'org' | 'github' | 'apikey'>(
+        'welcome'
+    );
     const [loading, setLoading] = useState(false);
-    const [deployUrl, setDeployUrl] = useState('');
-    const [manifest, setManifest] = useState('');
-    const [installCommand, setInstallCommand] = useState('');
+
+    // Org Step State
+    const [orgName, setOrgName] = useState('');
+
+    // API Key Step State
+    const [apiKey, setApiKey] = useState('');
     const [copied, setCopied] = useState(false);
 
-    const handleGenerateApiKey = async () => {
+    const handleOrgSubmit = async (e?: React.FormEvent) => {
+        e?.preventDefault();
+        if (!orgName.trim()) return;
+        setStep('github');
+    };
+
+    const handleGithubConnect = () => {
         setLoading(true);
-        const result = await generateApiKey(`${selectedProvider}-integration`);
+        // Simulate auth flow or redirect
+        setTimeout(() => {
+            setLoading(false);
+            setStep('apikey');
+        }, 1500);
+    };
+
+    const handleGenerateKey = async () => {
+        setLoading(true);
+        const result = await generateApiKey(
+            `${orgName || 'default'}-integration`
+        );
         setLoading(false);
 
         if (result.apiKey) {
             setApiKey(result.apiKey);
-            setStep(3);
         }
     };
 
-    const handleProviderSetup = async () => {
-        setLoading(true);
-
-        if (selectedProvider === 'agent') {
-            const result = await getAgentInstallCommand(apiKey);
-            if (result.linux) {
-                setInstallCommand(result.linux);
-            }
-        }
-
-        setLoading(false);
-    };
-
-    const copyToClipboard = (text: string) => {
-        navigator.clipboard.writeText(text);
+    const copyToClipboard = () => {
+        navigator.clipboard.writeText(apiKey);
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
     };
 
-    const providers = [
-        {
-            id: 'agent',
-            name: 'VM / On-Prem',
-            icon: Server,
-            description: 'Universal agent',
-            time: '~5 seconds'
-        }
-    ];
+    const handleFinish = () => {
+        router.push('/');
+    };
 
     return (
-        <div className="flex h-screen w-full items-center justify-center bg-zinc-950 p-4">
-            <Card className="w-full max-w-4xl border-zinc-800 bg-zinc-900 text-zinc-100">
-                <CardHeader>
-                    <div className="flex justify-center mb-4">
-                        <Image
-                            src="/logo.png"
-                            alt="HealOps Logo"
-                            width={48}
-                            height={48}
-                            className="h-12 w-12"
-                            priority
-                        />
-                    </div>
-                    <CardTitle className="text-2xl text-center">
-                        Connect Your Infrastructure
-                    </CardTitle>
-                    <CardDescription className="text-center text-zinc-400">
-                        Choose a platform to start monitoring in under 30
-                        seconds
-                    </CardDescription>
-                </CardHeader>
-                <CardContent>
-                    {/* Step 1: Choose Provider */}
-                    {step === 1 && (
-                        <div className="space-y-4">
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                {providers.map((provider) => {
-                                    const Icon = provider.icon;
-                                    return (
-                                        <Card
-                                            key={provider.id}
-                                            className={`cursor-pointer border-2 transition-all ${
-                                                selectedProvider === provider.id
-                                                    ? 'border-green-600 bg-zinc-800'
-                                                    : 'border-zinc-700 bg-zinc-800/50 hover:border-zinc-600'
-                                            }`}
+        <div className="flex min-h-screen w-full bg-[#0a0a0a] text-zinc-100 font-mono selection:bg-zinc-800 selection:text-white">
+            {/* Left Column - Image */}
+            <div className="hidden lg:block w-1/2 relative border-r border-white/5">
+                <Image
+                    src="/onboarding-bg.png"
+                    alt="Onboarding Atmosphere"
+                    fill
+                    className="object-cover opacity-90"
+                    priority
+                />
+                <div className="absolute inset-0 bg-black/10" />
+            </div>
+
+            {/* Right Column - Interaction */}
+            <div className="w-full lg:w-1/2 flex flex-col p-8 lg:p-24 relative">
+                {/* Top Left Status */}
+                <div className="absolute top-8 left-8 text-xs text-zinc-500 font-mono tracking-widest">
+                    <p className="mt-1 opacity-50">HealOps System v1.0.0</p>
+                </div>
+
+                <div className="flex-1 flex flex-col justify-center max-w-lg mx-auto w-full">
+                    {/* STEP 1: WELCOME */}
+                    {step === 'welcome' && (
+                        <div className="space-y-12">
+                            <FadeIn>
+                                <div className="space-y-4">
+                                    <h1 className="text-3xl tracking-[0.2em] font-medium uppercase">
+                                        HealOps Labs
+                                    </h1>
+                                    <p className="text-xs text-zinc-500 tracking-widest">
+                                        / ヒーロップス /
+                                    </p>
+                                    <p className="text-xs text-zinc-500 tracking-widest">
+                                        Autonomous Reliability Platform
+                                    </p>
+                                </div>
+                            </FadeIn>
+
+                            <FadeIn delay={200}>
+                                <div className="space-y-6 text-sm leading-relaxed text-zinc-400">
+                                    <p>
+                                        HealOps is an API layer that provides
+                                        agents with self-healing capabilities,
+                                        continuously monitoring context from
+                                        logs, metrics, and technical
+                                        documentation.
+                                    </p>
+                                    <p>
+                                        It can also be used with coding agents
+                                        like Cursor or Windsurf.
+                                    </p>
+                                </div>
+                            </FadeIn>
+
+                            <FadeIn delay={400}>
+                                <div className="pt-8 border-t border-zinc-800 flex flex-col gap-3">
+                                    <Button
+                                        variant="ghost"
+                                        className="group text-zinc-300 hover:text-white hover:bg-transparent pl-0 text-xs tracking-widest justify-start"
+                                        onClick={() => setStep('org')}
+                                    >
+                                        [ INITIALIZE SETUP ]
+                                        <ArrowRight className="ml-2 h-3 w-3 transition-transform group-hover:translate-x-1" />
+                                    </Button>
+
+                                    <div className="flex gap-6">
+                                        <Button
+                                            variant="ghost"
+                                            className="group text-zinc-500 hover:text-white hover:bg-transparent pl-0 text-[10px] tracking-widest h-auto py-0"
                                             onClick={() =>
-                                                setSelectedProvider(
-                                                    provider.id as Provider
-                                                )
+                                                router.push('/login')
                                             }
                                         >
-                                            <CardContent className="p-6">
-                                                <div className="flex items-start space-x-4">
-                                                    <div className="rounded-lg bg-green-600/10 p-3">
-                                                        <Icon className="h-6 w-6 text-green-500" />
-                                                    </div>
-                                                    <div className="flex-1">
-                                                        <h3 className="font-semibold text-lg">
-                                                            {provider.name}
-                                                        </h3>
-                                                        <p className="text-sm text-zinc-400 mt-1">
-                                                            {
-                                                                provider.description
-                                                            }
-                                                        </p>
-                                                        <p className="text-xs text-green-500 mt-2">
-                                                            Setup time:{' '}
-                                                            {provider.time}
-                                                        </p>
-                                                    </div>
-                                                </div>
-                                            </CardContent>
-                                        </Card>
-                                    );
-                                })}
-                            </div>
-
-                            <Button
-                                className="w-full bg-green-600 hover:bg-green-700"
-                                disabled={!selectedProvider}
-                                onClick={() => setStep(2)}
-                            >
-                                Continue
-                            </Button>
+                                            LOGIN
+                                        </Button>
+                                        <Button
+                                            variant="ghost"
+                                            className="group text-zinc-500 hover:text-white hover:bg-transparent pl-0 text-[10px] tracking-widest h-auto py-0"
+                                            onClick={() =>
+                                                router.push('/signup')
+                                            }
+                                        >
+                                            SIGN UP
+                                        </Button>
+                                    </div>
+                                </div>
+                            </FadeIn>
                         </div>
                     )}
 
-                    {/* Step 2: Generate API Key */}
-                    {step === 2 && (
-                        <div className="space-y-4">
-                            <Alert className="bg-zinc-800 border-zinc-700">
-                                <AlertDescription className="text-zinc-300">
-                                    We'll generate a secure API key for this
-                                    integration. Keep it safe!
-                                </AlertDescription>
-                            </Alert>
-
-                            <div className="flex items-center justify-between p-6 bg-zinc-800 rounded-lg border border-zinc-700">
-                                <div>
-                                    <h3 className="font-semibold">
-                                        Generate API Key
-                                    </h3>
-                                    <p className="text-sm text-zinc-400 mt-1">
-                                        This key will be used to authenticate
-                                        log ingestion
+                    {/* STEP 2: ORG NAME */}
+                    {step === 'org' && (
+                        <div className="space-y-16">
+                            <FadeIn>
+                                <div className="text-center space-y-4">
+                                    <h2 className="text-2xl tracking-[0.15em] uppercase">
+                                        Your Organization
+                                    </h2>
+                                    <p className="text-xs text-zinc-500">
+                                        Please enter your organization name
+                                        below
                                     </p>
                                 </div>
-                                <Button
-                                    onClick={handleGenerateApiKey}
-                                    disabled={loading}
-                                    className="bg-green-600 hover:bg-green-700"
+                            </FadeIn>
+
+                            <FadeIn delay={200}>
+                                <form
+                                    onSubmit={handleOrgSubmit}
+                                    className="space-y-8"
                                 >
-                                    {loading ? (
-                                        <Loader2 className="h-4 w-4 animate-spin" />
-                                    ) : (
-                                        'Generate Key'
-                                    )}
-                                </Button>
-                            </div>
+                                    <div className="relative group">
+                                        <div className="absolute left-0 top-1/2 -translate-y-1/2 h-8 w-[1px] bg-zinc-700 group-focus-within:bg-white transition-colors" />
+                                        <Input
+                                            autoFocus
+                                            value={orgName}
+                                            onChange={(e) =>
+                                                setOrgName(e.target.value)
+                                            }
+                                            className="border-0 border-b border-zinc-800 bg-transparent rounded-none px-4 py-6 text-xl text-center focus-visible:ring-0 focus-visible:border-white transition-all placeholder:text-zinc-800"
+                                            placeholder="acme-corp"
+                                        />
+                                    </div>
 
-                            <Button
-                                variant="outline"
-                                className="w-full"
-                                onClick={() => setStep(1)}
-                            >
-                                Back
-                            </Button>
+                                    <div className="flex justify-center">
+                                        {orgName && (
+                                            <p className="text-[10px] text-yellow-600/80 tracking-widest animate-pulse">
+                                                PRESS ENTER TO SUBMIT
+                                            </p>
+                                        )}
+                                    </div>
+                                </form>
+                            </FadeIn>
                         </div>
                     )}
 
-                    {/* Step 3: Setup Instructions */}
-                    {step === 3 && (
-                        <div className="space-y-4">
-                            {/* Show API Key */}
-                            <Alert className="bg-green-900/20 border-green-900">
-                                <CheckCircle2 className="h-4 w-4 text-green-500" />
-                                <AlertDescription className="text-green-200">
-                                    API Key generated successfully! Copy it now
-                                    - you won't see it again.
-                                </AlertDescription>
-                            </Alert>
-
-                            <div className="space-y-2">
-                                <Label>Your API Key</Label>
-                                <div className="flex space-x-2">
-                                    <Input
-                                        value={apiKey}
-                                        readOnly
-                                        className="bg-zinc-800 border-zinc-700 font-mono text-sm"
-                                    />
-                                    <Button
-                                        size="icon"
-                                        variant="outline"
-                                        onClick={() => copyToClipboard(apiKey)}
-                                    >
-                                        <Copy className="h-4 w-4" />
-                                    </Button>
+                    {/* STEP 3: GITHUB */}
+                    {step === 'github' && (
+                        <div className="space-y-16 text-center">
+                            <FadeIn>
+                                <div className="space-y-4">
+                                    <h2 className="text-2xl tracking-[0.2em] uppercase">
+                                        G I T H U B
+                                    </h2>
+                                    <div className="max-w-md mx-auto space-y-2">
+                                        <p className="text-xs text-zinc-500 leading-relaxed">
+                                            Authenticate to avoid GitHub rate
+                                            limits when indexing repositories.
+                                        </p>
+                                        <p className="text-xs text-zinc-600">
+                                            You don&apos;t need to grant access
+                                            to all of your repositories.
+                                        </p>
+                                    </div>
                                 </div>
-                            </div>
+                            </FadeIn>
 
-                            {/* Provider-specific instructions */}
-
-                            {selectedProvider === 'agent' && (
-                                <div className="space-y-4 mt-6">
-                                    <h3 className="font-semibold text-lg">
-                                        Agent Installation
-                                    </h3>
-                                    <p className="text-sm text-zinc-400">
-                                        Run this command on your VM or bare
-                                        metal server:
-                                    </p>
+                            <FadeIn delay={200}>
+                                <div className="flex flex-col items-center gap-6">
+                                    <div className="flex items-center gap-2 text-xs text-green-500/80 tracking-widest">
+                                        <Check className="w-3 h-3" />
+                                        <span>SYSTEM ONLINE</span>
+                                    </div>
 
                                     <Button
-                                        onClick={handleProviderSetup}
+                                        onClick={handleGithubConnect}
                                         disabled={loading}
-                                        className="mb-4"
+                                        variant="outline"
+                                        className="h-12 border-zinc-700 bg-transparent hover:bg-zinc-800 hover:text-white px-8 tracking-widest text-xs uppercase"
                                     >
                                         {loading ? (
-                                            <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                                        ) : null}
-                                        Generate Install Command
+                                            <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                                        ) : (
+                                            <Github className="w-4 h-4 mr-2" />
+                                        )}
+                                        {loading
+                                            ? 'CONNECTING...'
+                                            : 'CONNECT GITHUB'}
                                     </Button>
 
-                                    {installCommand && (
-                                        <div className="relative">
-                                            <pre className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 overflow-x-auto text-sm">
-                                                <code className="text-green-400">
-                                                    {installCommand}
-                                                </code>
-                                            </pre>
+                                    <Button
+                                        variant="link"
+                                        className="text-zinc-600 text-[10px] hover:text-zinc-400"
+                                        onClick={() => setStep('apikey')}
+                                    >
+                                        SKIP FOR NOW
+                                    </Button>
+                                </div>
+                            </FadeIn>
+                        </div>
+                    )}
+
+                    {/* STEP 4: API KEY */}
+                    {step === 'apikey' && (
+                        <div className="space-y-16 text-center">
+                            <FadeIn>
+                                <div className="space-y-4">
+                                    <h2 className="text-2xl tracking-[0.2em] uppercase">
+                                        HealOps API
+                                    </h2>
+                                    <p className="text-xs text-zinc-500">
+                                        Generate an API key to use HealOps via
+                                        HTTP.
+                                    </p>
+                                </div>
+                            </FadeIn>
+
+                            <FadeIn delay={200}>
+                                {!apiKey ? (
+                                    <div className="flex justify-center">
+                                        <Button
+                                            onClick={handleGenerateKey}
+                                            disabled={loading}
+                                            variant="outline"
+                                            className="h-12 border-zinc-700 bg-transparent hover:bg-zinc-800 hover:text-white px-8 tracking-widest text-xs uppercase"
+                                        >
+                                            {loading ? (
+                                                <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                                            ) : null}
+                                            GENERATE KEY
+                                        </Button>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-8 animate-in fade-in duration-500">
+                                        <div className="space-y-2">
+                                            <p className="text-[10px] text-zinc-600 uppercase tracking-widest">
+                                                [ HEALOPS_API_KEY ]
+                                            </p>
+                                            <div
+                                                className="font-mono text-sm text-zinc-300 bg-zinc-900/50 p-4 border border-zinc-800 rounded selection:bg-zinc-700 cursor-pointer hover:border-zinc-700 transition-colors break-all"
+                                                onClick={copyToClipboard}
+                                            >
+                                                {apiKey}
+                                            </div>
+                                        </div>
+
+                                        <div className="flex justify-center gap-4">
                                             <Button
-                                                size="sm"
-                                                variant="ghost"
-                                                className="absolute top-2 right-2"
+                                                onClick={copyToClipboard}
+                                                variant="outline"
+                                                className="h-10 border-zinc-700 bg-transparent hover:bg-zinc-800 text-xs uppercase tracking-widest min-w-[120px]"
+                                            >
+                                                {copied ? (
+                                                    <Check className="w-3 h-3 mr-2" />
+                                                ) : null}
+                                                {copied ? 'COPIED' : 'COPY KEY'}
+                                            </Button>
+
+                                            <Button
+                                                variant="outline"
+                                                className="h-10 border-zinc-700 bg-transparent hover:bg-zinc-800 text-xs uppercase tracking-widest min-w-[120px]"
                                                 onClick={() =>
-                                                    copyToClipboard(
-                                                        installCommand
+                                                    window.open(
+                                                        'https://docs.healops.com',
+                                                        '_blank'
                                                     )
                                                 }
                                             >
-                                                <Copy className="h-4 w-4" />
+                                                DOCS
                                             </Button>
                                         </div>
-                                    )}
-                                </div>
-                            )}
 
-                            <div className="flex space-x-2 mt-6">
-                                <Button
-                                    variant="outline"
-                                    className="flex-1"
-                                    onClick={() => {
-                                        setStep(1);
-                                        setSelectedProvider(null);
-                                        setApiKey('');
-                                    }}
-                                >
-                                    Start Over
-                                </Button>
-                                <Button
-                                    className="flex-1 bg-green-600 hover:bg-green-700"
-                                    onClick={() => (window.location.href = '/')}
-                                >
-                                    Go to Dashboard
-                                </Button>
-                            </div>
+                                        <div className="pt-8 flex justify-center gap-8 text-[10px] uppercase tracking-widest text-zinc-500">
+                                            <button
+                                                className="hover:text-white transition-colors"
+                                                onClick={() =>
+                                                    setStep('welcome')
+                                                }
+                                            >
+                                                Reset
+                                            </button>
+                                            <button
+                                                className="hover:text-white transition-colors"
+                                                onClick={handleFinish}
+                                            >
+                                                Continue
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                            </FadeIn>
                         </div>
                     )}
-                </CardContent>
-            </Card>
+                </div>
+            </div>
         </div>
     );
 }

@@ -25,6 +25,11 @@ class TestEmailRequest(BaseModel):
     recipient_email: str
 
 
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+
+
 def get_current_user(request: Request, db: Session = Depends(get_db)):
     """Get current user from JWT token"""
     credentials_exception = HTTPException(
@@ -51,10 +56,10 @@ class AuthController:
     """Controller for authentication and user management."""
     
     @staticmethod
-    def register(user_data: dict, db: Session):
+    def register(user_data: RegisterRequest, db: Session):
         """Register a new user."""
-        email = user_data.get("email")
-        password = user_data.get("password")
+        email = user_data.email
+        password = user_data.password
         
         if not email or not password:
             raise HTTPException(status_code=400, detail="Email and password required")

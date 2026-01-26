@@ -248,5 +248,56 @@ class AgentPR(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
+
+class LinearResolutionAttemptStatus(str, enum.Enum):
+    """Status of Linear ticket resolution attempts by coding agents."""
+    CLAIMED = "CLAIMED"  # Agent has claimed the ticket
+    ANALYZING = "ANALYZING"  # Agent is analyzing the requirements
+    IMPLEMENTING = "IMPLEMENTING"  # Agent is implementing the solution
+    TESTING = "TESTING"  # Agent is testing the changes
+    COMPLETED = "COMPLETED"  # Successfully resolved
+    FAILED = "FAILED"  # Resolution attempt failed
+
+
+class LinearResolutionAttempt(Base):
+    """Track automated resolution attempts for Linear tickets."""
+    __tablename__ = "linear_resolution_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # Integration and ticket info
+    integration_id = Column(Integer, ForeignKey("integrations.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    issue_id = Column(String, nullable=False, index=True)  # Linear issue UUID
+    issue_identifier = Column(String, nullable=False, index=True)  # e.g., "ID-123"
+    issue_title = Column(String, nullable=True)
+
+    # Agent info
+    agent_name = Column(String, nullable=False)  # Name of the coding agent
+    agent_version = Column(String, nullable=True)  # Version of the agent
+
+    # Resolution tracking
+    status = Column(String, default=LinearResolutionAttemptStatus.CLAIMED, index=True)
+    claimed_at = Column(DateTime(timezone=True), server_default=func.now())
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Analysis results
+    confidence_score = Column(String, nullable=True)  # 0.0 to 1.0 as string
+    ticket_type = Column(String, nullable=True)  # bug_fix, feature, etc.
+    complexity = Column(String, nullable=True)  # simple, moderate, complex
+    estimated_effort = Column(String, nullable=True)  # 15min, 1hr, etc.
+
+    # Resolution details
+    resolution_summary = Column(Text, nullable=True)
+    failure_reason = Column(Text, nullable=True)
+
+    # Metadata (store PR URLs, commit hashes, files changed, etc.)
+    resolution_metadata = Column(JSONB, nullable=True)
+
+    # Audit trail
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
+
 # Import new memory models so they are registered with Base
 from src.memory.models import AgentMemoryError, AgentMemoryFix, AgentRepoContext

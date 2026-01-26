@@ -13,6 +13,7 @@ from typing import Dict, Any
 from datetime import datetime
 
 from src.services.redpanda_service import redpanda_service
+from src.services.linear_ticket_resolver import process_ticket_task_from_redpanda
 from src.database.database import SessionLocal
 from src.database.models import LogEntry, Incident, IncidentSeverity, IntegrationStatus, IntegrationStatusEnum, Integration
 from src.core.ai_analysis import generate_incident_title_and_description, build_enhanced_linear_description
@@ -367,6 +368,9 @@ def setup_redpanda_task_processor():
 
     # Setup incident consumer
     redpanda_service.setup_incident_consumer(process_log_entry_from_redpanda)
+    
+    # Setup ticket consumer
+    redpanda_service.setup_ticket_consumer(process_ticket_task_from_redpanda)
     
     # Start the incident consumer (if not already started)
     # Note: start_consumers() will start all configured consumers, so it's safe to call multiple times

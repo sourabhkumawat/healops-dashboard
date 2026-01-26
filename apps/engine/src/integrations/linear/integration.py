@@ -638,3 +638,578 @@ class LinearIntegration:
             updates["stateId"] = state["id"]
         
         return self.update_issue(issue_id, updates)
+
+    def _is_bot_or_automation_user(self, assignee: Optional[Dict[str, Any]]) -> bool:
+        """
+        Determine if an assignee is a bot or automation user.
+
+        Args:
+            assignee: Assignee object with id, name, email
+
+        Returns:
+            True if assignee appears to be a bot/automation user
+        """
+        if not assignee:
+            return False
+
+        name = (assignee.get("name", "") or "").lower()
+        email = (assignee.get("email", "") or "").lower()
+
+        # Common bot/automation indicators
+        bot_indicators = [
+            "bot", "automation", "ci", "cd", "deploy", "github", "linear",
+            "service", "system", "auto", "robot", "agent", "webhook",
+            "integration", "sync", "api", "script"
+        ]
+
+        # Check name and email for bot indicators
+        for indicator in bot_indicators:
+            if indicator in name or indicator in email:
+                return True
+
+        # Check for typical bot email patterns
+        bot_email_patterns = [
+            "@noreply", "@bot.", "noreply@", "bot@", "automation@",
+            "ci@", "cd@", "deploy@", "system@", "service@"
+        ]
+
+        for pattern in bot_email_patterns:
+            if pattern in email:
+                return True
+
+        return False
+
+    def get_issues(
+        self,
+        team_id: Optional[str] = None,
+        status: Optional[str] = None,
+        labels: Optional[List[str]] = None,
+        assignee: Optional[str] = None,
+        page_size: int = 50,
+        cursor: Optional[str] = None,
+        include_completed: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Fetch issues from Linear with filtering options.
+
+        Args:
+            team_id: Filter by specific team (default: all teams user has access to)
+            status: Filter by workflow state name (e.g., "Todo", "In Progress")
+            labels: Filter by label names
+            assignee: Filter by assignee ID or "unassigned"
+            page_size: Number of issues per page (1-250)
+            cursor: Pagination cursor for next page
+            include_completed: Include completed/canceled issues
+
+        Returns:
+            Dictionary with issues list and pagination info
+        """
+        # Build filter conditions
+        filters = []
+
+        if team_id:
+            filters.append(f'team: {{ id: {{ eq: "{team_id}" }} }}')
+
+        if status:
+            filters.append(f'state: {{ name: {{ eq: "{status}" }} }}')
+
+        if not include_completed:
+            filters.append('state: { type: { nin: ["completed", "canceled"] } }')
+
+        if assignee:
+            if assignee.lower() == "unassigned":
+                filters.append('assignee: { null: true }')
+            else:
+                filters.append(f'assignee: {{ id: {{ eq: "{assignee}" }} }}')
+
+        if labels:
+            label_conditions = [f'{{ name: {{ eq: "{label}" }} }}' for label in labels]
+            filters.append(f'labels: {{ some: {{ or: [{", ".join(label_conditions)}] }} }}')
+
+        # Build filter string
+        filter_str = ""
+        if filters:
+            filter_str = f'filter: {{ {", ".join(filters)} }}'
+
+        # Build pagination
+        pagination = f"first: {min(max(1, page_size), 250)}"  # Clamp between 1 and 250
+        if cursor:
+            pagination += f', after: "{cursor}"'
+
+        query = f"""
+        query GetIssues {{
+            issues({pagination}, {filter_str}) {{
+                nodes {{
+                    id
+                    identifier
+                    title
+                    description
+                    url
+                    priority
+                    estimate
+                    createdAt
+                    updatedAt
+                    state {{
+                        id
+                        name
+                        type
+                        position
+                    }}
+                    labels {{
+                        nodes {{
+                            id
+                            name
+                            color
+                        }}
+                    }}
+                    assignee {{
+                        id
+                        name
+                        email
+                    }}
+                    team {{
+                        id
+                        name
+                        key
+                    }}
+                }}
+                pageInfo {{
+                    hasNextPage
+                    endCursor
+                }}
+            }}
+        }}
+        """
+
+        try:
+            data = self._make_graphql_request(query)
+            issues_data = data.get("issues", {})
+
+            # Flatten labels structure for easier access
+            issues = issues_data.get("nodes", [])
+            for issue in issues:
+                if issue.get("labels", {}).get("nodes"):
+                    issue["labels"] = issue["labels"]["nodes"]
+                else:
+                    issue["labels"] = []
+
+            return {
+                "issues": issues,
+                "pageInfo": issues_data.get("pageInfo", {})
+            }
+        except Exception as e:
+            print(f"Error fetching Linear issues: {e}")
+            return {"issues": [], "pageInfo": {"hasNextPage": False}}
+
+    def get_open_resolvable_issues(
+        self,
+        team_ids: Optional[List[str]] = None,
+        exclude_labels: Optional[List[str]] = None,
+        max_priority: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get open issues that might be resolvable by coding agents.
+
+        OPTIMIZED: Uses single API call instead of nested loops to prevent rate limiting.
+
+        Filters for:
+        - Status: Todo, Backlog, Triage (not In Progress, Done, Canceled)
+        - No current assignee OR assignee is a bot/automation user
+        - Excludes issues with certain labels (e.g., "manual-only", "design")
+        - Optional priority filtering
+
+        Args:
+            team_ids: List of team IDs to search (default: all teams)
+            exclude_labels: Labels to exclude from results
+            max_priority: Maximum priority level (0=urgent, 4=no priority)
+
+        Returns:
+            List of issues sorted by priority and creation date
+        """
+        try:
+            # Build comprehensive filter for single API call
+            filters = []
+
+            # Team filtering
+            if team_ids:
+                if len(team_ids) == 1:
+                    filters.append(f'team: {{ id: {{ eq: "{team_ids[0]}" }} }}')
+                else:
+                    team_conditions = [f'{{ id: {{ eq: "{team_id}" }} }}' for team_id in team_ids]
+                    filters.append(f'team: {{ or: [{", ".join(team_conditions)}] }}')
+            else:
+                # Get user's teams if none specified
+                teams = self.get_teams()
+                if teams:
+                    team_conditions = [f'{{ id: {{ eq: "{team["id"]}" }} }}' for team in teams]
+                    filters.append(f'team: {{ or: [{", ".join(team_conditions)}] }}')
+
+            # State filtering - get open/resolvable states only
+            open_state_names = ["Todo", "Backlog", "Triage", "Ready", "To Do"]
+            state_conditions = [f'{{ name: {{ eq: "{state}" }} }}' for state in open_state_names]
+            filters.append(f'state: {{ or: [{", ".join(state_conditions)}] }}')
+
+            # Assignee filtering - unassigned OR bot-assigned tickets
+            # Note: GraphQL doesn't allow complex bot detection, so we get all assigned tickets
+            # and filter bot assignments in post-processing
+            filters.append('assignee: { null: true }')  # Keep unassigned tickets
+
+            # Priority filtering
+            if max_priority is not None:
+                filters.append(f'priority: {{ lte: {max_priority} }}')
+
+            # Exclude completed/canceled states
+            filters.append('state: { type: { nin: ["completed", "canceled"] } }')
+
+            # Build the GraphQL query with combined filters
+            filter_str = f'filter: {{ {", ".join(filters)} }}'
+            pagination = "first: 100"  # Get more results in single call
+
+            query = f"""
+            query GetResolvableIssues {{
+                issues({pagination}, {filter_str}) {{
+                    nodes {{
+                        id
+                        identifier
+                        title
+                        description
+                        url
+                        priority
+                        estimate
+                        createdAt
+                        updatedAt
+                        state {{
+                            id
+                            name
+                            type
+                            position
+                        }}
+                        labels {{
+                            nodes {{
+                                id
+                                name
+                                color
+                            }}
+                        }}
+                        assignee {{
+                            id
+                            name
+                            email
+                        }}
+                        team {{
+                            id
+                            name
+                            key
+                        }}
+                    }}
+                    pageInfo {{
+                        hasNextPage
+                        endCursor
+                    }}
+                }}
+            }}
+            """
+
+            print(f"🔍 Fetching resolvable issues with optimized single API call")
+
+            # Make single API call
+            data = self._make_graphql_request(query)
+            issues_data = data.get("issues", {})
+            issues = issues_data.get("nodes", [])
+
+            # Flatten labels structure for easier access
+            for issue in issues:
+                if issue.get("labels", {}).get("nodes"):
+                    issue["labels"] = issue["labels"]["nodes"]
+                else:
+                    issue["labels"] = []
+
+            print(f"📋 Retrieved {len(issues)} issues from Linear API")
+
+            print(f"📋 Retrieved {len(issues)} unassigned issues from Linear API")
+
+            # ENHANCEMENT: Also fetch bot-assigned tickets
+            try:
+                # Get a sample of assigned tickets to check for bots
+                assigned_query = query.replace('assignee: { null: true }', '')
+                assigned_data = self._make_graphql_request(assigned_query)
+                assigned_issues_data = assigned_data.get("issues", {})
+                assigned_issues = assigned_issues_data.get("nodes", [])
+
+                # Flatten labels for assigned issues too
+                for issue in assigned_issues:
+                    if issue.get("labels", {}).get("nodes"):
+                        issue["labels"] = issue["labels"]["nodes"]
+                    else:
+                        issue["labels"] = []
+
+                # Filter for bot-assigned tickets
+                bot_assigned_issues = []
+                for issue in assigned_issues:
+                    assignee = issue.get("assignee")
+                    if assignee and self._is_bot_or_automation_user(assignee):
+                        bot_assigned_issues.append(issue)
+
+                # Combine unassigned + bot-assigned
+                combined_issues = issues + bot_assigned_issues
+                print(f"🤖 Found {len(bot_assigned_issues)} bot-assigned tickets")
+                issues = combined_issues
+
+                # Remove duplicates (in case of overlap)
+                seen_ids = set()
+                unique_issues = []
+                for issue in issues:
+                    if issue["id"] not in seen_ids:
+                        seen_ids.add(issue["id"])
+                        unique_issues.append(issue)
+                issues = unique_issues
+                print(f"📋 Total after bot detection: {len(issues)} issues")
+
+            except Exception as e:
+                print(f"⚠️  Could not fetch bot-assigned tickets: {e}")
+                # Continue with just unassigned tickets
+
+            # Post-process filtering that couldn't be done in GraphQL
+            if exclude_labels:
+                filtered_issues = []
+                for issue in issues:
+                    issue_labels = [label.get("name", "").lower() for label in issue.get("labels", [])]
+                    excluded = any(
+                        excluded_label.lower() in issue_labels
+                        for excluded_label in exclude_labels
+                    )
+                    if not excluded:
+                        filtered_issues.append(issue)
+                issues = filtered_issues
+                print(f"🏷️  After label filtering: {len(issues)} issues")
+
+            # Sort by priority (lower number = higher priority), then by creation date
+            issues.sort(
+                key=lambda x: (
+                    x.get("priority", 999),  # Treat None/missing priority as lowest
+                    x.get("createdAt", "")
+                )
+            )
+
+            print(f"✅ Returning {len(issues)} resolvable issues (single API call)")
+            return issues
+
+        except Exception as e:
+            print(f"❌ Error fetching resolvable issues: {e}")
+            # Fallback to empty list rather than nested loops
+            return []
+
+    def analyze_issue_for_resolution(self, issue_id: str) -> Dict[str, Any]:
+        """
+        Get detailed issue information for resolution analysis.
+
+        Args:
+            issue_id: Linear issue UUID
+
+        Returns:
+            Dictionary with full issue details, comments, and relations
+        """
+        query = f"""
+        query GetIssueDetails {{
+            issue(id: "{issue_id}") {{
+                id
+                identifier
+                title
+                description
+                url
+                priority
+                estimate
+                createdAt
+                updatedAt
+                state {{
+                    id
+                    name
+                    type
+                    position
+                }}
+                labels {{
+                    nodes {{
+                        id
+                        name
+                        color
+                    }}
+                }}
+                assignee {{
+                    id
+                    name
+                    email
+                }}
+                team {{
+                    id
+                    name
+                    key
+                }}
+                attachments {{
+                    nodes {{
+                        id
+                        title
+                        url
+                        metadata
+                    }}
+                }}
+                relations {{
+                    nodes {{
+                        id
+                        type
+                        relatedIssue {{
+                            id
+                            identifier
+                            title
+                        }}
+                    }}
+                }}
+            }}
+        }}
+        """
+
+        # Query for comments separately (they're not directly available in issue query)
+        comments_query = f"""
+        query GetIssueComments {{
+            issue(id: "{issue_id}") {{
+                comments {{
+                    nodes {{
+                        id
+                        body
+                        createdAt
+                        user {{
+                            id
+                            name
+                            email
+                        }}
+                    }}
+                }}
+            }}
+        }}
+        """
+
+        try:
+            # Get issue details
+            issue_data = self._make_graphql_request(query)
+            issue = issue_data.get("issue", {})
+
+            if not issue:
+                print(f"⚠️  Issue {issue_id} not found")
+                return {}
+
+            # Flatten labels structure
+            if issue.get("labels", {}).get("nodes"):
+                issue["labels"] = issue["labels"]["nodes"]
+            else:
+                issue["labels"] = []
+
+            # Flatten attachments structure
+            if issue.get("attachments", {}).get("nodes"):
+                issue["attachments"] = issue["attachments"]["nodes"]
+            else:
+                issue["attachments"] = []
+
+            # Flatten relations structure
+            if issue.get("relations", {}).get("nodes"):
+                issue["relations"] = issue["relations"]["nodes"]
+            else:
+                issue["relations"] = []
+
+            # Get comments
+            try:
+                comments_data = self._make_graphql_request(comments_query)
+                comments_info = comments_data.get("issue", {}).get("comments", {})
+                comments = comments_info.get("nodes", [])
+            except Exception as e:
+                print(f"⚠️  Error fetching comments for issue {issue_id}: {e}")
+                comments = []
+
+            return {
+                "issue": issue,
+                "comments": comments,
+                "attachments": issue.get("attachments", []),
+                "relations": issue.get("relations", [])
+            }
+
+        except Exception as e:
+            print(f"Error getting issue details for {issue_id}: {e}")
+            return {}
+
+    def search_issues(
+        self,
+        query: str,
+        team_ids: Optional[List[str]] = None,
+        include_archived: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        Search issues by text query.
+
+        Args:
+            query: Search query (searches title, description, comments)
+            team_ids: Limit to specific teams
+            include_archived: Include archived issues
+
+        Returns:
+            List of matching issues
+        """
+        # Build filter conditions
+        filters = []
+
+        if team_ids:
+            team_conditions = [f'{{ id: {{ eq: "{team_id}" }} }}' for team_id in team_ids]
+            filters.append(f'team: {{ or: [{", ".join(team_conditions)}] }}')
+
+        if not include_archived:
+            filters.append('state: { type: { nin: ["completed", "canceled"] } }')
+
+        filter_str = ""
+        if filters:
+            filter_str = f', filter: {{ {", ".join(filters)} }}'
+
+        graphql_query = f"""
+        query SearchIssues {{
+            searchIssues(query: "{query}", first: 50{filter_str}) {{
+                nodes {{
+                    id
+                    identifier
+                    title
+                    description
+                    url
+                    priority
+                    createdAt
+                    state {{
+                        id
+                        name
+                        type
+                    }}
+                    labels {{
+                        nodes {{
+                            id
+                            name
+                            color
+                        }}
+                    }}
+                    team {{
+                        id
+                        name
+                        key
+                    }}
+                }}
+            }}
+        }}
+        """
+
+        try:
+            data = self._make_graphql_request(graphql_query)
+            issues = data.get("searchIssues", {}).get("nodes", [])
+
+            # Flatten labels structure
+            for issue in issues:
+                if issue.get("labels", {}).get("nodes"):
+                    issue["labels"] = issue["labels"]["nodes"]
+                else:
+                    issue["labels"] = []
+
+            return issues
+        except Exception as e:
+            print(f"Error searching Linear issues: {e}")
+            return []

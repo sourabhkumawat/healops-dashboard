@@ -31,7 +31,7 @@ from src.integrations.github import get_installation_info, get_installation_repo
 from src.middleware import APIKeyMiddleware, check_rate_limit
 from src.memory import ensure_partition_exists_for_timestamp
 from src.api.controllers.base import get_user_id_from_request
-from src.api.controllers.auth_controller import AuthController, get_current_user, UserUpdateRequest, TestEmailRequest
+from src.api.controllers.auth_controller import AuthController, get_current_user, UserUpdateRequest, TestEmailRequest, RegisterRequest
 from src.api.controllers.slack_controller import SlackController
 from src.api.controllers.logs_controller import LogsController, LogIngestRequest, LogBatchRequest, OTelSpanEvent, OTelSpanStatus, OTelSpan, OTelErrorPayload
 from src.api.controllers.api_keys_controller import APIKeysController, ApiKeyRequest
@@ -40,6 +40,7 @@ from src.api.controllers.services_controller import ServicesController
 from src.api.controllers.stats_controller import StatsController
 from src.api.controllers.incidents_controller import IncidentsController
 from src.api.controllers.integrations_controller import IntegrationsController, GithubConfig, ServiceMappingRequest, ServiceMappingsUpdateRequest
+from src.api.controllers.linear_ticket_controller import router as linear_ticket_router
 from datetime import timedelta, datetime
 import secrets
 import time
@@ -145,6 +146,9 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Self-Healing SaaS Engine")
 
+# Include routers
+app.include_router(linear_ticket_router)
+
 # Store main event loop for thread-safe asyncio operations
 _main_event_loop = None
 
@@ -216,7 +220,7 @@ def read_root():
 # ============================================================================
 
 @app.post("/auth/register")
-def register(user_data: dict, db: Session = Depends(get_db)):
+def register(user_data: RegisterRequest, db: Session = Depends(get_db)):
     """Register user - delegates to AuthController."""
     return AuthController.register(user_data, db)
 

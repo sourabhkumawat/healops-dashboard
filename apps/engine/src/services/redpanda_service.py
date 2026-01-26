@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 REDPANDA_BROKERS = os.getenv("REDPANDA_BROKERS", "localhost:19092")
 REDPANDA_LOG_TOPIC = os.getenv("REDPANDA_LOG_TOPIC", "healops-logs")
 REDPANDA_INCIDENT_TOPIC = os.getenv("REDPANDA_INCIDENT_TOPIC", "healops-incidents")
+REDPANDA_TICKET_TASKS_TOPIC = os.getenv("REDPANDA_TICKET_TASKS_TOPIC", "linear-ticket-tasks")
 
 class RedpandaProducer:
     """Produces messages to Redpanda topics with automatic retries and error handling."""
@@ -175,7 +176,47 @@ class RedpandaProducer:
             return True
 
         except Exception as e:
-            logger.error(f"✗ Failed to publish incident task to Redpanda: {e}")
+            self._connect()
+            return False
+
+    def publish_ticket_task(self, task_data: Dict[str, Any], key: Optional[str] = None) -> bool:
+        """
+        Publish a Linear ticket resolution task to the ticket tasks topic.
+
+        Args:
+            task_data: Task data dictionary with ticket_id, integration_id, etc.
+            key: Optional message key (ticket_identifier recommended)
+
+        Returns:
+            bool: True if published successfully, False otherwise
+        """
+        if not self.producer:
+            self._connect()
+            if not self.producer:
+                logger.error("Cannot publish ticket task: Redpanda producer not available")
+                return False
+
+        try:
+            message_key = key or str(task_data.get('ticket_identifier', 'unknown'))
+
+            enriched_task = {
+                **task_data,
+                'redpanda_timestamp': datetime.utcnow().isoformat(),
+                'topic': REDPANDA_TICKET_TASKS_TOPIC
+            }
+
+            future = self.producer.send(
+                REDPANDA_TICKET_TASKS_TOPIC,
+                value=enriched_task,
+                key=message_key
+            )
+
+            record_metadata = future.get(timeout=1)
+            logger.debug(f"Ticket task published to topic {record_metadata.topic}, partition {record_metadata.partition}, offset {record_metadata.offset}")
+            return True
+
+        except Exception as e:
+            logger.error(f"✗ Failed to publish ticket task to Redpanda: {e}")
             self._connect()
             return False
 
@@ -306,6 +347,7 @@ class RedpandaService:
         self.producer = RedpandaProducer()
         self.log_consumer = None
         self.incident_consumer = None
+        self.ticket_consumer = None
         self.websocket_broadcaster = None
 
     def setup_log_consumer(self, websocket_broadcaster: Callable[[Dict[str, Any]], None]):
@@ -323,6 +365,14 @@ class RedpandaService:
             topic=REDPANDA_INCIDENT_TOPIC,
             group_id="healops-incident-processor",
             message_handler=incident_processor
+        )
+
+    def setup_ticket_consumer(self, ticket_processor: Callable[[Dict[str, Any]], None]):
+        """Setup consumer for Linear ticket resolution processing."""
+        self.ticket_consumer = RedpandaConsumer(
+            topic=REDPANDA_TICKET_TASKS_TOPIC,
+            group_id="healops-ticket-resolver",
+            message_handler=ticket_processor
         )
 
     def _handle_log_message(self, log_data: Dict[str, Any]):
@@ -371,6 +421,9 @@ class RedpandaService:
         if self.incident_consumer:
             self.incident_consumer.start_consuming()
             started.append("incident_consumer")
+        if self.ticket_consumer:
+            self.ticket_consumer.start_consuming()
+            started.append("ticket_consumer")
         
         if started:
             logger.info(f"✓ Started Redpanda consumers: {', '.join(started)}")
@@ -383,6 +436,8 @@ class RedpandaService:
             self.log_consumer.stop_consuming()
         if self.incident_consumer:
             self.incident_consumer.stop_consuming()
+        if self.ticket_consumer:
+            self.ticket_consumer.stop_consuming()
 
     def is_healthy(self) -> bool:
         """Check if Redpanda connection is healthy."""

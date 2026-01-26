@@ -1,10 +1,10 @@
 'use client';
 
-import { useActionState, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 import { SubmitButton } from '@/components/submit-button';
-import { loginAction } from '@/actions/auth';
+import { API_BASE } from '@/lib/config';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -15,28 +15,71 @@ import {
     CardHeader,
     CardTitle
 } from '@/components/ui/card';
-import { AlertCircle, Loader2 } from 'lucide-react';
+import { AlertCircle, Loader2, CheckCircle2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import Link from 'next/link';
 
-const initialState = {
-    message: ''
-};
-
-export default function LoginPage() {
+export default function SignupPage() {
     const router = useRouter();
-    const [state, formAction] = useActionState(loginAction, initialState);
     const [isRedirecting, setIsRedirecting] = useState(false);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string>('');
+    const [success, setSuccess] = useState(false);
+    const [successMessage, setSuccessMessage] = useState('');
 
     useEffect(() => {
-        if (state?.success) {
-            // Delay slightly to allow state update to process
+        if (success) {
+            // Show success state briefly then redirect to login
             const timer = setTimeout(() => {
                 setIsRedirecting(true);
-                router.push(state.redirect || '/');
-            }, 0);
+                router.push('/login');
+            }, 2000);
             return () => clearTimeout(timer);
         }
-    }, [state, router]);
+    }, [success, router]);
+
+    const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+        e.preventDefault();
+        setIsLoading(true);
+        setError('');
+        setSuccess(false);
+
+        const formData = new FormData(e.currentTarget);
+        const email = formData.get('email') as string;
+        const password = formData.get('password') as string;
+
+        try {
+            const response = await fetch(`${API_BASE}/auth/register`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    email,
+                    password
+                })
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ detail: 'Registration failed' }));
+                setError(errorData.detail || 'Registration failed');
+                setIsLoading(false);
+                return;
+            }
+
+            setSuccess(true);
+            setSuccessMessage('Registration successful! Please login.');
+            setIsLoading(false);
+        } catch (error) {
+            console.error('Registration error:', error);
+            if (error instanceof Error && error.message.includes('fetch failed')) {
+                setError('Unable to connect to server. Please ensure the backend server is running on http://localhost:8000.');
+            } else {
+                setError('An unexpected error occurred. Please try again.');
+            }
+            setIsLoading(false);
+        }
+    };
 
     return (
         <div className="flex h-screen w-full items-center justify-center bg-zinc-950 relative">
@@ -45,7 +88,7 @@ export default function LoginPage() {
                     <div className="flex flex-col items-center gap-4">
                         <Loader2 className="h-12 w-12 animate-spin text-green-600" />
                         <p className="text-zinc-100 text-lg font-medium">
-                            Redirecting...
+                            Redirecting to Login...
                         </p>
                     </div>
                 </div>
@@ -65,32 +108,40 @@ export default function LoginPage() {
                         </div>
                     </div>
                     <CardTitle className="text-2xl text-center">
-                        Healops
+                        Create Account
                     </CardTitle>
                     <CardDescription className="text-center text-zinc-400">
-                        Enter your credentials to access the console
+                        Get started with Healops
                     </CardDescription>
                 </CardHeader>
                 <CardContent className="grid gap-4">
-                    <form action={formAction}>
-                        {state?.message && (
+                    <form onSubmit={handleSubmit}>
+                        {success ? (
+                            <Alert className="mb-4 bg-green-900/50 border-green-900 text-green-200">
+                                <CheckCircle2 className="h-4 w-4" />
+                                <AlertDescription>
+                                    {successMessage}
+                                </AlertDescription>
+                            </Alert>
+                        ) : error ? (
                             <Alert
                                 variant="destructive"
                                 className="mb-4 bg-red-900/50 border-red-900 text-red-200"
                             >
                                 <AlertCircle className="h-4 w-4" />
                                 <AlertDescription>
-                                    {state.message}
+                                    {error}
                                 </AlertDescription>
                             </Alert>
-                        )}
+                        ) : null}
+
                         <div className="grid gap-2">
                             <Label htmlFor="email">Email</Label>
                             <Input
                                 id="email"
                                 name="email"
                                 type="email"
-                                placeholder="admin@healops.ai"
+                                placeholder="name@example.com"
                                 className="bg-zinc-800 border-zinc-700"
                                 required
                             />
@@ -105,21 +156,25 @@ export default function LoginPage() {
                                 required
                             />
                         </div>
-                        <SubmitButton />
+                        <div className="mt-6">
+                            <SubmitButton disabled={isLoading}>
+                                {isLoading ? 'Signing Up...' : 'Sign Up'}
+                            </SubmitButton>
+                        </div>
                     </form>
                 </CardContent>
                 <CardFooter className="flex flex-col gap-2">
                     <div className="text-sm text-center text-zinc-400">
-                        Don&apos;t have an account?{' '}
-                        <a
-                            href="/signup"
+                        Already have an account?{' '}
+                        <Link
+                            href="/login"
                             className="text-green-500 hover:text-green-400 hover:underline"
                         >
-                            Sign up
-                        </a>
+                            Login
+                        </Link>
                     </div>
-                    <p className="text-xs text-center text-zinc-500 w-full">
-                        Protected by Healops Identity Guard
+                    <p className="text-xs text-center text-zinc-500 w-full mt-2">
+                        By clicking Sign Up, you agree to our Terms and Policy
                     </p>
                 </CardFooter>
             </Card>
