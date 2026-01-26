@@ -249,7 +249,7 @@ export class HealOpsExporter implements SpanExporter {
             startTime: this.hrTimeToMilliseconds(span.startTime),
             endTime: this.hrTimeToMilliseconds(span.endTime),
             attributes: enhancedAttributes,
-            events: span.events.map((event) => ({
+            events: span.events.map((event: { name: string; time: [number, number]; attributes?: Record<string, any> }) => ({
                 name: event.name,
                 time: this.hrTimeToMilliseconds(event.time),
                 attributes: event.attributes
@@ -271,7 +271,7 @@ export class HealOpsExporter implements SpanExporter {
         attempt = 1
     ): Promise<void> {
         const maxRetries = 3;
-        const timeout = 3000; // 3 seconds
+        const timeout = 10000; // Increased to 10 seconds (was 3 seconds)
 
         try {
             await axios.post(this.endpoint, payload, {
@@ -281,12 +281,24 @@ export class HealOpsExporter implements SpanExporter {
                 },
                 timeout: timeout
             });
-        } catch (error) {
+        } catch (error: any) {
             if (attempt < maxRetries) {
                 const delay = Math.pow(2, attempt) * 100; // Exponential backoff
                 await new Promise((resolve) => setTimeout(resolve, delay));
                 return this.send(payload, attempt + 1);
             }
+            // Log error with more context for debugging
+            const errorMessage = error?.message || 'Unknown error';
+            const isTimeout = errorMessage.includes('timeout') || error?.code === 'ECONNABORTED';
+            console.error(
+                `Failed to export spans to HealOps after ${maxRetries} attempts: ${errorMessage}`,
+                {
+                    endpoint: this.endpoint,
+                    payloadSize: JSON.stringify(payload).length,
+                    isTimeout,
+                    attempt
+                }
+            );
             throw error;
         }
     }

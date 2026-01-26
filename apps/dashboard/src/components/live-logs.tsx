@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { LogEntry } from '@/actions/logs';
-import { getWebSocketUrl } from '@/lib/config';
+import { getWebSocketUrl, getApiBaseUrl } from '@/lib/config';
 
 interface LiveLogsProps {
     initialLogs?: LogEntry[];
@@ -68,15 +68,51 @@ export function LiveLogs({ initialLogs = [] }: LiveLogsProps) {
     >('connecting');
     const scrollRef = useRef<HTMLDivElement>(null);
     const wsRef = useRef<WebSocket | null>(null);
+    const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const reconnectAttemptsRef = useRef(0);
+    const maxReconnectAttempts = 10;
+    const baseReconnectDelay = 1000; // 1 second
 
-    useEffect(() => {
+    const connectWebSocket = () => {
+        // Clear any existing reconnection timeout
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = null;
+        }
+
+        // Close existing connection if any
+        if (wsRef.current) {
+            wsRef.current.close();
+            wsRef.current = null;
+        }
+
         // Connect to WebSocket
-        const ws = new WebSocket(getWebSocketUrl());
-        wsRef.current = ws;
+        const wsUrl = getWebSocketUrl();
+        const apiBaseUrl = getApiBaseUrl();
+        console.log(`🔌 Attempting to connect to WebSocket:`, {
+            wsUrl,
+            apiBaseUrl,
+            protocol: window.location.protocol,
+            host: window.location.host,
+            origin: window.location.origin
+        });
+        setConnectionStatus('connecting');
+        
+        try {
+            const ws = new WebSocket(wsUrl);
+            wsRef.current = ws;
+        } catch (error) {
+            console.error('❌ Failed to create WebSocket:', error);
+            setConnectionStatus('disconnected');
+            return;
+        }
+        
+        const ws = wsRef.current!;
 
         ws.onopen = () => {
-            console.log('Connected to Live Logs WebSocket (Redis Pub/Sub)');
+            console.log('Connected to Live Logs WebSocket');
             setConnectionStatus('connected');
+            reconnectAttemptsRef.current = 0; // Reset on successful connection
         };
 
         ws.onmessage = (event) => {
@@ -106,7 +142,6 @@ export function LiveLogs({ initialLogs = [] }: LiveLogsProps) {
         };
 
         ws.onerror = (error) => {
-            const wsUrl = getWebSocketUrl();
             const readyState = ws.readyState;
             const readyStateMap: Record<number, string> = {
                 0: 'CONNECTING',
@@ -119,29 +154,78 @@ export function LiveLogs({ initialLogs = [] }: LiveLogsProps) {
             const errorInfo: Record<string, any> = {
                 url: wsUrl,
                 readyState: readyStateMap[readyState] || readyState,
-                timestamp: new Date().toISOString()
+                readyStateCode: readyState,
+                timestamp: new Date().toISOString(),
+                reconnectAttempt: reconnectAttemptsRef.current,
+                error: error instanceof Error ? {
+                    message: error.message,
+                    name: error.name,
+                    stack: error.stack
+                } : 'WebSocket error event (limited browser info)'
             };
             
             // Try to extract any available error information
-            if (error.type) {
-                errorInfo.type = error.type;
-            }
-            if (error.target) {
-                errorInfo.target = 'WebSocket';
+            if (error && typeof error === 'object') {
+                if ('type' in error) {
+                    errorInfo.type = (error as any).type;
+                }
+                if ('target' in error) {
+                    errorInfo.target = 'WebSocket';
+                }
+                if ('message' in error) {
+                    errorInfo.message = (error as any).message;
+                }
             }
             
+            // Add connection diagnostics
+            errorInfo.diagnostics = {
+                urlValid: wsUrl.startsWith('ws://') || wsUrl.startsWith('wss://'),
+                apiBaseUrl: getApiBaseUrl(),
+                isSecure: wsUrl.startsWith('wss://'),
+                connectionAttempted: readyState !== 3 // Not CLOSED
+            };
+            
             console.error('WebSocket connection error:', errorInfo);
+            console.error('Full error object:', error);
             setConnectionStatus('disconnected');
         };
 
-        ws.onclose = () => {
-            console.log('Disconnected from Live Logs WebSocket');
+        ws.onclose = (event) => {
+            console.log('Disconnected from Live Logs WebSocket', {
+                code: event.code,
+                reason: event.reason,
+                wasClean: event.wasClean
+            });
             setConnectionStatus('disconnected');
+            
+            // Attempt to reconnect if not a clean close and we haven't exceeded max attempts
+            if (reconnectAttemptsRef.current < maxReconnectAttempts) {
+                const delay = baseReconnectDelay * Math.pow(2, reconnectAttemptsRef.current);
+                reconnectAttemptsRef.current += 1;
+                
+                console.log(`Scheduling reconnection attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts} in ${delay}ms`);
+                
+                reconnectTimeoutRef.current = setTimeout(() => {
+                    connectWebSocket();
+                }, delay);
+            } else {
+                console.error('Max reconnection attempts reached. Please refresh the page.');
+            }
         };
+    };
+
+    useEffect(() => {
+        connectWebSocket();
 
         return () => {
+            // Clear reconnection timeout
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
+            }
+            // Close WebSocket connection
             if (wsRef.current) {
                 wsRef.current.close();
+                wsRef.current = null;
             }
         };
     }, []);

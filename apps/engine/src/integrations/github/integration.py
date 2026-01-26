@@ -219,7 +219,11 @@ class GithubIntegration:
         """
         if not self.client:
             return None
-            
+        
+        # Skip Node.js internal modules and other system files
+        if file_path.startswith("node:internal/") or file_path.startswith("node:"):
+            return None
+        
         try:
             repo = self.client.get_repo(repo_name)
             contents = repo.get_contents(file_path, ref=ref)
@@ -228,7 +232,25 @@ class GithubIntegration:
                 return base64.b64decode(contents.content).decode("utf-8")
             return contents.decoded_content.decode("utf-8")
         except Exception as e:
-            print(f"Error fetching file {file_path}: {e}")
+            # Handle 404 errors gracefully (file doesn't exist)
+            error_str = str(e).lower()
+            is_404 = "404" in error_str or "not found" in error_str
+            
+            # Only log non-404 errors or 404s for files that should exist
+            # Skip logging for Node.js internals and other expected missing files
+            if not is_404 or (is_404 and not file_path.startswith("node:")):
+                # Check if this is a GitHub API 404 error
+                if hasattr(e, 'status') and e.status == 404:
+                    # File doesn't exist - this is expected for some files
+                    # Only log at debug level
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.debug(f"File not found in repository: {file_path} (expected for some files)")
+                else:
+                    # Other errors should be logged
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Error fetching file {file_path}: {e}")
             return None
     
     def search_code(self, repo_name: str, query: str, language: Optional[str] = None) -> list[Dict[str, Any]]:

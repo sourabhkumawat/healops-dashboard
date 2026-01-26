@@ -1,7 +1,7 @@
 """
 Authentication Controller - Handles user authentication and profile management.
 """
-from fastapi import HTTPException, status, Response, Depends
+from fastapi import HTTPException, status, Response, Depends, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -25,7 +25,7 @@ class TestEmailRequest(BaseModel):
     recipient_email: str
 
 
-def get_current_user(request, db: Session = Depends(get_db)):
+def get_current_user(request: Request, db: Session = Depends(get_db)):
     """Get current user from JWT token"""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -33,7 +33,6 @@ def get_current_user(request, db: Session = Depends(get_db)):
         headers={"WWW-Authenticate": "Bearer"},
     )
     
-    from fastapi import Request
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         raise credentials_exception

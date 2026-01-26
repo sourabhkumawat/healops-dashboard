@@ -221,6 +221,141 @@ def get_repo_name_from_integration(integration: Integration, service_name: Optio
     return None
 
 
+def generate_incident_title_and_description(log: LogEntry, service_name: str) -> tuple[str, str]:
+    """
+    Generate a meaningful title and description for an incident based on error logs.
+    Uses AI to create human-readable, descriptive titles and descriptions.
+    
+    Args:
+        log: The log entry that triggered the incident
+        service_name: Name of the service
+        
+    Returns:
+        Tuple of (title, description) - falls back to simple format if AI fails
+    """
+    api_key = os.getenv("OPENCOUNCIL_API")
+    if not api_key:
+        # Fallback to simple format if API key not available
+        return (
+            f"Detected {log.severity} in {service_name}",
+            log.message[:200] if log.message else "No error message available"
+        )
+    
+    try:
+        import requests
+        
+        # Prepare log message for analysis (limit to reasonable size)
+        log_message = log.message[:1000] if log.message else "No error message available"
+        
+        # Build prompt for title and description generation
+        prompt = f"""Analyze the following error log and generate a clear, meaningful title and description for an incident.
+
+Error Log:
+Service: {service_name}
+Severity: {log.severity}
+Message: {log_message}
+
+Generate:
+1. A concise title (max 80 characters) that clearly describes what went wrong
+2. A brief description (max 300 characters) that explains the issue in user-friendly terms
+
+Format your response as JSON:
+{{
+  "title": "Clear, descriptive title here",
+  "description": "User-friendly description explaining what happened"
+}}
+
+Focus on making it easy for users to understand what the problem is without needing to read the raw error log."""
+
+        # Use simple/cheap model for this task
+        model_config = MODEL_CONFIG["simple_analysis"]
+        
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": os.getenv("APP_URL", "https://healops.ai"),
+                "X-Title": "HealOps Incident Title Generation",
+            },
+            json={
+                "model": model_config["model"],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": 0.3,
+                "max_tokens": 200,  # Small response for title + description
+            },
+            timeout=10  # Short timeout for quick response
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            
+            # Try to parse JSON response
+            try:
+                # First, try to extract JSON from markdown code blocks if present
+                json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+                if json_match:
+                    content = json_match.group(1)
+                
+                # Try to parse the entire content as JSON first
+                try:
+                    parsed = json.loads(content.strip())
+                    title = parsed.get("title", "").strip()
+                    description = parsed.get("description", "").strip()
+                    
+                    if title and len(title) <= 150 and description and len(description) <= 500:
+                        return (title, description)
+                except json.JSONDecodeError:
+                    # If direct parse fails, try to find JSON object in the content
+                    # Use a more robust pattern that handles nested objects
+                    json_match = re.search(r'\{[^{}]*(?:"title"|"description")[^}]*\}', content, re.DOTALL)
+                    if json_match:
+                        try:
+                            parsed = json.loads(json_match.group(0))
+                            title = parsed.get("title", "").strip()
+                            description = parsed.get("description", "").strip()
+                            
+                            if title and len(title) <= 150 and description and len(description) <= 500:
+                                return (title, description)
+                        except json.JSONDecodeError:
+                            pass
+                
+                # If no JSON found, try to extract title and description from plain text
+                # Look for patterns like "Title: ..." or "title: ..."
+                title_match = re.search(r'(?:title|Title):\s*(.+?)(?:\n|$|Description|description)', content, re.IGNORECASE)
+                desc_match = re.search(r'(?:description|Description):\s*(.+?)(?:\n\n|$)', content, re.IGNORECASE | re.DOTALL)
+                
+                if title_match and desc_match:
+                    title = title_match.group(1).strip()
+                    description = desc_match.group(1).strip()
+                    if title and len(title) <= 150 and description and len(description) <= 500:
+                        return (title, description)
+                        
+            except (KeyError, AttributeError) as e:
+                print(f"⚠️  Failed to parse AI response for incident title/description: {e}")
+                print(f"   Response content: {content[:200]}")
+        
+        # Fallback if AI response is invalid
+        return (
+            f"Detected {log.severity} in {service_name}",
+            log_message[:200]
+        )
+        
+    except Exception as e:
+        print(f"⚠️  Error generating AI title/description: {e}")
+        # Fallback to simple format
+        return (
+            f"Detected {log.severity} in {service_name}",
+            log.message[:200] if log.message else "No error message available"
+        )
+
+
 def extract_paths_from_stacktrace(text: str) -> list[str]:
     """Extract file paths from a stack trace string."""
     paths = []
@@ -588,6 +723,227 @@ def build_trace_execution_flow(logs: list[LogEntry]) -> Dict[str, Any]:
         "total_spans": len(spans_by_id),
         "error_spans": sum(1 for s in spans_by_id.values() if s.get("status_code") == 2)
     }
+
+
+def build_enhanced_linear_description(
+    incident: Incident,
+    logs: list[LogEntry],
+    db: Session,
+    include_trace: bool = True
+) -> str:
+    """
+    Build an enhanced Linear ticket description with trace/span info, diagrams, and all useful details.
+    
+    Args:
+        incident: The incident
+        logs: Related log entries
+        db: Database session
+        include_trace: Whether to include trace execution flow
+        
+    Returns:
+        Formatted markdown description for Linear ticket
+    """
+    description_parts = []
+    
+    try:
+        # Basic Information
+        description_parts.append("## 📋 Incident Details")
+        description_parts.append(f"**Service:** {incident.service_name or 'N/A'}")
+        description_parts.append(f"**Severity:** {incident.severity or 'N/A'}")
+        description_parts.append(f"**Source:** {incident.source or 'N/A'}")
+        description_parts.append(f"**Status:** {incident.status or 'N/A'}")
+        
+        if incident.first_seen_at:
+            try:
+                description_parts.append(f"**First Seen:** {incident.first_seen_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            except (AttributeError, ValueError):
+                description_parts.append(f"**First Seen:** N/A")
+        else:
+            description_parts.append("**First Seen:** N/A")
+        
+        if incident.last_seen_at:
+            try:
+                description_parts.append(f"**Last Seen:** {incident.last_seen_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            except (AttributeError, ValueError):
+                description_parts.append(f"**Last Seen:** N/A")
+        else:
+            description_parts.append("**Last Seen:** N/A")
+        
+        description_parts.append("")
+    except Exception as e:
+        print(f"⚠️  Error building basic incident info: {e}")
+        description_parts.append("## 📋 Incident Details")
+        description_parts.append(f"**Service:** {getattr(incident, 'service_name', 'N/A')}")
+        description_parts.append("")
+    
+    # Description
+    if incident.description:
+        description_parts.append("## 📝 Description")
+        description_parts.append(incident.description)
+        description_parts.append("")
+    
+    # Root Cause (if available)
+    if incident.root_cause:
+        description_parts.append("## 🔍 Root Cause Analysis")
+        description_parts.append(incident.root_cause)
+        description_parts.append("")
+    
+    # Trace and Span Information
+    if logs and include_trace:
+        trace_ids = set()
+        span_info = []
+        
+        for log in logs:
+            try:
+                metadata = log.metadata_json or {}
+                if isinstance(metadata, dict):
+                    trace_id = metadata.get("traceId")
+                    span_id = metadata.get("spanId")
+                    
+                    if trace_id:
+                        trace_ids.add(str(trace_id))
+                    
+                    if span_id:
+                        span_name = metadata.get("spanName", "unknown")
+                        duration = metadata.get("duration", 0)
+                        status_code = metadata.get("statusCode", 0)
+                        parent_span_id = metadata.get("parentSpanId")
+                        
+                        span_info.append({
+                            "span_id": span_id,
+                            "span_name": span_name,
+                            "duration": duration,
+                            "status": "ERROR" if status_code == 2 else "OK",
+                            "parent_span_id": parent_span_id,
+                            "log_id": log.id,
+                            "message": log.message[:200] if log.message else ""
+                        })
+            except (AttributeError, TypeError, KeyError):
+                continue
+        
+        if trace_ids:
+            description_parts.append("## 🔗 Trace Information")
+            description_parts.append(f"**Trace ID(s):** {', '.join(list(trace_ids)[:3])}")  # Show up to 3 trace IDs
+            if len(trace_ids) > 3:
+                description_parts.append(f"*({len(trace_ids) - 3} more trace(s))*")
+            description_parts.append("")
+        
+        if span_info:
+            description_parts.append("### Spans")
+            description_parts.append("| Span ID | Name | Duration | Status | Message |")
+            description_parts.append("|---------|------|----------|--------|---------|")
+            
+            for span in span_info[:20]:  # Limit to 20 spans to avoid overwhelming
+                span_id_short = str(span["span_id"])[:16] + "..." if len(str(span["span_id"])) > 16 else str(span["span_id"])
+                span_name = span["span_name"][:30] + "..." if len(span["span_name"]) > 30 else span["span_name"]
+                duration = f"{span['duration']:.2f}ms" if isinstance(span['duration'], (int, float)) else "N/A"
+                status = span["status"]
+                message = span["message"][:50] + "..." if len(span["message"]) > 50 else span["message"]
+                description_parts.append(f"| `{span_id_short}` | {span_name} | {duration} | {status} | {message} |")
+            
+            if len(span_info) > 20:
+                description_parts.append(f"*({len(span_info) - 20} more span(s))*")
+            description_parts.append("")
+            
+            # Build trace execution flow
+            try:
+                # Get all logs from the same trace
+                trace_logs = get_trace_logs(logs, db, user_id=incident.user_id)
+                if len(trace_logs) > len(logs):
+                    trace_flow = build_trace_execution_flow(trace_logs)
+                    
+                    if trace_flow and trace_flow.get("flow"):
+                        description_parts.append("### 📊 Trace Execution Flow")
+                        description_parts.append("```")
+                        description_parts.append(trace_flow.get("flow", ""))
+                        description_parts.append("```")
+                        description_parts.append("")
+                        description_parts.append(f"**Statistics:** {trace_flow.get('total_spans', 0)} total spans, {trace_flow.get('error_spans', 0)} error span(s)")
+                        description_parts.append("")
+            except Exception as e:
+                print(f"⚠️  Error building trace flow for Linear ticket: {e}")
+    
+    # Stack Traces
+    stack_traces = []
+    for log in logs[:10]:  # Check first 10 logs
+        try:
+            if log.message:
+                # Check if message contains stack trace
+                if any(keyword in log.message for keyword in ["Traceback", "at ", "File \"", "Error:", "Exception:"]):
+                    stack_traces.append({
+                        "log_id": log.id,
+                        "message": log.message[:1000]  # Limit length
+                    })
+            
+            # Check metadata for stack traces
+            metadata = log.metadata_json or {}
+            if isinstance(metadata, dict):
+                # Check events for stack traces
+                events = metadata.get("events", [])
+                if isinstance(events, list):
+                    for event in events:
+                        if isinstance(event, dict):
+                            attrs = event.get("attributes", {})
+                            if isinstance(attrs, dict) and attrs.get("exception.stacktrace"):
+                                stack_traces.append({
+                                    "log_id": log.id,
+                                    "message": attrs.get("exception.stacktrace", "")[:1000]
+                                })
+        except (AttributeError, TypeError, KeyError):
+            continue
+    
+    if stack_traces:
+        description_parts.append("## 📚 Stack Traces")
+        for i, trace in enumerate(stack_traces[:5], 1):  # Limit to 5 stack traces
+            description_parts.append(f"### Stack Trace {i} (Log ID: {trace['log_id']})")
+            description_parts.append("```")
+            description_parts.append(trace["message"])
+            description_parts.append("```")
+            description_parts.append("")
+    
+    # Related Logs Summary
+    if logs:
+        description_parts.append("## 📋 Related Logs Summary")
+        description_parts.append(f"**Total Logs:** {len(logs)}")
+        description_parts.append("")
+        
+        # Show first 5 error logs
+        error_logs = [log for log in logs if log.severity and log.severity.upper() in ["ERROR", "CRITICAL"]][:5]
+        if error_logs:
+            description_parts.append("### Recent Error Logs")
+            for log in error_logs:
+                timestamp = log.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC') if log.timestamp else 'N/A'
+                message = log.message[:150] + "..." if log.message and len(log.message) > 150 else (log.message or "No message")
+                description_parts.append(f"- **[{timestamp}]** `{log.severity}`: {message}")
+            description_parts.append("")
+    
+    # Metadata (if available)
+    if incident.metadata_json and isinstance(incident.metadata_json, dict):
+        # Only include relevant metadata, not everything
+        relevant_metadata = {}
+        for key in ["environment", "version", "deployment", "region", "host", "container_id"]:
+            if key in incident.metadata_json:
+                relevant_metadata[key] = incident.metadata_json[key]
+        
+        if relevant_metadata:
+            description_parts.append("## 🏷️ Metadata")
+            for key, value in relevant_metadata.items():
+                description_parts.append(f"**{key.replace('_', ' ').title()}:** {value}")
+            description_parts.append("")
+    
+    # Action Taken (if available)
+    if incident.action_taken:
+        description_parts.append("## ⚡ Action Taken")
+        description_parts.append(incident.action_taken)
+        description_parts.append("")
+    
+    # Repository Information
+    if incident.repo_name:
+        description_parts.append("## 🔗 Repository")
+        description_parts.append(f"**Repo:** `{incident.repo_name}`")
+        description_parts.append("")
+    
+    return "\n".join(description_parts)
 
 
 def extract_file_paths_from_trace(logs: list[LogEntry]) -> list[str]:
@@ -1225,6 +1581,30 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                                                 warnings_text = "\n### ⚠️ Low Confidence - Draft PR\n" + "\n".join(f"- {w}" for w in warnings) + "\n"
                                             warnings_text += "\n**This is a draft PR. Please review the changes on the incident page before merging.**\n"
                                         
+                                        # Check if incident has Linear issue for branch naming
+                                        linear_issue_id = None
+                                        linear_issue_url = None
+                                        linear_issue_identifier = None
+                                        if incident.metadata_json and incident.metadata_json.get("linear_issue"):
+                                            linear_issue_data = incident.metadata_json["linear_issue"]
+                                            linear_issue_identifier = linear_issue_data.get("identifier")  # e.g., "ID-123"
+                                            linear_issue_url = linear_issue_data.get("url")
+                                        
+                                        # Use Linear standard format for branch name if Linear issue exists
+                                        if linear_issue_identifier:
+                                            # Linear format: ID-123-fix-description
+                                            branch_suffix = incident.title.lower().replace(' ', '-')[:30]
+                                            # Remove special characters that might cause issues
+                                            branch_suffix = ''.join(c for c in branch_suffix if c.isalnum() or c == '-')
+                                            head_branch = f"{linear_issue_identifier}-fix-{branch_suffix}"
+                                        else:
+                                            head_branch = f"healops-enhanced-fix-{incident.id}"
+                                        
+                                        # Add Linear issue reference to PR body
+                                        linear_ref = ""
+                                        if linear_issue_identifier and linear_issue_url:
+                                            linear_ref = f"\n**Linear Issue:** [{linear_issue_identifier}]({linear_issue_url})\n"
+                                        
                                         pr_result = github_integration.create_pr(
                                             repo_name=repo_name,
                                             title=f"Fix: {incident.title} (Enhanced AI)" + (" [DRAFT]" if is_draft else ""),
@@ -1233,7 +1613,7 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
 **Incident ID:** #{incident.id}
 **Service:** {incident.service_name}
 **Root Cause:** {root_cause}
-
+{linear_ref}
 ### AI Analysis
 This PR was generated using the enhanced multi-agent system with:
 - Interactive codebase exploration
@@ -1251,7 +1631,7 @@ This PR was generated using the enhanced multi-agent system with:
 ---
 *Generated by HealOps Enhanced Multi-Agent System*
 """,
-                                            head_branch=f"healops-enhanced-fix-{incident.id}",
+                                            head_branch=head_branch,
                                             base_branch="main",
                                             changes=changes,
                                             draft=is_draft
@@ -1275,7 +1655,7 @@ This PR was generated using the enhanced multi-agent system with:
                                                         repo_name=repo_name,
                                                         pr_url=pr_url,
                                                         title=f"Fix: {incident.title} (Enhanced AI)" + (" [DRAFT]" if is_draft else ""),
-                                                        head_branch=f"healops-enhanced-fix-{incident.id}",
+                                                        head_branch=head_branch,
                                                         base_branch="main",
                                                         agent_employee_id=alex_agent.id,
                                                         agent_name=alex_agent.name,
@@ -1285,6 +1665,26 @@ This PR was generated using the enhanced multi-agent system with:
                                                     db.add(agent_pr)
                                                     db.commit()
                                                     print(f"✅ Tracked Enhanced AI PR #{pr_number} created by {alex_agent.name} for QA review")
+                                                    
+                                                    # Update Linear issue with PR link if Linear integration exists
+                                                    if linear_issue_identifier and incident.metadata_json and incident.metadata_json.get("linear_issue"):
+                                                        try:
+                                                            from src.utils.integrations import get_linear_integration_for_user
+                                                            from src.integrations.linear.integration import LinearIntegration
+                                                            
+                                                            linear_integration_obj = get_linear_integration_for_user(db, incident.user_id)
+                                                            if linear_integration_obj:
+                                                                linear_integration = LinearIntegration(integration_id=linear_integration_obj.id)
+                                                                linear_issue_id = incident.metadata_json["linear_issue"]["id"]
+                                                                
+                                                                # Add comment to Linear issue with PR link
+                                                                comment_body = f"**Pull Request Created**\n\nPR: {pr_url}\nBranch: `{head_branch}`\n\nThis PR addresses the incident and includes the fix."
+                                                                linear_integration.add_comment_to_issue(linear_issue_id, comment_body)
+                                                                print(f"✅ Added PR link to Linear issue {linear_issue_identifier}")
+                                                        except Exception as e:
+                                                            print(f"⚠️  Failed to update Linear issue with PR link: {e}")
+                                                            import traceback
+                                                            traceback.print_exc()
                                                     
                                                     # Trigger QA review
                                                     try:

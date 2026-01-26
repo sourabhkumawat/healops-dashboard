@@ -11,7 +11,7 @@ from kafka.admin import KafkaAdminClient, NewTopic
 from kafka.errors import TopicAlreadyExistsError, NoBrokersAvailable
 
 # Redpanda Configuration
-REDPANDA_BROKERS = os.getenv("REDPANDA_BROKERS", "localhost:19092")
+REDPANDA_BROKERS = os.getenv("REDPANDA_BROKERS", "localhost:9092")
 REDPANDA_LOG_TOPIC = os.getenv("REDPANDA_LOG_TOPIC", "healops-logs")
 REDPANDA_INCIDENT_TOPIC = os.getenv("REDPANDA_INCIDENT_TOPIC", "healops-incidents")
 

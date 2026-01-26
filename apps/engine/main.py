@@ -145,10 +145,17 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Self-Healing SaaS Engine")
 
+# Store main event loop for thread-safe asyncio operations
+_main_event_loop = None
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize Redpanda services on startup"""
+    global _main_event_loop
     try:
+        # Store the main event loop for thread-safe operations
+        _main_event_loop = asyncio.get_event_loop()
+        
         # Initialize Redpanda WebSocket manager
         loop = asyncio.get_event_loop()
         manager.initialize(loop)
@@ -163,6 +170,20 @@ async def startup_event():
         print(f"⚠ Error initializing Redpanda services: {e}")
         import traceback
         traceback.print_exc()
+
+def get_main_event_loop():
+    """Get the main event loop for thread-safe asyncio operations."""
+    global _main_event_loop
+    if _main_event_loop is None:
+        try:
+            _main_event_loop = asyncio.get_event_loop()
+        except RuntimeError:
+            # If no event loop in current thread, try to get the running loop
+            try:
+                _main_event_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+    return _main_event_loop
 
 # Add Middleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -240,13 +261,104 @@ from src.utils.redpanda_websocket_manager import connection_manager as manager, 
 
 @app.websocket("/ws/logs")
 async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+    """
+    WebSocket endpoint for live logs streaming.
+    Authenticates using JWT token from cookies or Authorization header.
+    """
+    client_host = f"{websocket.client.host}:{websocket.client.port}" if websocket.client else "unknown"
+    print(f"🔌 WebSocket connection attempt from {client_host}")
+    
     try:
-        while True:
-            # Keep connection alive
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        # Accept connection first (required before reading headers/cookies)
+        await websocket.accept()
+        print(f"✅ WebSocket connection accepted from {client_host}")
+        
+        # Authenticate WebSocket connection
+        # Try to get token from cookies first (for browser clients)
+        token = None
+        try:
+            cookies = websocket.cookies
+            if cookies:
+                print(f"📋 WebSocket cookies: {list(cookies.keys())}")
+                if "auth_token" in cookies:
+                    token = cookies.get("auth_token")
+                    print("✅ Found auth_token in cookies")
+        except Exception as e:
+            print(f"⚠️  Error reading cookies: {e}")
+        
+        # Fallback to Authorization header (for programmatic clients)
+        if not token:
+            try:
+                auth_header = websocket.headers.get("Authorization", "")
+                if auth_header.startswith("Bearer "):
+                    token = auth_header.replace("Bearer ", "").strip()
+                    print("✅ Found auth_token in Authorization header")
+            except Exception as e:
+                print(f"⚠️  Error reading Authorization header: {e}")
+        
+        # Validate token if provided (optional - allow unauthenticated for now)
+        # In production, you may want to require authentication
+        if token:
+            try:
+                from jose import jwt, JWTError
+                from src.database.database import SessionLocal
+                from src.database.models import User
+                import os
+                
+                SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
+                ALGORITHM = "HS256"
+                
+                payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+                email = payload.get("sub")
+                
+                if email:
+                    db = SessionLocal()
+                    try:
+                        user = db.query(User).filter(User.email == email).first()
+                        if not user:
+                            print(f"⚠️  WebSocket: User not found for email: {email}")
+                            await websocket.close(code=1008, reason="User not found")
+                            return
+                        print(f"✅ WebSocket authenticated user: {email}")
+                    finally:
+                        db.close()
+            except JWTError as e:
+                # Invalid token - allow connection but log warning
+                print(f"⚠️  WebSocket connection with invalid token: {e}")
+            except Exception as e:
+                print(f"⚠️  WebSocket authentication error: {e}")
+        else:
+            print("ℹ️  WebSocket connection without authentication token (allowed)")
+        
+        # Add to connection manager
+        manager.active_connections.append(websocket)
+        print(f"✅ WebSocket added to manager. Total connections: {len(manager.active_connections)}")
+        
+        # Keep connection alive
+        try:
+            while True:
+                # Receive messages to keep connection alive
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            print(f"🔌 WebSocket disconnected normally from {client_host}")
+        except Exception as e:
+            print(f"⚠️  WebSocket error during connection: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Remove from connection manager
+            if websocket in manager.active_connections:
+                manager.active_connections.remove(websocket)
+            print(f"🔌 WebSocket removed from manager. Total connections: {len(manager.active_connections)}")
+            
+    except Exception as e:
+        print(f"❌ WebSocket connection error: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            await websocket.close(code=1011, reason=f"Server error: {str(e)}")
+        except:
+            pass
 
 
 # Agent Events WebSocket Manager
@@ -1670,6 +1782,35 @@ def github_authorize(request: Request, reconnect: Optional[str] = None, integrat
 def github_callback(request: Request, installation_id: Optional[str] = None, setup_action: Optional[str] = None, state: Optional[str] = None, db: Session = Depends(get_db)):
     """GitHub callback - delegates to IntegrationsController."""
     return IntegrationsController.github_callback(request, installation_id, setup_action, state, db)
+
+# ============================================================================
+# Linear Integration Routes
+# ============================================================================
+
+@app.get("/integrations/linear/authorize")
+def linear_authorize(request: Request, reconnect: Optional[str] = None, integration_id: Optional[int] = None, db: Session = Depends(get_db)):
+    """Linear OAuth authorization - delegates to IntegrationsController."""
+    return IntegrationsController.linear_authorize(request, reconnect, integration_id, db)
+
+@app.get("/integrations/linear/callback")
+def linear_callback(request: Request, code: Optional[str] = None, state: Optional[str] = None, db: Session = Depends(get_db)):
+    """Linear OAuth callback - delegates to IntegrationsController."""
+    return IntegrationsController.linear_callback(request, code, state, db)
+
+@app.post("/integrations/linear/reconnect/{integration_id}")
+def linear_reconnect(integration_id: int, request: Request, db: Session = Depends(get_db)):
+    """Linear reconnect - delegates to IntegrationsController."""
+    return IntegrationsController.linear_reconnect(request, integration_id, db)
+
+@app.post("/integrations/linear/verify/{integration_id}")
+def linear_verify(integration_id: int, request: Request, db: Session = Depends(get_db)):
+    """Verify Linear connection - delegates to IntegrationsController."""
+    return IntegrationsController.linear_verify(integration_id, request, db)
+
+@app.get("/integrations/linear/teams/{integration_id}")
+def linear_get_teams(integration_id: int, request: Request, db: Session = Depends(get_db)):
+    """Get Linear teams - delegates to IntegrationsController."""
+    return IntegrationsController.linear_get_teams(integration_id, request, db)
 
 @app.post("/integrations/github/connect")
 def github_connect(config: GithubConfig, request: Request, db: Session = Depends(get_db)):

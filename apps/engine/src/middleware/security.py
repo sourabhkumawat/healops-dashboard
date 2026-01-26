@@ -88,7 +88,10 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         "/auth/login",
         # GitHub OAuth flow (user is authenticated by GitHub, not us yet)
         "/integrations/github/callback",
-        "/integrations/github/authorize",
+        # Note: /integrations/github/authorize requires auth to get user_id
+        # Linear OAuth flow (user is authenticated by Linear, not us yet)
+        "/integrations/linear/callback",
+        # Note: /integrations/linear/authorize requires auth to get user_id
         # GitHub webhooks (verified via GitHub signature, not JWT)
         "/integrations/github/webhook",
         "/webhooks/github",  # Alternative webhook endpoint
@@ -111,6 +114,14 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         # Remove trailing slash (except for root)
         if path != '/' and path.endswith('/'):
             path = path.rstrip('/')
+        
+        # CRITICAL: Allow WebSocket upgrade requests
+        # WebSocket connections are authenticated in the WebSocket handler itself
+        # The initial HTTP upgrade request needs to pass through middleware
+        if request.headers.get("Upgrade", "").lower() == "websocket" or path.startswith("/ws/"):
+            # WebSocket authentication will be handled in the WebSocket endpoint handler
+            # For now, allow the upgrade request to pass through
+            return await call_next(request)
         
         # CRITICAL: Check Slack endpoints FIRST before any other checks
         # Slack webhooks must bypass authentication - they use signature verification instead

@@ -5,6 +5,19 @@ import { getRecentIncidents } from '@/actions/incidents';
 import { getSystemStats } from '@/actions/stats';
 import { Activity, HardDrive, Server, AlertTriangle } from 'lucide-react';
 
+// Format number: small numbers with commas, big numbers in k/m format
+function formatNumber(num: number): string {
+    if (num < 1000) {
+        return num.toLocaleString();
+    } else if (num < 1000000) {
+        const k = num / 1000;
+        return k % 1 === 0 ? `${k}k` : `${k.toFixed(1)}k`;
+    } else {
+        const m = num / 1000000;
+        return m % 1 === 0 ? `${m}m` : `${m.toFixed(1)}m`;
+    }
+}
+
 export default async function DashboardPage() {
     const recentIncidents = await getRecentIncidents(10);
     const stats = await getSystemStats();
@@ -60,10 +73,10 @@ export default async function DashboardPage() {
                             {systemStatus === 'OPERATIONAL'
                                 ? 'All systems normal'
                                 : systemStatus === 'CRITICAL'
-                                ? `${activeIncidents} active incident${
+                                ? `${formatNumber(activeIncidents)} active incident${
                                       activeIncidents !== 1 ? 's' : ''
                                   }`
-                                : `${activeIncidents} active incident${
+                                : `${formatNumber(activeIncidents)} active incident${
                                       activeIncidents !== 1 ? 's' : ''
                                   }`}
                         </p>
@@ -78,11 +91,11 @@ export default async function DashboardPage() {
                     </CardHeader>
                     <CardContent>
                         <div className="text-2xl font-bold">
-                            {activeIncidents}
+                            {formatNumber(activeIncidents)}
                         </div>
                         <p className="text-xs text-muted-foreground">
                             {totalIncidents > 0
-                                ? `${resolvedIncidents} resolved of ${totalIncidents} total`
+                                ? `${formatNumber(resolvedIncidents)} resolved of ${formatNumber(totalIncidents)} total`
                                 : 'No incidents recorded'}
                         </p>
                     </CardContent>
@@ -96,7 +109,7 @@ export default async function DashboardPage() {
                     </CardHeader>
                     <CardContent>
                         <div className="text-2xl font-bold">
-                            {errorLogsCount}
+                            {formatNumber(errorLogsCount)}
                         </div>
                         <p className="text-xs text-muted-foreground">
                             {errorLogsCount > 0
@@ -114,11 +127,11 @@ export default async function DashboardPage() {
                     </CardHeader>
                     <CardContent>
                         <div className="text-2xl font-bold">
-                            {totalServices}
+                            {formatNumber(totalServices)}
                         </div>
                         <p className="text-xs text-muted-foreground">
                             {unhealthyServices > 0
-                                ? `${unhealthyServices} Unhealthy`
+                                ? `${formatNumber(unhealthyServices)} Unhealthy`
                                 : totalServices > 0
                                 ? 'All services healthy'
                                 : 'No services registered'}

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from src.database.models import Integration, AgentPR, AgentEmployee
 from src.integrations import GithubIntegration
@@ -361,6 +361,321 @@ class IntegrationsController:
         from src.integrations import IntegrationRegistry
         
         return IntegrationRegistry.list_providers()
+    
+    @staticmethod
+    def linear_authorize(request: Request, reconnect: Optional[str], integration_id: Optional[int], db: Session):
+        """Redirect user to Linear OAuth authorization page.
+        
+        SECURITY: This endpoint requires authentication to ensure integrations are
+        created for the correct user. User ID is included in state parameter.
+        """
+        from src.integrations.linear.oauth import get_authorization_url
+        
+        # Get authenticated user_id (middleware ensures this is set)
+        user_id = get_user_id_from_request(request, db=db)
+        
+        # Generate state parameter for security
+        state_data = {
+            "timestamp": int(time.time() * 1000),
+            "user_id": user_id,
+            "reconnect": reconnect == "true",
+            "nonce": secrets.token_urlsafe(16)
+        }
+        if integration_id:
+            state_data["integration_id"] = integration_id
+        
+        # Encode state as base64 JSON
+        state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
+        
+        # Get redirect URI from environment
+        redirect_uri = os.getenv("LINEAR_REDIRECT_URI")
+        if not redirect_uri:
+            # Fallback: construct from request
+            scheme = request.url.scheme
+            host = request.headers.get("host", "localhost:8000")
+            redirect_uri = f"{scheme}://{host}/integrations/linear/callback"
+        
+        # Generate authorization URL
+        auth_url = get_authorization_url(state=state, redirect_uri=redirect_uri)
+        
+        return RedirectResponse(auth_url)
+    
+    @staticmethod
+    def linear_callback(request: Request, code: Optional[str], state: Optional[str], db: Session):
+        """Handle Linear OAuth callback.
+        
+        Linear redirects here after authorization with code in query params.
+        """
+        from src.integrations.linear.oauth import exchange_code_for_token
+        from src.integrations.linear.integration import LinearIntegration
+        from src.auth.crypto_utils import encrypt_token
+        
+        try:
+            if not code:
+                print("ERROR: code parameter missing")
+                raise HTTPException(status_code=400, detail="code parameter is required")
+            
+            # Decode state parameter
+            reconnect = False
+            integration_id = None
+            user_id = None
+            if state:
+                try:
+                    state_data = json.loads(base64.urlsafe_b64decode(state.encode()).decode())
+                    reconnect = state_data.get("reconnect", False)
+                    integration_id = state_data.get("integration_id")
+                    user_id = state_data.get("user_id")
+                    print(f"DEBUG: Decoded state - user_id={user_id}, reconnect={reconnect}, integration_id={integration_id}")
+                except Exception as e:
+                    print(f"ERROR: Failed to decode state parameter: {e}")
+                    raise HTTPException(status_code=400, detail=f"Invalid state parameter: {str(e)}")
+            
+            # SECURITY: user_id is required
+            if not user_id:
+                try:
+                    if hasattr(request.state, 'user_id') and request.state.user_id:
+                        user_id = request.state.user_id
+                except Exception:
+                    pass
+            
+            if not user_id:
+                print("ERROR: No user_id found in state or request")
+                error_msg = "Please initiate the Linear connection from the application settings page."
+                return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&error={error_msg}")
+            
+            # Get redirect URI (must match the one used in authorization)
+            redirect_uri = os.getenv("LINEAR_REDIRECT_URI")
+            if not redirect_uri:
+                scheme = request.url.scheme
+                host = request.headers.get("host", "localhost:8000")
+                redirect_uri = f"{scheme}://{host}/integrations/linear/callback"
+            
+            # Exchange code for tokens
+            print(f"DEBUG: Exchanging code for tokens...")
+            token_data = exchange_code_for_token(code, redirect_uri)
+            
+            access_token = token_data.get("access_token")
+            refresh_token = token_data.get("refresh_token")
+            expires_in = token_data.get("expires_in", 3600)
+            
+            if not access_token:
+                raise HTTPException(status_code=400, detail="Failed to obtain access token from Linear")
+            
+            # Get user info to create integration name
+            linear_integration = LinearIntegration(access_token=access_token)
+            verification = linear_integration.verify_connection()
+            
+            if verification.get("status") != "verified":
+                raise HTTPException(status_code=400, detail="Failed to verify Linear connection")
+            
+            user_name = verification.get("name", "Linear User")
+            user_email = verification.get("email", "")
+            
+            # Get workspace info
+            workspace = linear_integration.get_workspace()
+            workspace_name = workspace.get("name", "Linear Workspace")
+            
+            # Calculate token expiry
+            token_expiry = datetime.utcnow() + timedelta(seconds=expires_in)
+            
+            # Handle reconnection
+            if reconnect and integration_id:
+                print(f"DEBUG: Reconnecting integration_id={integration_id}")
+                integration = db.query(Integration).filter(
+                    Integration.id == integration_id,
+                    Integration.user_id == user_id,
+                    Integration.provider == "LINEAR"
+                ).first()
+                
+                if not integration:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Integration not found or does not belong to your account"
+                    )
+                
+                integration.access_token = encrypt_token(access_token)
+                if refresh_token:
+                    integration.refresh_token = encrypt_token(refresh_token)
+                integration.token_expiry = token_expiry
+                integration.status = "ACTIVE"
+                integration.last_verified = datetime.utcnow()
+                integration.name = f"Linear ({user_name})"
+                
+                if not integration.config:
+                    integration.config = {}
+                integration.config["workspace_id"] = workspace.get("id")
+                integration.config["workspace_name"] = workspace_name
+                integration.config["user_id"] = verification.get("user_id")
+                integration.config["user_email"] = user_email
+                
+                # Get first team for default
+                teams = linear_integration.get_teams()
+                if teams:
+                    integration.config["team_id"] = teams[0]["id"]
+                    integration.config["team_name"] = teams[0]["name"]
+                
+                db.commit()
+                db.refresh(integration)
+                print(f"DEBUG: Reconnected integration {integration.id}")
+                return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&linear_connected=true")
+            
+            # Check if integration already exists
+            existing_integration = db.query(Integration).filter(
+                Integration.user_id == user_id,
+                Integration.provider == "LINEAR"
+            ).first()
+            
+            if not existing_integration:
+                print(f"DEBUG: Creating new Linear integration for user_id={user_id}")
+                integration = Integration(
+                    user_id=user_id,
+                    provider="LINEAR",
+                    name=f"Linear ({user_name})",
+                    status="ACTIVE",
+                    access_token=encrypt_token(access_token),
+                    refresh_token=encrypt_token(refresh_token) if refresh_token else None,
+                    token_expiry=token_expiry,
+                    last_verified=datetime.utcnow(),
+                    config={
+                        "workspace_id": workspace.get("id"),
+                        "workspace_name": workspace_name,
+                        "user_id": verification.get("user_id"),
+                        "user_email": user_email
+                    }
+                )
+                
+                # Get first team for default
+                teams = linear_integration.get_teams()
+                if teams:
+                    integration.config["team_id"] = teams[0]["id"]
+                    integration.config["team_name"] = teams[0]["name"]
+                
+                db.add(integration)
+                db.commit()
+                db.refresh(integration)
+                print(f"DEBUG: Created integration {integration.id}")
+            else:
+                print(f"DEBUG: Updating existing integration {existing_integration.id}")
+                existing_integration.access_token = encrypt_token(access_token)
+                if refresh_token:
+                    existing_integration.refresh_token = encrypt_token(refresh_token)
+                existing_integration.token_expiry = token_expiry
+                existing_integration.status = "ACTIVE"
+                existing_integration.last_verified = datetime.utcnow()
+                existing_integration.name = f"Linear ({user_name})"
+                
+                if not existing_integration.config:
+                    existing_integration.config = {}
+                existing_integration.config["workspace_id"] = workspace.get("id")
+                existing_integration.config["workspace_name"] = workspace_name
+                existing_integration.config["user_id"] = verification.get("user_id")
+                existing_integration.config["user_email"] = user_email
+                
+                # Get first team for default if not set
+                if not existing_integration.config.get("team_id"):
+                    teams = linear_integration.get_teams()
+                    if teams:
+                        existing_integration.config["team_id"] = teams[0]["id"]
+                        existing_integration.config["team_name"] = teams[0]["name"]
+                
+                db.commit()
+                db.refresh(existing_integration)
+                print(f"DEBUG: Updated integration {existing_integration.id}")
+            
+            return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&linear_connected=true")
+        
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"ERROR: Unexpected error in linear_callback: {e}")
+            import traceback
+            traceback.print_exc()
+            error_msg = f"Internal server error: {str(e)}"
+            return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&error={error_msg}")
+    
+    @staticmethod
+    def linear_reconnect(request: Request, integration_id: int, db: Session):
+        """Handle reconnection by redirecting to Linear OAuth authorization page."""
+        user_id = get_user_id_from_request(request, db=db)
+        
+        # Verify the integration belongs to the authenticated user
+        integration = db.query(Integration).filter(
+            Integration.id == integration_id,
+            Integration.user_id == user_id,
+            Integration.provider == "LINEAR"
+        ).first()
+        
+        if not integration:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Linear integration with ID {integration_id} not found or does not belong to your account"
+            )
+        
+        # Mark as disconnected to indicate we're reconnecting
+        integration.status = "DISCONNECTED"
+        db.commit()
+        
+        # Redirect to Linear OAuth with reconnect flag
+        return IntegrationsController.linear_authorize(request, reconnect="true", integration_id=integration_id, db=db)
+    
+    @staticmethod
+    def linear_verify(integration_id: int, request: Request, db: Session):
+        """Verify Linear connection."""
+        user_id = get_user_id_from_request(request, db=db)
+        
+        integration = db.query(Integration).filter(
+            Integration.id == integration_id,
+            Integration.user_id == user_id,
+            Integration.provider == "LINEAR"
+        ).first()
+        
+        if not integration:
+            raise HTTPException(status_code=404, detail="Integration not found")
+        
+        try:
+            from src.integrations.linear.integration import LinearIntegration
+            linear_integration = LinearIntegration(integration_id=integration_id)
+            verification = linear_integration.verify_connection()
+            
+            if verification.get("status") == "verified":
+                integration.last_verified = datetime.utcnow()
+                integration.status = "ACTIVE"
+                db.commit()
+                return {"status": "verified", "message": "Linear connection verified"}
+            else:
+                integration.status = "DISCONNECTED"
+                db.commit()
+                return {"status": "error", "message": verification.get("message", "Verification failed")}
+        except Exception as e:
+            integration.status = "DISCONNECTED"
+            db.commit()
+            return {"status": "error", "message": str(e)}
+    
+    @staticmethod
+    def linear_get_teams(integration_id: int, request: Request, db: Session):
+        """Get available teams for Linear integration."""
+        user_id = get_user_id_from_request(request, db=db)
+        
+        integration = db.query(Integration).filter(
+            Integration.id == integration_id,
+            Integration.user_id == user_id,
+            Integration.provider == "LINEAR"
+        ).first()
+        
+        if not integration:
+            raise HTTPException(status_code=404, detail="Integration not found")
+        
+        try:
+            from src.integrations.linear.integration import LinearIntegration
+            linear_integration = LinearIntegration(integration_id=integration_id)
+            teams = linear_integration.get_teams()
+            
+            return {
+                "teams": teams,
+                "count": len(teams)
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to get teams: {str(e)}")
     
     @staticmethod
     def get_integration_config(integration_id: int, request: Request, db: Session):

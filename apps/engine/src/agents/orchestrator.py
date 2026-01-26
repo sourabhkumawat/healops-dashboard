@@ -75,6 +75,7 @@ from src.core.ai_analysis import get_incident_fingerprint
 from src.agents.definitions import create_all_enhanced_agents
 from src.tools.coding import set_coding_tools_context, CodingToolsContext
 from src.memory.models import AgentWorkspace
+from src.utils.db_retry import execute_with_retry
 
 # LLM Configuration
 api_key = os.getenv("OPENCOUNCIL_API")
@@ -144,25 +145,37 @@ def run_robust_crew(
     
     # Set up WebSocket broadcasting (lazy import to avoid circular dependency)
     def broadcast_callback(incident_id: int, event: Dict[str, Any]):
-        """Broadcast event to WebSocket clients."""
+        """Broadcast event to WebSocket clients using thread-safe async broadcasting."""
         try:
-            from main import agent_event_manager
+            from main import agent_event_manager, get_main_event_loop
             import asyncio
+            
+            # Get the main event loop (thread-safe)
+            main_loop = get_main_event_loop()
+            
+            if main_loop is None:
+                # No main event loop available, skip broadcasting
+                return
+            
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # If loop is running, schedule the coroutine
-                    asyncio.create_task(agent_event_manager.broadcast(incident_id, event))
-                else:
-                    # If no loop, run in new thread
-                    loop.run_until_complete(agent_event_manager.broadcast(incident_id, event))
+                # Use run_coroutine_threadsafe for thread-safe async execution
+                # This works from any thread, including ThreadPoolExecutor threads
+                future = asyncio.run_coroutine_threadsafe(
+                    agent_event_manager.broadcast(incident_id, event),
+                    main_loop
+                )
+                # Don't wait for completion to avoid blocking
+                # The future will be scheduled on the main event loop
+            except RuntimeError as e:
+                # Event loop is closed or not running
+                logger.debug(f"Event loop not available for broadcasting: {e}")
             except Exception as e:
-                print(f"Warning: Failed to broadcast event: {e}")
+                logger.warning(f"Failed to broadcast event: {e}")
         except ImportError:
             # WebSocket manager not available (e.g., during testing)
             pass
         except Exception as e:
-            print(f"Warning: WebSocket broadcasting not available: {e}")
+            logger.debug(f"WebSocket broadcasting not available: {e}")
     
     event_stream.set_websocket_broadcast(broadcast_callback)
     
@@ -1819,6 +1832,8 @@ def _update_agent_employee_status(
     All errors are logged but do not raise exceptions to ensure the
     main workflow continues.
     
+    Uses retry logic with exponential backoff to handle database connection failures.
+    
     Args:
         db: Database session for updating AgentEmployee records
         crewai_role: The crewai_role to identify the agent
@@ -1830,7 +1845,8 @@ def _update_agent_employee_status(
         This function is designed to be non-blocking. Slack posting failures
         are logged but do not affect the database update.
     """
-    try:
+    def _update_operation():
+        """Inner function that performs the actual database update."""
         agent_employee = db.query(AgentEmployee).filter(
             AgentEmployee.crewai_role == crewai_role
         ).first()
@@ -1876,14 +1892,24 @@ def _update_agent_employee_status(
                 "task_completed": task_completed is not None
             }
         )
-            
+    
+    try:
+        # Use retry logic for database operations
+        execute_with_retry(
+            db=db,
+            operation=_update_operation,
+            operation_name=f"update_agent_employee_status({crewai_role})"
+        )
     except Exception as e:
         logger.exception(
-            "Failed to update AgentEmployee status",
+            "Failed to update AgentEmployee status after retries",
             extra={"crewai_role": crewai_role, "status": status},
             exc_info=e
         )
-        db.rollback()
+        try:
+            db.rollback()
+        except Exception:
+            pass  # Ignore rollback errors
 
 
 

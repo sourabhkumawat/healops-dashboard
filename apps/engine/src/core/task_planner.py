@@ -401,7 +401,47 @@ Return ONLY the JSON array.
                 raise AttributeError("LLM object does not have 'call' or 'invoke' method. Cannot replan.")
             
             plan_json = self._extract_json(response_text)
-            new_plan_data = json.loads(plan_json)
+            
+            # Validate and fix JSON before parsing
+            try:
+                # Try to parse as-is first
+                new_plan_data = json.loads(plan_json)
+            except json.JSONDecodeError as json_error:
+                # If JSON parsing fails, try to fix common issues
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"JSON parsing error in replanning: {json_error}. Attempting to fix...")
+                
+                # Try to fix invalid escape sequences
+                try:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    # Replace invalid escape sequences (e.g., \ followed by non-escape char)
+                    import re
+                    # Fix common invalid escapes: \ followed by non-escape character
+                    fixed_json = re.sub(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', plan_json)
+                    new_plan_data = json.loads(fixed_json)
+                    logger.info("Successfully fixed JSON escape sequences")
+                except (json.JSONDecodeError, Exception) as fix_error:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(f"Failed to fix JSON: {fix_error}. Original error: {json_error}")
+                    # Try to extract valid JSON array using more lenient parsing
+                    try:
+                        # Use ast.literal_eval as fallback for malformed JSON
+                        import ast
+                        new_plan_data = ast.literal_eval(plan_json)
+                        if not isinstance(new_plan_data, list):
+                            raise ValueError("Parsed data is not a list")
+                    except Exception as ast_error:
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.error(f"All JSON parsing attempts failed: {ast_error}")
+                        raise ValueError(
+                            f"Failed to parse replanning response as JSON. "
+                            f"Original error: {json_error}. "
+                            f"Response preview: {response_text[:200]}..."
+                        )
             
             # Convert to plan format
             new_plan = []
@@ -427,8 +467,16 @@ Return ONLY the JSON array.
             return self.plan
             
         except Exception as e:
-            print(f"Error during replanning: {e}")
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.exception(
+                f"Error during replanning: {e}",
+                extra={"reason": reason, "replan_count": self.replan_count}
+            )
             # Keep current plan but mark as needing attention
+            # Log the response text for debugging (truncated)
+            if 'response_text' in locals():
+                logger.debug(f"Replanning response (first 500 chars): {response_text[:500]}")
             return self.plan
     
     def update_plan(self, step_number: int, updates: Dict[str, Any]):

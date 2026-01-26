@@ -5,6 +5,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.database.database import SessionLocal
 from src.database.models import LogEntry, Incident, IncidentSeverity, IntegrationStatus, IntegrationStatusEnum, Integration
+from src.core.ai_analysis import generate_incident_title_and_description, build_enhanced_linear_description
 from sqlalchemy import func
 from datetime import datetime, timedelta
 import json
@@ -241,9 +242,12 @@ async def process_log_entry(log_id: int):
                         if repo_name:
                             print(f"Auto-assigned repo_name {repo_name} to new incident")
                 
+                # Generate meaningful title and description from error logs
+                title, description = generate_incident_title_and_description(log, log.service_name)
+                
                 incident = Incident(
-                    title=f"Detected {log.severity} in {log.service_name}",
-                    description=log.message[:200], # Summary
+                    title=title,
+                    description=description,
                     severity=IncidentSeverity.HIGH if log.severity == "CRITICAL" else IncidentSeverity.MEDIUM,
                     service_name=log.service_name,
                     source=log.source,
@@ -263,6 +267,63 @@ async def process_log_entry(log_id: int):
                 db.commit()
                 
                 print(f"Incident created: {incident.id}")
+
+                # Create Linear issue if Linear integration exists
+                try:
+                    from src.utils.integrations import get_linear_integration_for_user
+                    from src.integrations.linear.integration import LinearIntegration
+                    
+                    linear_integration_obj = get_linear_integration_for_user(db, log.user_id)
+                    if linear_integration_obj:
+                        try:
+                            linear_integration = LinearIntegration(integration_id=linear_integration_obj.id)
+                            
+                            # Get team_id from integration config or use first available team
+                            team_id = None
+                            if linear_integration_obj.config:
+                                team_id = linear_integration_obj.config.get("team_id")
+                            
+                            # Get related logs for enhanced description
+                            related_logs = []
+                            if incident.log_ids:
+                                related_logs = db.query(LogEntry).filter(
+                                    LogEntry.id.in_(incident.log_ids)
+                                ).order_by(LogEntry.timestamp.desc()).limit(50).all()
+                            
+                            # Build enhanced description with trace/span info
+                            enhanced_description = build_enhanced_linear_description(
+                                incident=incident,
+                                logs=related_logs,
+                                db=db,
+                                include_trace=True
+                            )
+                            
+                            # Create Linear issue with enhanced description
+                            linear_issue = linear_integration.create_issue(
+                                title=f"Incident: {incident.title}",
+                                description=enhanced_description,
+                                team_id=team_id,
+                                priority=0 if incident.severity == "CRITICAL" else (1 if incident.severity == "HIGH" else 2)
+                            )
+                            
+                            # Store Linear issue info in incident metadata
+                            if not incident.metadata_json:
+                                incident.metadata_json = {}
+                            incident.metadata_json["linear_issue"] = {
+                                "id": linear_issue["id"],
+                                "identifier": linear_issue["identifier"],
+                                "url": linear_issue["url"],
+                                "title": linear_issue["title"]
+                            }
+                            db.commit()
+                            
+                            print(f"✅ Created Linear issue {linear_issue['identifier']} for incident {incident.id}")
+                        except Exception as e:
+                            print(f"⚠️  Failed to create Linear issue for incident {incident.id}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                except Exception as e:
+                    print(f"⚠️  Error checking for Linear integration: {e}")
                 
                 # Automatically trigger analysis for new incidents
                 print(f"🤖 Auto-triggering analysis for new incident {incident.id}")

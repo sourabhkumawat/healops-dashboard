@@ -375,6 +375,31 @@ class IncidentsController:
         db.commit()
         db.refresh(incident)
         
+        # Sync Linear ticket status if status changed
+        # This is optional - Linear integration may not be available for all clients
+        if "status" in update_data and old_status != incident.status:
+            try:
+                from src.utils.integrations import sync_linear_ticket_status, sync_linear_ticket_resolution
+                
+                # Update Linear ticket state based on incident status
+                # These functions handle cases where Linear is not configured gracefully
+                sync_linear_ticket_status(
+                    incident=incident,
+                    old_status=old_status,
+                    new_status=incident.status,
+                    db=db
+                )
+                
+                # If resolved, also update with resolution details
+                if incident.status == "RESOLVED":
+                    sync_linear_ticket_resolution(incident=incident, db=db)
+            except Exception as e:
+                # Log error but don't fail the request
+                # This catch is for unexpected errors in the sync functions themselves
+                print(f"⚠️  Unexpected error in Linear sync for incident {incident.id}: {e}")
+                import traceback
+                traceback.print_exc()
+        
         # Send email notification if incident was just resolved
         # Check both old_status and new status to ensure we only send email on actual transition to RESOLVED
         status_changed_to_resolved = (

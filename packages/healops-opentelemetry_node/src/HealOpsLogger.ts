@@ -157,7 +157,15 @@ export class HealOpsLogger {
 
     constructor(config: HealOpsLoggerConfig) {
         this.config = config;
-        this.endpoint = config.endpoint || 'https://engine.healops.ai';
+        // Normalize endpoint: remove trailing slash and ensure it's a valid URL
+        const rawEndpoint = config.endpoint || 'https://engine.healops.ai';
+        this.endpoint = rawEndpoint.trim().replace(/\/+$/, ''); // Remove trailing slashes
+        
+        // Validate endpoint is not just a path (must be a full URL)
+        if (this.endpoint.startsWith('/')) {
+            console.warn(`HealOps Logger: Invalid endpoint "${this.endpoint}". Endpoint must be a full URL (e.g., "http://localhost:8000"), not a path.`);
+            this.endpoint = 'https://engine.healops.ai'; // Fallback to default
+        }
 
         // Auto-detect release from meta tag if not provided (browser only)
         if (!this.config.release && typeof document !== 'undefined') {
@@ -1026,7 +1034,14 @@ export class HealOpsLogger {
      * Send a batch of logs to the backend
      */
     private async sendBatchLogs(logs: LogPayload[]): Promise<void> {
+        // Ensure proper URL construction (endpoint should not have trailing slash)
         const url = `${this.endpoint}/ingest/logs/batch`;
+        
+        // Validate URL is absolute (not just a path)
+        if (!url.startsWith('http://') && !url.startsWith('https://')) {
+            console.error(`HealOps Logger: Invalid URL "${url}". URL must be absolute (start with http:// or https://).`);
+            throw new Error(`Invalid endpoint URL: ${url}`);
+        }
 
         try {
             const response = await axios.post(
@@ -1037,7 +1052,9 @@ export class HealOpsLogger {
                         'X-HealOps-Key': this.config.apiKey,
                         'Content-Type': 'application/json'
                     },
-                    timeout: 5000 // Longer timeout for batches
+                    timeout: 5000, // Longer timeout for batches
+                    maxRedirects: 0, // Prevent redirects that might cause issues
+                    validateStatus: (status) => status < 500 // Don't throw on 4xx errors, let us handle them
                 }
             );
 
@@ -1070,7 +1087,14 @@ export class HealOpsLogger {
      * Send a single log to the backend (legacy/fallback method)
      */
     private async sendSingleLog(payload: LogPayload): Promise<void> {
+        // Ensure proper URL construction (endpoint should not have trailing slash)
         const url = `${this.endpoint}/ingest/logs`;
+        
+        // Validate URL is absolute (not just a path)
+        if (!url.startsWith('http://') && !url.startsWith('https://')) {
+            console.error(`HealOps Logger: Invalid URL "${url}". URL must be absolute (start with http:// or https://).`);
+            throw new Error(`Invalid endpoint URL: ${url}`);
+        }
 
         try {
             const response = await axios.post(url, payload, {
@@ -1078,7 +1102,9 @@ export class HealOpsLogger {
                     'X-HealOps-Key': this.config.apiKey,
                     'Content-Type': 'application/json'
                 },
-                timeout: 3000
+                timeout: 3000,
+                maxRedirects: 0, // Prevent redirects that might cause issues
+                validateStatus: (status) => status < 500 // Don't throw on 4xx errors, let us handle them
             });
 
             if (

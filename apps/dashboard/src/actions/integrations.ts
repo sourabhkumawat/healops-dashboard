@@ -60,10 +60,16 @@ export async function connectGithub(accessToken: string) {
 export async function listProviders() {
     try {
         const response = await fetch(`${API_BASE}/integrations/providers`);
+        if (!response.ok) {
+            console.error('Failed to fetch providers:', response.status, response.statusText);
+            return { providers: [] };
+        }
         const data = await response.json();
+        console.log('Providers fetched:', data);
         return data;
     } catch (error) {
-        return {};
+        console.error('Error fetching providers:', error);
+        return { providers: [] };
     }
 }
 
@@ -391,5 +397,74 @@ export async function reconnectGitHubIntegration(integrationId: number) {
     } catch (error) {
         console.error('Error reconnecting GitHub integration:', error);
         return { error: 'Failed to reconnect GitHub integration' };
+    }
+}
+
+export async function initiateLinearOAuth(reconnect?: boolean, integrationId?: number) {
+    try {
+        let apiUrl = `${API_BASE}/integrations/linear/authorize`;
+        const params = new URLSearchParams();
+        if (reconnect) params.append('reconnect', 'true');
+        if (integrationId) params.append('integration_id', integrationId.toString());
+        if (params.toString()) apiUrl += `?${params.toString()}`;
+        
+        console.log('Initiating Linear OAuth:', apiUrl);
+        const headers = await getAuthHeaders();
+        
+        // Make authenticated request - backend will return a redirect
+        const response = await fetchWithAuth(apiUrl, {
+            method: 'GET',
+            headers,
+            redirect: 'manual' // Don't follow redirect, we want the Location header
+        });
+        
+        console.log('Linear OAuth response status:', response.status);
+        
+        if (response.status === 302 || response.status === 307 || response.status === 308) {
+            const location = response.headers.get('Location');
+            if (location) {
+                return { redirectUrl: location };
+            }
+        }
+        
+        // If not a redirect, something went wrong
+        const errorText = await response.text();
+        console.error('Failed to initiate Linear OAuth:', response.status, errorText);
+        return { error: errorText || 'Failed to initiate Linear OAuth' };
+    } catch (error) {
+        console.error('Error initiating Linear OAuth:', error);
+        return { error: 'Failed to initiate Linear OAuth' };
+    }
+}
+
+export async function reconnectLinearIntegration(integrationId: number) {
+    try {
+        const apiUrl = `${API_BASE}/integrations/linear/reconnect/${integrationId}`;
+        console.log('Reconnecting Linear integration:', apiUrl);
+        const headers = await getAuthHeaders();
+        
+        // Make authenticated request - backend will return a redirect
+        const response = await fetchWithAuth(apiUrl, {
+            method: 'POST',
+            headers,
+            redirect: 'manual' // Don't follow redirect, we want the Location header
+        });
+        
+        console.log('Reconnect response status:', response.status);
+        
+        if (response.status === 302 || response.status === 307 || response.status === 308) {
+            const location = response.headers.get('Location');
+            if (location) {
+                return { redirectUrl: location };
+            }
+        }
+        
+        // If not a redirect, something went wrong
+        const errorText = await response.text();
+        console.error('Failed to reconnect:', response.status, errorText);
+        return { error: errorText || 'Failed to reconnect Linear integration' };
+    } catch (error) {
+        console.error('Error reconnecting Linear integration:', error);
+        return { error: 'Failed to reconnect Linear integration' };
     }
 }

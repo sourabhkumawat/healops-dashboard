@@ -34,19 +34,50 @@ class RedpandaProducer:
     def _connect(self):
         """Initialize Redpanda producer with error handling."""
         try:
-            self.producer = KafkaProducer(
-                bootstrap_servers=[REDPANDA_BROKERS],
-                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                key_serializer=lambda k: k.encode('utf-8') if k else None,
-                retries=3,
-                retry_backoff_ms=100,
-                request_timeout_ms=10000,
-                acks='all',  # Wait for all replicas to acknowledge
-                batch_size=16384,
-                linger_ms=10,  # Small batching for low latency
-                compression_type='snappy'
-            )
-            logger.info(f"✓ Redpanda producer connected to {REDPANDA_BROKERS}")
+            # Try compression types in order of preference: snappy -> gzip -> none
+            compression_types = ['snappy', 'gzip', None]
+            producer = None
+            compression_used = None
+            
+            for compression_type in compression_types:
+                try:
+                    producer = KafkaProducer(
+                        bootstrap_servers=[REDPANDA_BROKERS],
+                        value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                        key_serializer=lambda k: k.encode('utf-8') if k else None,
+                        retries=3,
+                        retry_backoff_ms=100,
+                        request_timeout_ms=10000,
+                        acks='all',  # Wait for all replicas to acknowledge
+                        batch_size=16384,
+                        linger_ms=10,  # Small batching for low latency
+                        compression_type=compression_type
+                    )
+                    compression_used = compression_type or 'none'
+                    logger.info(f"✓ Redpanda producer connected to {REDPANDA_BROKERS} (compression: {compression_used})")
+                    break
+                except Exception as compression_error:
+                    error_msg = str(compression_error).lower()
+                    # Check if this is a compression-related error
+                    is_compression_error = (
+                        'snappy' in error_msg or 
+                        'compression' in error_msg or
+                        'codec' in error_msg
+                    )
+                    
+                    # If this is the last compression type (None), we must raise
+                    if compression_type is None:
+                        raise
+                    
+                    # If it's a compression error, try next compression type
+                    if is_compression_error:
+                        logger.debug(f"Compression type '{compression_type}' not available: {compression_error}, trying next option...")
+                        continue
+                    
+                    # If it's a different error (e.g., connection), raise it
+                    raise
+            
+            self.producer = producer
             self._connect_retries = 0
         except NoBrokersAvailable as e:
             self._connect_retries += 1
@@ -181,7 +212,11 @@ class RedpandaConsumer:
                 enable_auto_commit=True,
                 auto_commit_interval_ms=1000,
                 max_poll_records=10,  # Process in small batches for responsiveness
-                consumer_timeout_ms=1000  # Exit gracefully if no messages
+                consumer_timeout_ms=1000,  # Exit gracefully if no messages
+                # Heartbeat and session configuration to prevent expiration warnings
+                session_timeout_ms=30000,  # 30 seconds - how long broker waits for heartbeat
+                heartbeat_interval_ms=10000,  # 10 seconds - send heartbeat every 10s (1/3 of session timeout)
+                max_poll_interval_ms=300000,  # 5 minutes - max time between poll() calls
             )
             logger.info(f"✓ Redpanda consumer connected to topic '{self.topic}' with group '{self.group_id}'")
             self._connect_retries = 0
@@ -231,11 +266,18 @@ class RedpandaConsumer:
                             break
 
                         try:
+                            # Log message consumption for debugging
+                            logger.debug(f"Consuming message from topic '{self.topic}', offset {message.offset}, key: {message.key}")
+                            
                             # Process message
                             self.message_handler(message.value)
+                            
+                            logger.debug(f"✓ Successfully processed message from offset {message.offset}")
 
                         except Exception as e:
                             logger.error(f"✗ Error processing message from offset {message.offset}: {e}")
+                            import traceback
+                            logger.error(f"Traceback: {traceback.format_exc()}")
                             # Continue processing other messages
                             continue
 
@@ -290,19 +332,50 @@ class RedpandaService:
                 # Remove Redpanda metadata before broadcasting
                 clean_log_data = {k: v for k, v in log_data.items()
                                 if not k.startswith('redpanda_') and k != 'topic'}
-                asyncio.run_coroutine_threadsafe(
-                    self.websocket_broadcaster(clean_log_data),
-                    asyncio.get_event_loop()
-                )
+                
+                # Get the main event loop for thread-safe coroutine execution
+                try:
+                    from main import get_main_event_loop
+                    main_loop = get_main_event_loop()
+                    
+                    if main_loop is None:
+                        logger.warning("Main event loop not available, skipping WebSocket broadcast")
+                        return
+                    
+                    # Use run_coroutine_threadsafe to schedule the coroutine on the main event loop
+                    # This works from any thread, including consumer threads
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.websocket_broadcaster(clean_log_data),
+                        main_loop
+                    )
+                    # Don't wait for completion to avoid blocking the consumer thread
+                except ImportError:
+                    # get_main_event_loop not available, try fallback
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.create_task(self.websocket_broadcaster(clean_log_data))
+                        else:
+                            loop.run_until_complete(self.websocket_broadcaster(clean_log_data))
+                    except RuntimeError:
+                        logger.warning("No event loop available, skipping WebSocket broadcast")
         except Exception as e:
             logger.error(f"✗ Error broadcasting log message: {e}")
 
     def start_consumers(self):
         """Start all configured consumers."""
+        started = []
         if self.log_consumer:
             self.log_consumer.start_consuming()
+            started.append("log_consumer")
         if self.incident_consumer:
             self.incident_consumer.start_consuming()
+            started.append("incident_consumer")
+        
+        if started:
+            logger.info(f"✓ Started Redpanda consumers: {', '.join(started)}")
+        else:
+            logger.warning("⚠ No Redpanda consumers configured to start")
 
     def stop_consumers(self):
         """Stop all consumers."""

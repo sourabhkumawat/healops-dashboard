@@ -111,7 +111,7 @@ class LogsController:
                     resolved_metadata = log.metadata
                     if log.metadata and isinstance(log.metadata, dict):
                         try:
-                            from sourcemap_resolver import resolve_metadata_with_sourcemaps
+                            from src.tools.sourcemap import resolve_metadata_with_sourcemaps
                             # Use release/environment from top-level request, fallback to metadata
                             release = log.release or log.metadata.get('release') or log.metadata.get('releaseId') or None
                             environment = log.environment or log.metadata.get('environment') or log.metadata.get('env') or "production"
@@ -123,9 +123,16 @@ class LogsController:
                                 release=release,
                                 environment=environment
                             )
+                        except ImportError:
+                            # Source map resolution not available - this is optional
+                            # Silently continue without resolution
+                            resolved_metadata = log.metadata
                         except Exception as sm_error:
                             # Don't fail log ingestion if source map resolution fails
-                            print(f"Warning: Source map resolution failed: {sm_error}")
+                            # Only log at debug level to avoid noise
+                            import logging
+                            logger = logging.getLogger(__name__)
+                            logger.debug(f"Source map resolution failed (non-critical): {sm_error}")
                             resolved_metadata = log.metadata
                     
                     # Parse timestamp and ensure partition exists
@@ -268,7 +275,7 @@ class LogsController:
                                 resolved_metadata = log.metadata
                                 if log.metadata and isinstance(log.metadata, dict):
                                     try:
-                                        from sourcemap_resolver import resolve_metadata_with_sourcemaps
+                                        from src.tools.sourcemap import resolve_metadata_with_sourcemaps
                                         # Use release/environment from top-level request, fallback to metadata
                                         release = log.release or log.metadata.get('release') or log.metadata.get('releaseId') or None
                                         environment = log.environment or log.metadata.get('environment') or log.metadata.get('env') or "production"
@@ -280,9 +287,16 @@ class LogsController:
                                             release=release,
                                             environment=environment
                                         )
+                                    except ImportError:
+                                        # Source map resolution not available - this is optional
+                                        # Silently continue without resolution
+                                        resolved_metadata = log.metadata
                                     except Exception as sm_error:
                                         # Don't fail log ingestion if source map resolution fails
-                                        print(f"Warning: Source map resolution failed: {sm_error}")
+                                        # Only log at debug level to avoid noise
+                                        import logging
+                                        logger = logging.getLogger(__name__)
+                                        logger.debug(f"Source map resolution failed (non-critical): {sm_error}")
                                         resolved_metadata = log.metadata
                                 
                                 # Ensure partition exists before inserting

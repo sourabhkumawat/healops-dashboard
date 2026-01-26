@@ -9,7 +9,7 @@ import {
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Loader2 } from 'lucide-react';
+import { Loader2, ExternalLink } from 'lucide-react';
 import Link from 'next/link';
 
 export interface Incident {
@@ -75,9 +75,32 @@ export function IncidentTable({
                         </TableRow>
                     </TableHeader>
                     <TableBody>
-                        {incidents.map((incident) => (
+                        {incidents.map((incident) => {
+                            // Extract Linear issue info from metadata_json
+                            const linearIssue = incident.metadata_json && 
+                                typeof incident.metadata_json === 'object' && 
+                                'linear_issue' in incident.metadata_json
+                                ? (incident.metadata_json as any).linear_issue
+                                : null;
+                            
+                            return (
                             <TableRow key={incident.id}>
-                                <TableCell>{incident.title}</TableCell>
+                                <TableCell>
+                                    <div className="flex flex-col gap-1">
+                                        <span>{incident.title}</span>
+                                        {linearIssue && (
+                                            <a
+                                                href={linearIssue.url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1"
+                                            >
+                                                <ExternalLink className="h-3 w-3" />
+                                                {linearIssue.identifier}
+                                            </a>
+                                        )}
+                                    </div>
+                                </TableCell>
                                 <TableCell>{incident.service_name}</TableCell>
                                 <TableCell className="uppercase text-xs font-mono">
                                     {incident.source || 'N/A'}
@@ -117,7 +140,8 @@ export function IncidentTable({
                                     </Link>
                                 </TableCell>
                             </TableRow>
-                        ))}
+                            );
+                        })}
                     </TableBody>
                 </Table>
             </div>
