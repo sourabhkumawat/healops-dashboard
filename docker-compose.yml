@@ -1,20 +1,6 @@
 version: "3.8"
 
 services:
-  dashboard:
-    build:
-      context: ./apps/dashboard
-      dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./apps/dashboard:/app
-      - /app/node_modules
-    environment:
-      - NODE_ENV=development
-    depends_on:
-      - engine
-
   engine:
     build:
       context: ./apps/engine
@@ -24,52 +10,11 @@ services:
     volumes:
       - ./apps/engine:/app
     environment:
-      - DATABASE_URL=postgresql://postgres:Bkdo1J4YWoe912UP@db.hbciocbdafaplqfexqjj.supabase.co:5432/postgres
-      - REDIS_URL=redis://redis:6379/0
-    # Memory limits optimized for 2 vCPUs and 4GB RAM total
+      - DATABASE_URL=postgresql://user:password@host.docker.internal:5432/healops
+    # Memory limits optimized for engine service
     deploy:
       resources:
         limits:
-          memory: 2.5G # Reserve 2.5GB for engine (leaves 1.5GB for other services)
+          memory: 8G
         reservations:
-          memory: 1.5G
-    depends_on:
-      - db
-      - redis
-
-  db:
-    image: postgres:15-alpine
-    ports:
-      - "5432:5432"
-    environment:
-      - POSTGRES_USER=user
-      - POSTGRES_PASSWORD=password
-      - POSTGRES_DB=healops
-      # PostgreSQL memory optimizations for 4GB RAM
-      - POSTGRES_SHARED_BUFFERS=256MB
-      - POSTGRES_EFFECTIVE_CACHE_SIZE=512MB
-      - POSTGRES_MAINTENANCE_WORK_MEM=64MB
-      - POSTGRES_WORK_MEM=16MB
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    deploy:
-      resources:
-        limits:
-          memory: 1G # Limit PostgreSQL to 1GB
-        reservations:
-          memory: 512M
-
-  redis:
-    image: redis:alpine
-    ports:
-      - "6379:6379"
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
-    deploy:
-      resources:
-        limits:
-          memory: 256M # Limit Redis to 256MB
-        reservations:
-          memory: 128M
-
-volumes:
-  postgres_data:
+          memory: 2G
