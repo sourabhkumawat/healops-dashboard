@@ -157,8 +157,8 @@ export default function SignupPage() {
                             />
                         </div>
                         <div className="mt-6">
-                            <SubmitButton disabled={isLoading}>
-                                {isLoading ? 'Signing Up...' : 'Sign Up'}
+                            <SubmitButton disabled={isLoading} isLoading={isLoading} loadingText="Signing Up...">
+                                Sign Up
                             </SubmitButton>
                         </div>
                     </form>

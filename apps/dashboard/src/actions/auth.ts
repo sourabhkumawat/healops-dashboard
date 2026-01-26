@@ -46,7 +46,11 @@ export async function loginAction(prevState: any, formData: FormData) {
         });
 
         // Return success and let the client handle redirect
-        return { success: true, redirect: '/' };
+        return {
+            success: true,
+            redirect: '/',
+            access_token: data.access_token
+        };
     } catch (error) {
         console.error('Login error:', error);
         return { message: 'An unexpected error occurred' };
@@ -100,21 +104,42 @@ export interface CurrentUser {
 
 export async function getCurrentUser(): Promise<CurrentUser | null> {
     try {
+        console.log('🔍 Fetching current user...');
         const { fetchWithAuth } = await import('@/lib/api-client');
         const response = await fetchWithAuth(`${API_BASE}/auth/me`);
 
         if (!response.ok) {
             if (response.status === 401) {
-                // User is not authenticated
-                return null;
+                console.log(
+                    '❌ Unauthorized - clearing token and redirecting to login'
+                );
+                // User is not authenticated - clear token and redirect
+                (await cookies()).delete('auth_token');
+                redirect('/login');
             }
-            console.error('Failed to fetch current user:', response.status);
+            console.error('❌ Failed to fetch current user:', response.status);
             return null;
         }
 
-        return await response.json();
+        const user = await response.json();
+        console.log('✅ Successfully fetched user:', user.email);
+        return user;
     } catch (error) {
-        console.error('Error fetching current user:', error);
+        console.error('❌ Error fetching current user:', error);
+
+        // If error message indicates auth expiry or timeout, redirect to login
+        if (error instanceof Error) {
+            if (
+                error.message.includes('Authentication expired') ||
+                error.message.includes('Request timeout')
+            ) {
+                console.log('🔄 Redirecting to login due to:', error.message);
+                (await cookies()).delete('auth_token');
+                redirect('/login');
+            }
+        }
+
+        // For other errors, return null to allow the app to handle gracefully
         return null;
     }
 }

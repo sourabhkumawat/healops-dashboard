@@ -70,19 +70,43 @@ export function LiveLogs({ initialLogs = [] }: LiveLogsProps) {
     const wsRef = useRef<WebSocket | null>(null);
     const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const reconnectAttemptsRef = useRef(0);
+    const isUnmountingRef = useRef(false);
+    const isConnectingRef = useRef(false);
     const maxReconnectAttempts = 10;
     const baseReconnectDelay = 1000; // 1 second
 
     const connectWebSocket = () => {
+        // Don't connect if component is unmounting or already connecting
+        if (isUnmountingRef.current || isConnectingRef.current) {
+            console.log('Skipping WebSocket connection:', {
+                isUnmounting: isUnmountingRef.current,
+                isConnecting: isConnectingRef.current
+            });
+            return;
+        }
+
+        // Don't connect if there's already an active connection
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            console.log('WebSocket already connected, skipping');
+            return;
+        }
+
+        // Mark as connecting
+        isConnectingRef.current = true;
+
         // Clear any existing reconnection timeout
         if (reconnectTimeoutRef.current) {
             clearTimeout(reconnectTimeoutRef.current);
             reconnectTimeoutRef.current = null;
         }
 
-        // Close existing connection if any
-        if (wsRef.current) {
-            wsRef.current.close();
+        // Close existing connection if any (but not OPEN)
+        if (wsRef.current && wsRef.current.readyState !== WebSocket.OPEN) {
+            try {
+                wsRef.current.close(1000, 'Reconnecting');
+            } catch (e) {
+                // Ignore errors when closing
+            }
             wsRef.current = null;
         }
 
@@ -113,6 +137,7 @@ export function LiveLogs({ initialLogs = [] }: LiveLogsProps) {
             console.log('Connected to Live Logs WebSocket');
             setConnectionStatus('connected');
             reconnectAttemptsRef.current = 0; // Reset on successful connection
+            isConnectingRef.current = false; // Mark connection as complete
         };
 
         ws.onmessage = (event) => {
@@ -142,6 +167,8 @@ export function LiveLogs({ initialLogs = [] }: LiveLogsProps) {
         };
 
         ws.onerror = (error) => {
+            isConnectingRef.current = false; // Mark connection attempt as complete (failed)
+            
             const readyState = ws.readyState;
             const readyStateMap: Record<number, string> = {
                 0: 'CONNECTING',
@@ -191,40 +218,86 @@ export function LiveLogs({ initialLogs = [] }: LiveLogsProps) {
         };
 
         ws.onclose = (event) => {
+            isConnectingRef.current = false; // Mark connection as closed
+            
             console.log('Disconnected from Live Logs WebSocket', {
                 code: event.code,
                 reason: event.reason,
-                wasClean: event.wasClean
+                wasClean: event.wasClean,
+                isUnmounting: isUnmountingRef.current
             });
             setConnectionStatus('disconnected');
             
-            // Attempt to reconnect if not a clean close and we haven't exceeded max attempts
-            if (reconnectAttemptsRef.current < maxReconnectAttempts) {
+            // Don't reconnect if:
+            // 1. Component is unmounting
+            // 2. It was a clean close (code 1000) and not a manual reconnection
+            // 3. We've exceeded max attempts
+            // 4. Reason indicates component cleanup
+            const isCleanClose = event.code === 1000;
+            const isComponentCleanup = event.reason === 'Component unmounting' || event.reason === 'Component cleanup';
+            const shouldReconnect = 
+                !isUnmountingRef.current &&
+                !isComponentCleanup &&
+                reconnectAttemptsRef.current < maxReconnectAttempts &&
+                (!isCleanClose || event.reason === 'Reconnecting'); // Only reconnect on clean close if it was our own reconnection
+            
+            if (shouldReconnect) {
                 const delay = baseReconnectDelay * Math.pow(2, reconnectAttemptsRef.current);
                 reconnectAttemptsRef.current += 1;
                 
                 console.log(`Scheduling reconnection attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts} in ${delay}ms`);
                 
                 reconnectTimeoutRef.current = setTimeout(() => {
-                    connectWebSocket();
+                    if (!isUnmountingRef.current && !isConnectingRef.current) {
+                        connectWebSocket();
+                    }
                 }, delay);
-            } else {
+            } else if (reconnectAttemptsRef.current >= maxReconnectAttempts) {
                 console.error('Max reconnection attempts reached. Please refresh the page.');
+            } else if (isUnmountingRef.current || isComponentCleanup) {
+                console.log('Component unmounting or cleanup, not reconnecting');
+            } else {
+                console.log('Clean close detected, not reconnecting');
             }
         };
     };
 
     useEffect(() => {
-        connectWebSocket();
+        // Reset flags on mount
+        isUnmountingRef.current = false;
+        isConnectingRef.current = false;
+        
+        // Small delay to prevent React Strict Mode double-mount issues
+        const connectTimer = setTimeout(() => {
+            if (!isUnmountingRef.current) {
+                connectWebSocket();
+            }
+        }, 100);
 
         return () => {
+            // Mark as unmounting to prevent reconnections
+            isUnmountingRef.current = true;
+            isConnectingRef.current = false;
+            
+            // Clear connection timer
+            clearTimeout(connectTimer);
+            
             // Clear reconnection timeout
             if (reconnectTimeoutRef.current) {
                 clearTimeout(reconnectTimeoutRef.current);
+                reconnectTimeoutRef.current = null;
             }
+            
             // Close WebSocket connection
             if (wsRef.current) {
-                wsRef.current.close();
+                try {
+                    // Only close if not already closed
+                    if (wsRef.current.readyState !== WebSocket.CLOSED) {
+                        wsRef.current.close(1000, 'Component unmounting');
+                    }
+                } catch (e) {
+                    // Ignore errors when closing
+                }
                 wsRef.current = null;
             }
         };

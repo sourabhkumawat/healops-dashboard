@@ -67,16 +67,22 @@ class IncidentsController:
             if service:
                 query = query.filter(Incident.service_name == service)
 
-            # Get total count before pagination
-            total_count = query.count()
-
-            # Apply pagination if provided
-            if page is not None and page_size is not None:
+            # Handle pagination - if page_size is provided, default page to 1
+            # This prevents the bug where page_size alone would return all incidents
+            use_pagination = page_size is not None
+            if use_pagination:
+                # Default page to 1 if not provided
+                if page is None:
+                    page = 1
+                
                 # Validate pagination parameters
                 if page < 1:
                     raise HTTPException(status_code=400, detail="Page must be >= 1")
                 if page_size < 1 or page_size > 100:
                     raise HTTPException(status_code=400, detail="Page size must be between 1 and 100")
+                
+                # Get total count for pagination metadata (only when pagination is used)
+                total_count = query.count()
                 
                 offset = (page - 1) * page_size
                 incidents = query.order_by(Incident.last_seen_at.desc()).offset(offset).limit(page_size).all()
@@ -93,6 +99,7 @@ class IncidentsController:
                 }
             else:
                 # Return all incidents if pagination not specified (backward compatibility)
+                # WARNING: This can be slow for large datasets - consider requiring pagination
                 incidents = query.order_by(Incident.last_seen_at.desc()).all()
                 return incidents
         except HTTPException:

@@ -87,21 +87,35 @@ export async function getIncidents(
         }
 
         const data = await response.json();
-        
+
         // If pagination was requested, return the paginated response structure
-        if (pagination?.page !== undefined && data && typeof data === 'object' && 'data' in data) {
+        if (
+            pagination?.page !== undefined &&
+            data &&
+            typeof data === 'object' &&
+            'data' in data
+        ) {
             return data as PaginatedIncidentsResponse;
         }
-        
+
         // Otherwise return array for backward compatibility
         return Array.isArray(data) ? data : [];
     } catch (error) {
-        // Use a try-catch to prevent error logging from causing recursive issues
-        try {
-            console.error('Error fetching incidents:', error);
-        } catch {
-            // Silently fail if error logging itself fails
+        // Handle explicit timeout errors gracefully
+        if (
+            error instanceof Error &&
+            error.message.includes('Request timeout')
+        ) {
+            console.warn('⚠️ Incidents fetch timed out - returning empty list');
+        } else {
+            // Log other errors
+            try {
+                console.error('Error fetching incidents:', error);
+            } catch {
+                // Silently fail if error logging itself fails
+            }
         }
+
         // Return appropriate structure based on whether pagination was requested
         if (pagination?.page !== undefined) {
             return {
@@ -121,11 +135,18 @@ export async function getIncidents(
 export async function getRecentIncidents(
     limit: number = 5
 ): Promise<Incident[]> {
-    const result = await getIncidents();
-    // getIncidents returns array when pagination is not provided
-    const allIncidents = Array.isArray(result) ? result : result.data;
-    // API already returns incidents ordered by last_seen_at desc, so just take first N
-    return allIncidents.slice(0, limit);
+    try {
+        const result = await getIncidents();
+        // getIncidents returns array when pagination is not provided
+        const allIncidents = Array.isArray(result) ? result : result.data;
+        // API already returns incidents ordered by last_seen_at desc, so just take first N
+        return allIncidents.slice(0, limit);
+    } catch (error) {
+        console.warn(
+            '⚠️ Failed to fetch recent incidents, returning empty list'
+        );
+        return [];
+    }
 }
 
 export async function getIncident(incidentId: number): Promise<{

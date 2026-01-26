@@ -1,7 +1,6 @@
 'use client';
 
-import { useActionState, useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useActionState, useEffect } from 'react';
 import Image from 'next/image';
 import { SubmitButton } from '@/components/submit-button';
 import { loginAction } from '@/actions/auth';
@@ -23,24 +22,26 @@ const initialState = {
 };
 
 export default function LoginPage() {
-    const router = useRouter();
     const [state, formAction] = useActionState(loginAction, initialState);
-    const [isRedirecting, setIsRedirecting] = useState(false);
 
     useEffect(() => {
         if (state?.success) {
-            // Delay slightly to allow state update to process
-            const timer = setTimeout(() => {
-                setIsRedirecting(true);
-                router.push(state.redirect || '/');
-            }, 0);
-            return () => clearTimeout(timer);
+            console.log('✅ Login successful, redirecting...');
+
+            // Store token for client-side API calls
+            if (state.access_token) {
+                localStorage.setItem('auth_token', state.access_token);
+            }
+
+            // Use window.location.href for a full page reload
+            // This ensures middleware runs and server components load properly
+            window.location.href = state.redirect || '/';
         }
-    }, [state, router]);
+    }, [state]);
 
     return (
         <div className="flex h-screen w-full items-center justify-center bg-zinc-950 relative">
-            {isRedirecting && (
+            {state?.success && (
                 <div className="absolute inset-0 bg-zinc-950/95 backdrop-blur-sm z-50 flex items-center justify-center">
                     <div className="flex flex-col items-center gap-4">
                         <Loader2 className="h-12 w-12 animate-spin text-green-600" />

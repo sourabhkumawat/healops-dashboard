@@ -96,6 +96,7 @@ export default function LogsPage() {
     const chartContainerRef = useRef<HTMLDivElement>(null);
     const fetchingLogsRef = useRef(false);
     const fetchingServicesRef = useRef(false);
+    const isConnectingRef = useRef(false);
 
     // Fetch logs
     const fetchLogs = async () => {
@@ -146,17 +147,49 @@ export default function LogsPage() {
     useEffect(() => {
         if (!liveTail) {
             if (wsRef.current) {
-                wsRef.current.close();
+                try {
+                    if (wsRef.current.readyState !== WebSocket.CLOSED) {
+                        wsRef.current.close(1000, 'Live tail disabled');
+                    }
+                } catch (e) {
+                    // Ignore errors when closing
+                }
                 wsRef.current = null;
             }
+            isConnectingRef.current = false;
             return;
         }
 
+        // Don't connect if already connecting or already connected
+        if (isConnectingRef.current) {
+            console.log('WebSocket connection already in progress, skipping');
+            return;
+        }
+
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            console.log('WebSocket already connected, skipping');
+            return;
+        }
+
+        // Close existing connection if any (but not OPEN)
+        if (wsRef.current && wsRef.current.readyState !== WebSocket.OPEN) {
+            try {
+                if (wsRef.current.readyState !== WebSocket.CLOSED) {
+                    wsRef.current.close(1000, 'Reconnecting');
+                }
+            } catch (e) {
+                // Ignore errors when closing
+            }
+            wsRef.current = null;
+        }
+
+        isConnectingRef.current = true;
         const ws = new WebSocket(getWebSocketUrl());
         wsRef.current = ws;
 
         ws.onopen = () => {
             console.log('Connected to Live Tail WebSocket');
+            isConnectingRef.current = false;
         };
 
         ws.onmessage = (event) => {
@@ -183,15 +216,29 @@ export default function LogsPage() {
 
         ws.onerror = (error) => {
             console.error('WebSocket error:', error);
+            isConnectingRef.current = false;
         };
 
-        ws.onclose = () => {
-            console.log('Disconnected from Live Tail WebSocket');
+        ws.onclose = (event) => {
+            console.log('Disconnected from Live Tail WebSocket', {
+                code: event.code,
+                reason: event.reason,
+                wasClean: event.wasClean
+            });
+            isConnectingRef.current = false;
         };
 
         return () => {
+            isConnectingRef.current = false;
             if (wsRef.current) {
-                wsRef.current.close();
+                try {
+                    if (wsRef.current.readyState !== WebSocket.CLOSED) {
+                        wsRef.current.close(1000, 'Component cleanup');
+                    }
+                } catch (e) {
+                    // Ignore errors when closing
+                }
+                wsRef.current = null;
             }
         };
     }, [liveTail]);
