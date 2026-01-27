@@ -192,6 +192,7 @@ def get_main_event_loop():
 # Add Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from src.middleware import APIKeyMiddleware, AuthenticationMiddleware
+from src.middleware.timeout import TimeoutMiddleware
 
 # CORS Configuration - Allow all origins
 # Note: allow_credentials must be False when allowing all origins
@@ -202,6 +203,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Timeout Middleware - Add early to catch long-running requests
+# This prevents Cloudflare tunnel "context canceled" errors
+app.add_middleware(TimeoutMiddleware)
 
 # SECURITY: AuthenticationMiddleware MUST be added FIRST (order matters!)
 # It protects ALL endpoints except public ones

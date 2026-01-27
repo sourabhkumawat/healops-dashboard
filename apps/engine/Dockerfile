@@ -12,4 +12,4 @@ COPY . .
 # - 4 threads per worker (utilize 2 vCPUs with threading)
 # - Limit concurrency to prevent memory exhaustion
 # - Timeout settings to prevent hanging connections
-CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --limit-concurrency 50 --timeout-keep-alive 5 --timeout-graceful-shutdown 30
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --limit-concurrency 50 --timeout-keep-alive 30 --timeout-graceful-shutdown 30

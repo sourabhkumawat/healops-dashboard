@@ -5,6 +5,7 @@ This version:
 1. Keeps existing APIKeyMiddleware for /ingest/logs and /api/sourcemaps
 2. Adds new AuthenticationMiddleware to protect ALL other endpoints
 3. Properly extracts and validates user_id from JWT or API key
+4. Includes API key caching to reduce database queries
 """
 
 from fastapi import Request, HTTPException
@@ -14,6 +15,47 @@ from src.database.database import SessionLocal
 from src.database.models import ApiKey, User
 import hashlib
 import os
+import asyncio
+from datetime import datetime, timedelta
+from typing import Optional, Tuple
+import threading
+
+# API Key cache with thread-safe access
+_api_key_cache: dict[str, Tuple[ApiKey, datetime]] = {}
+_cache_lock = threading.Lock()
+_cache_ttl = timedelta(minutes=5)  # Cache API keys for 5 minutes
+
+
+def get_cached_api_key(key_hash: str) -> Optional[ApiKey]:
+    """Get API key from cache if valid."""
+    with _cache_lock:
+        if key_hash in _api_key_cache:
+            cached_key, timestamp = _api_key_cache[key_hash]
+            if datetime.utcnow() - timestamp < _cache_ttl:
+                return cached_key
+            else:
+                # Expired, remove from cache
+                del _api_key_cache[key_hash]
+    return None
+
+
+def set_cached_api_key(key_hash: str, api_key: ApiKey):
+    """Store API key in cache."""
+    with _cache_lock:
+        _api_key_cache[key_hash] = (api_key, datetime.utcnow())
+
+
+def _query_api_key_from_db(key_hash: str) -> Optional[ApiKey]:
+    """Synchronous function to query API key from database."""
+    db: Session = SessionLocal()
+    try:
+        api_key = db.query(ApiKey).filter(
+            ApiKey.key_hash == key_hash,
+            ApiKey.is_active == 1
+        ).first()
+        return api_key
+    finally:
+        db.close()
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
     """
@@ -57,26 +99,26 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             # Hash the key to look it up
             key_hash = hashlib.sha256(api_key_from_body.encode()).hexdigest()
 
-            db: Session = SessionLocal()
-            try:
-                api_key = db.query(ApiKey).filter(
-                    ApiKey.key_hash == key_hash,
-                    ApiKey.is_active == 1
-                ).first()
-
-                if not api_key:
+            # Check cache first
+            api_key = get_cached_api_key(key_hash)
+            
+            if not api_key:
+                # Query database in thread pool to avoid blocking
+                api_key = await asyncio.to_thread(_query_api_key_from_db, key_hash)
+                
+                if api_key:
+                    # Cache the valid API key
+                    set_cached_api_key(key_hash, api_key)
+                else:
                     from fastapi.responses import JSONResponse
                     return JSONResponse(
                         status_code=403,
                         content={"detail": "Invalid or inactive API key"}
                     )
 
-                # Attach API key and user_id to request state
-                request.state.api_key = api_key
-                request.state.user_id = api_key.user_id
-
-            finally:
-                db.close()
+            # Attach API key and user_id to request state
+            request.state.api_key = api_key
+            request.state.user_id = api_key.user_id
             
             # Restore body for endpoint handler
             # FastAPI needs the body to be available for the endpoint handler
@@ -104,26 +146,26 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             # Hash the key to look it up
             key_hash = hashlib.sha256(api_key_header.encode()).hexdigest()
 
-            db: Session = SessionLocal()
-            try:
-                api_key = db.query(ApiKey).filter(
-                    ApiKey.key_hash == key_hash,
-                    ApiKey.is_active == 1
-                ).first()
-
-                if not api_key:
+            # Check cache first
+            api_key = get_cached_api_key(key_hash)
+            
+            if not api_key:
+                # Query database in thread pool to avoid blocking
+                api_key = await asyncio.to_thread(_query_api_key_from_db, key_hash)
+                
+                if api_key:
+                    # Cache the valid API key
+                    set_cached_api_key(key_hash, api_key)
+                else:
                     from fastapi.responses import JSONResponse
                     return JSONResponse(
                         status_code=403,
                         content={"detail": "Invalid or inactive API key"}
                     )
 
-                # Attach API key and user_id to request state
-                request.state.api_key = api_key
-                request.state.user_id = api_key.user_id
-
-            finally:
-                db.close()
+            # Attach API key and user_id to request state
+            request.state.api_key = api_key
+            request.state.user_id = api_key.user_id
 
         response = await call_next(request)
         return response
@@ -199,23 +241,24 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         if api_key_header:
             # Validate API key
             key_hash = hashlib.sha256(api_key_header.encode()).hexdigest()
-            db: Session = SessionLocal()
-            try:
-                api_key = db.query(ApiKey).filter(
-                    ApiKey.key_hash == key_hash,
-                    ApiKey.is_active == 1
-                ).first()
+            
+            # Check cache first
+            api_key = get_cached_api_key(key_hash)
+            
+            if not api_key:
+                # Query database in thread pool to avoid blocking
+                try:
+                    api_key = await asyncio.to_thread(_query_api_key_from_db, key_hash)
+                    if api_key:
+                        set_cached_api_key(key_hash, api_key)
+                except Exception:
+                    pass
 
-                if api_key:
-                    # Set user_id in request state
-                    request.state.user_id = api_key.user_id
-                    request.state.api_key = api_key
-                    db.close()
-                    return await call_next(request)
-            except Exception as e:
-                pass
-            finally:
-                db.close()
+            if api_key:
+                # Set user_id in request state
+                request.state.user_id = api_key.user_id
+                request.state.api_key = api_key
+                return await call_next(request)
 
         # Try to authenticate via JWT token
         auth_header = request.headers.get("Authorization", "")

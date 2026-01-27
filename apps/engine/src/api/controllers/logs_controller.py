@@ -6,8 +6,9 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 from datetime import datetime
+import asyncio
 
-from src.database.models import LogEntry, Integration
+from src.database.models import LogEntry, Integration, ApiKey
 from src.memory import ensure_partition_exists_for_timestamp
 from src.utils.redpanda_websocket_manager import connection_manager as manager
 from src.api.controllers.base import get_user_id_from_request
@@ -60,6 +61,48 @@ class OTelErrorPayload(BaseModel):
     spans: List[OTelSpan]
 
 
+def _query_integration_sync(db: Session, integration_id: int, user_id: int) -> Optional[Integration]:
+    """Synchronous helper to query integration."""
+    return db.query(Integration).filter(
+        Integration.id == integration_id,
+        Integration.user_id == user_id
+    ).first()
+
+
+def _persist_log_sync(db: Session, log_entry: LogEntry) -> LogEntry:
+    """Synchronous helper to persist log entry."""
+    db.add(log_entry)
+    db.commit()
+    db.refresh(log_entry)
+    return log_entry
+
+
+def _resolve_sourcemaps_sync(db: Session, user_id: int, service_name: str, metadata: Dict[str, Any], release: Optional[str], environment: str) -> Dict[str, Any]:
+    """Synchronous helper to resolve source maps."""
+    from src.tools.sourcemap import resolve_metadata_with_sourcemaps
+    return resolve_metadata_with_sourcemaps(
+        db=db,
+        user_id=user_id,
+        service_name=service_name,
+        metadata=metadata,
+        release=release,
+        environment=environment
+    )
+
+
+def _persist_log_batch_sync(db: Session, db_log: LogEntry, savepoint) -> LogEntry:
+    """Synchronous helper to persist log entry in batch with savepoint."""
+    db.add(db_log)
+    db.flush()  # Flush to get the ID without committing
+    savepoint.commit()
+    return db_log
+
+
+def _commit_batch_sync(db: Session):
+    """Synchronous helper to commit batch transaction."""
+    db.commit()
+
+
 class LogsController:
     """Controller for log ingestion and retrieval."""
     
@@ -76,10 +119,13 @@ class LogsController:
             # Determine integration_id
             integration_id = api_key.integration_id
             if not integration_id and log.integration_id:
-                integration = db.query(Integration).filter(
-                    Integration.id == log.integration_id,
-                    Integration.user_id == api_key.user_id
-                ).first()
+                # Run DB query in thread pool to avoid blocking
+                integration = await asyncio.to_thread(
+                    _query_integration_sync,
+                    db,
+                    log.integration_id,
+                    api_key.user_id
+                )
                 if integration:
                     integration_id = integration.id
             
@@ -107,29 +153,33 @@ class LogsController:
             
             if should_persist:
                 try:
-                    # Resolve source maps in metadata before saving
+                    # Resolve source maps in metadata before saving (move to background task for non-blocking)
                     resolved_metadata = log.metadata
                     if log.metadata and isinstance(log.metadata, dict):
+                        # Use release/environment from top-level request, fallback to metadata
+                        release = log.release or log.metadata.get('release') or log.metadata.get('releaseId') or None
+                        environment = log.environment or log.metadata.get('environment') or log.metadata.get('env') or "production"
+                        
+                        # Try source map resolution in background to avoid blocking
+                        # If it fails or takes too long, use original metadata
                         try:
-                            from src.tools.sourcemap import resolve_metadata_with_sourcemaps
-                            # Use release/environment from top-level request, fallback to metadata
-                            release = log.release or log.metadata.get('release') or log.metadata.get('releaseId') or None
-                            environment = log.environment or log.metadata.get('environment') or log.metadata.get('env') or "production"
-                            resolved_metadata = resolve_metadata_with_sourcemaps(
-                                db=db,
-                                user_id=api_key.user_id,
-                                service_name=log.service_name,
-                                metadata=log.metadata,
-                                release=release,
-                                environment=environment
+                            resolved_metadata = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    _resolve_sourcemaps_sync,
+                                    db,
+                                    api_key.user_id,
+                                    log.service_name,
+                                    log.metadata,
+                                    release,
+                                    environment
+                                ),
+                                timeout=2.0  # 2 second timeout for source map resolution
                             )
                         except ImportError:
                             # Source map resolution not available - this is optional
-                            # Silently continue without resolution
                             resolved_metadata = log.metadata
-                        except Exception as sm_error:
-                            # Don't fail log ingestion if source map resolution fails
-                            # Only log at debug level to avoid noise
+                        except (asyncio.TimeoutError, Exception) as sm_error:
+                            # Don't fail log ingestion if source map resolution fails or times out
                             import logging
                             logger = logging.getLogger(__name__)
                             logger.debug(f"Source map resolution failed (non-critical): {sm_error}")
@@ -148,8 +198,8 @@ class LogsController:
                             print(f"Warning: Could not parse timestamp {log.timestamp}, using current time: {e}")
                             log_timestamp = datetime.utcnow()
                     
-                    # Ensure partition exists before inserting
-                    ensure_partition_exists_for_timestamp(log_timestamp)
+                    # Ensure partition exists before inserting (non-blocking)
+                    await asyncio.to_thread(ensure_partition_exists_for_timestamp, log_timestamp)
                     
                     db_log = LogEntry(
                         service_name=log.service_name,
@@ -162,9 +212,8 @@ class LogsController:
                         metadata_json=resolved_metadata,  # Use resolved metadata with source maps
                         timestamp=log_timestamp
                     )
-                    db.add(db_log)
-                    db.commit()
-                    db.refresh(db_log)
+                    # Persist log in thread pool to avoid blocking
+                    db_log = await asyncio.to_thread(_persist_log_sync, db, db_log)
                     
                     # Log successful persistence for debugging
                     print(f"✓ Persisted {severity_upper} log: id={db_log.id}, service={log.service_name}, message={log.message[:50]}")
@@ -224,10 +273,13 @@ class LogsController:
                     # Override integration_id if provided in log
                     log_integration_id = integration_id
                     if not log_integration_id and log.integration_id:
-                        integration = db.query(Integration).filter(
-                            Integration.id == log.integration_id,
-                            Integration.user_id == api_key.user_id
-                        ).first()
+                        # Run DB query in thread pool to avoid blocking
+                        integration = await asyncio.to_thread(
+                            _query_integration_sync,
+                            db,
+                            log.integration_id,
+                            api_key.user_id
+                        )
                         if integration:
                             log_integration_id = integration.id
                     
@@ -271,36 +323,39 @@ class LogsController:
                                         print(f"Warning: Could not parse timestamp {log.timestamp}, using current time: {e}")
                                         log_timestamp = datetime.utcnow()
                                 
-                                # Resolve source maps in metadata before saving
+                                # Resolve source maps in metadata before saving (with timeout)
                                 resolved_metadata = log.metadata
                                 if log.metadata and isinstance(log.metadata, dict):
+                                    # Use release/environment from top-level request, fallback to metadata
+                                    release = log.release or log.metadata.get('release') or log.metadata.get('releaseId') or None
+                                    environment = log.environment or log.metadata.get('environment') or log.metadata.get('env') or "production"
+                                    
+                                    # Try source map resolution with timeout to avoid blocking
                                     try:
-                                        from src.tools.sourcemap import resolve_metadata_with_sourcemaps
-                                        # Use release/environment from top-level request, fallback to metadata
-                                        release = log.release or log.metadata.get('release') or log.metadata.get('releaseId') or None
-                                        environment = log.environment or log.metadata.get('environment') or log.metadata.get('env') or "production"
-                                        resolved_metadata = resolve_metadata_with_sourcemaps(
-                                            db=db,
-                                            user_id=api_key.user_id,
-                                            service_name=log.service_name,
-                                            metadata=log.metadata,
-                                            release=release,
-                                            environment=environment
+                                        resolved_metadata = await asyncio.wait_for(
+                                            asyncio.to_thread(
+                                                _resolve_sourcemaps_sync,
+                                                db,
+                                                api_key.user_id,
+                                                log.service_name,
+                                                log.metadata,
+                                                release,
+                                                environment
+                                            ),
+                                            timeout=2.0  # 2 second timeout
                                         )
                                     except ImportError:
                                         # Source map resolution not available - this is optional
-                                        # Silently continue without resolution
                                         resolved_metadata = log.metadata
-                                    except Exception as sm_error:
-                                        # Don't fail log ingestion if source map resolution fails
-                                        # Only log at debug level to avoid noise
+                                    except (asyncio.TimeoutError, Exception) as sm_error:
+                                        # Don't fail log ingestion if source map resolution fails or times out
                                         import logging
                                         logger = logging.getLogger(__name__)
                                         logger.debug(f"Source map resolution failed (non-critical): {sm_error}")
                                         resolved_metadata = log.metadata
                                 
-                                # Ensure partition exists before inserting
-                                ensure_partition_exists_for_timestamp(log_timestamp)
+                                # Ensure partition exists before inserting (non-blocking)
+                                await asyncio.to_thread(ensure_partition_exists_for_timestamp, log_timestamp)
                                 
                                 db_log = LogEntry(
                                     service_name=log.service_name,
@@ -367,10 +422,10 @@ class LogsController:
                         "severity": log.severity if log else "UNKNOWN"
                     })
             
-            # Commit all persisted logs at once
+            # Commit all persisted logs at once (non-blocking)
             if persisted_count > 0:
                 try:
-                    db.commit()
+                    await asyncio.to_thread(_commit_batch_sync, db)
                 except Exception as commit_error:
                     db.rollback()
                     print(f"✗ Failed to commit batch: {commit_error}")
@@ -406,11 +461,15 @@ class LogsController:
         
         valid_key = request.state.api_key
         
-        # Update last_used timestamp
-        valid_key.last_used = datetime.utcnow()
+        # Update last_used timestamp (non-blocking)
+        def _update_last_used_sync(db: Session, api_key: ApiKey):
+            api_key.last_used = datetime.utcnow()
+            db.commit()
         
-        # Ensure partition exists for current date (all logs will use current timestamp)
-        ensure_partition_exists_for_timestamp(datetime.utcnow())
+        await asyncio.to_thread(_update_last_used_sync, db, valid_key)
+        
+        # Ensure partition exists for current date (all logs will use current timestamp) - non-blocking
+        await asyncio.to_thread(ensure_partition_exists_for_timestamp, datetime.utcnow())
         
         # Process each span
         persisted_count = 0
@@ -502,16 +561,26 @@ class LogsController:
                 persisted_count += 1
         
         if persisted_count > 0:
-            db.commit()
+            # Commit in thread pool to avoid blocking
+            await asyncio.to_thread(_commit_batch_sync, db)
             
             # Trigger async analysis for persisted logs via Redpanda
             try:
                 from src.services.redpanda_task_processor import publish_log_processing_task
-                # Fetch IDs of newly inserted logs
-                recent_logs = db.query(LogEntry).filter(
-                    LogEntry.service_name == payload.serviceName,
-                    LogEntry.source == "otel"
-                ).order_by(LogEntry.id.desc()).limit(persisted_count).all()
+                # Fetch IDs of newly inserted logs (non-blocking)
+                def _fetch_recent_logs_sync(db: Session, service_name: str, source: str, limit: int):
+                    return db.query(LogEntry).filter(
+                        LogEntry.service_name == service_name,
+                        LogEntry.source == source
+                    ).order_by(LogEntry.id.desc()).limit(limit).all()
+                
+                recent_logs = await asyncio.to_thread(
+                    _fetch_recent_logs_sync,
+                    db,
+                    payload.serviceName,
+                    "otel",
+                    persisted_count
+                )
 
                 for log in recent_logs:
                     publish_log_processing_task(log.id)
