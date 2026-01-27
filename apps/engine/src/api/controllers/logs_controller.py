@@ -339,20 +339,7 @@ class LogsController:
             # API Key is already validated by middleware
             api_key = request.state.api_key
             
-            # Determine integration_id quickly
-            integration_id = api_key.integration_id
-            if not integration_id and log.integration_id:
-                try:
-                    integration = await asyncio.wait_for(
-                        asyncio.to_thread(_query_integration_sync, db, log.integration_id, api_key.user_id),
-                        timeout=0.5
-                    )
-                    if integration:
-                        integration_id = integration.id
-                except (asyncio.TimeoutError, Exception):
-                    pass  # Use default integration_id
-            
-            # Prepare log data for background processing
+            # Prepare log data for background processing (no DB queries here!)
             log_data = {
                 "service_name": log.service_name,
                 "severity": log.severity,
@@ -365,11 +352,8 @@ class LogsController:
                 "integration_id": log.integration_id
             }
             
-            # Quick broadcast attempt (non-blocking with timeout)
-            try:
-                await asyncio.wait_for(manager.broadcast(log_data), timeout=0.5)
-            except (asyncio.TimeoutError, Exception):
-                pass  # Broadcast is non-critical, continue
+            # Fire-and-forget broadcast (don't wait for it)
+            asyncio.create_task(asyncio.wait_for(manager.broadcast(log_data), timeout=1.0))
             
             # Process in background and return immediately
             background_tasks.add_task(
@@ -377,10 +361,10 @@ class LogsController:
                 log_data,
                 api_key.id,
                 api_key.user_id,
-                integration_id
+                api_key.integration_id  # Use default, will be resolved in background if needed
             )
             
-            # Return 202 Accepted immediately
+            # Return 202 Accepted immediately (no blocking operations above)
             return Response(
                 status_code=202,
                 content=json.dumps({
@@ -406,30 +390,34 @@ class LogsController:
         try:
             # API Key is already validated by middleware
             api_key = request.state.api_key
-            integration_id = api_key.integration_id
             
             # Prepare batch data for background processing
             batch_data = {
                 "logs": [log.dict() for log in batch.logs],
                 "api_key_id": api_key.id,
                 "user_id": api_key.user_id,
-                "integration_id": integration_id
+                "integration_id": api_key.integration_id
             }
             
-            # Quick broadcast attempts (non-blocking with timeout)
-            for log in batch.logs:
-                log_data = {
-                    "service_name": log.service_name,
-                    "severity": log.severity,
-                    "message": log.message,
-                    "source": log.source,
-                    "timestamp": log.timestamp or datetime.utcnow().isoformat(),
-                    "metadata": log.metadata
-                }
-                try:
-                    await asyncio.wait_for(manager.broadcast(log_data), timeout=0.3)
-                except (asyncio.TimeoutError, Exception):
-                    pass  # Continue with next log
+            # Fire-and-forget broadcasts (don't wait for them - process in background)
+            async def broadcast_all_in_background():
+                """Broadcast all logs in background without blocking response."""
+                for log in batch.logs:
+                    log_data = {
+                        "service_name": log.service_name,
+                        "severity": log.severity,
+                        "message": log.message,
+                        "source": log.source,
+                        "timestamp": log.timestamp or datetime.utcnow().isoformat(),
+                        "metadata": log.metadata
+                    }
+                    try:
+                        await asyncio.wait_for(manager.broadcast(log_data), timeout=0.5)
+                    except (asyncio.TimeoutError, Exception):
+                        pass  # Continue with next log
+            
+            # Start broadcast in background (fire-and-forget)
+            asyncio.create_task(broadcast_all_in_background())
             
             # Process in background and return immediately
             async def process_batch_background(batch_data: dict):
@@ -447,7 +435,7 @@ class LogsController:
             
             background_tasks.add_task(process_batch_background, batch_data)
             
-            # Return 202 Accepted immediately
+            # Return 202 Accepted immediately (no blocking operations above)
             return Response(
                 status_code=202,
                 content=json.dumps({

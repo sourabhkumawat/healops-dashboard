@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 import time
+import asyncio
 
 from src.database.models import Incident, LogEntry, User, IncidentStatus, IncidentSeverity
 from src.database.database import SessionLocal
@@ -116,26 +117,34 @@ class IncidentsController:
         # Get authenticated user (middleware ensures this is set)
         user_id = get_user_id_from_request(request, db=db)
 
-        # ALWAYS filter by user_id to prevent cross-user access
-        incident = db.query(Incident).filter(
-            Incident.id == incident_id,
-            Incident.user_id == user_id
-        ).first()
+        # Helper functions for async database queries
+        def _fetch_incident_sync(db: Session, incident_id: int, user_id: int):
+            return db.query(Incident).filter(
+                Incident.id == incident_id,
+                Incident.user_id == user_id
+            ).first()
+        
+        def _fetch_logs_sync(db: Session, log_ids: List[int], user_id: int):
+            if not log_ids:
+                return []
+            return db.query(LogEntry).filter(
+                LogEntry.id.in_(log_ids),
+                LogEntry.user_id == user_id
+            ).order_by(LogEntry.timestamp.desc()).all()
+
+        # Fetch incident in thread pool to avoid blocking
+        incident = await asyncio.to_thread(_fetch_incident_sync, db, incident_id, user_id)
 
         if not incident:
             raise HTTPException(status_code=404, detail="Incident not found")
 
-        # Fetch related logs (ALWAYS filter by user_id)
+        # Fetch related logs in thread pool (non-blocking)
         logs = []
         if incident.log_ids:
-            logs = db.query(LogEntry).filter(
-                LogEntry.id.in_(incident.log_ids),
-                LogEntry.user_id == user_id
-            ).order_by(LogEntry.timestamp.desc()).all()
+            logs = await asyncio.to_thread(_fetch_logs_sync, db, incident.log_ids, user_id)
 
-        # Trigger AI analysis in background if root_cause is not set
+        # Trigger AI analysis in background if root_cause is not set (non-blocking)
         if not incident.root_cause:
-            from src.core.ai_analysis import analyze_incident_with_openrouter
             background_tasks.add_task(IncidentsController.analyze_incident_async, incident_id)
 
         return {
