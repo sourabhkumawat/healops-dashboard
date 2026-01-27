@@ -10,7 +10,7 @@ services:
     volumes:
       - ./apps/engine:/app
     environment:
-      - DATABASE_URL=postgresql://user:password@host.docker.internal:5432/healops
+      - DATABASE_URL=postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/healops
     # Memory limits optimized for engine service
     deploy:
       resources:
@@ -18,3 +18,4 @@ services:
           memory: 8G
         reservations:
           memory: 2G
+
