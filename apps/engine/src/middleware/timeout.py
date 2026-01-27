@@ -12,9 +12,9 @@ import asyncio
 import os
 from typing import Optional
 
-# Default timeout: 25 seconds (slightly less than Cloudflare's typical 30s timeout)
+# Default timeout: 15 seconds (reduced to prevent Cloudflare cancellations)
 # This gives us a buffer to return an error response before Cloudflare cancels
-DEFAULT_REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "25"))
+DEFAULT_REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "15"))
 
 
 class TimeoutMiddleware(BaseHTTPMiddleware):
@@ -36,8 +36,9 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
             "/otel/errors"
         }
         
-        # Timeout for ingestion endpoints: 20 seconds
-        self.ingestion_timeout = int(os.getenv("INGESTION_TIMEOUT_SECONDS", "20"))
+        # Timeout for ingestion endpoints: 10 seconds (reduced for faster response)
+        # Since we now return 202 immediately, this is mainly a safety net
+        self.ingestion_timeout = int(os.getenv("INGESTION_TIMEOUT_SECONDS", "10"))
     
     async def dispatch(self, request: Request, call_next):
         # Skip timeout for OPTIONS requests (CORS preflight)

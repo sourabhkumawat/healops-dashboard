@@ -30,22 +30,40 @@ class RedpandaConnectionManager:
         print("✓ Redpanda WebSocket manager initialized")
 
     async def _broadcast_to_websockets(self, message: dict):
-        """Broadcast message to all active WebSocket connections."""
+        """Broadcast message to all active WebSocket connections with timeout protection."""
         if not self.active_connections:
             return
 
         disconnected = []
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except Exception:
-                disconnected.append(connection)
-
+        # Use asyncio.gather with timeout to prevent blocking on slow connections
+        async def send_all():
+            tasks = []
+            for connection in self.active_connections:
+                tasks.append(self._send_to_connection(connection, message))
+            return await asyncio.gather(*tasks, return_exceptions=True)
+        
+        try:
+            results = await asyncio.wait_for(send_all(), timeout=0.5)
+            # Check results and mark failed connections as disconnected
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    disconnected.append(self.active_connections[i])
+        except asyncio.TimeoutError:
+            print("Warning: WebSocket broadcast timeout, some connections may be slow")
+            # On timeout, we can't determine which connections failed, so continue
+        
         # Remove disconnected connections
         for conn in disconnected:
             if conn in self.active_connections:
                 self.active_connections.remove(conn)
                 print(f"Removed disconnected WebSocket. Active connections: {len(self.active_connections)}")
+    
+    async def _send_to_connection(self, connection: WebSocket, message: dict):
+        """Send message to a single connection with error handling."""
+        try:
+            await connection.send_json(message)
+        except Exception:
+            raise  # Re-raise so gather can catch it
 
     async def connect(self, websocket: WebSocket):
         """Accept a new WebSocket connection."""
@@ -63,18 +81,28 @@ class RedpandaConnectionManager:
         """
         Publish message to Redpanda topic (replaces Redis pub/sub).
         The message will be consumed and broadcast to WebSockets via Redpanda consumer.
+        Includes timeout protection to prevent blocking.
         """
         try:
-            # Publish to Redpanda - this will be consumed by our consumer and broadcast to WebSockets
-            success = redpanda_service.producer.publish_log(message)
-            if not success:
-                # Fallback: broadcast directly to WebSockets if Redpanda is unavailable
-                print("Warning: Redpanda publish failed, falling back to direct WebSocket broadcast")
-                await self._broadcast_to_websockets(message)
+            # Publish to Redpanda with timeout (1 second max)
+            async def _do_broadcast():
+                success = redpanda_service.producer.publish_log(message)
+                if not success:
+                    # Fallback: broadcast directly to WebSockets if Redpanda is unavailable
+                    print("Warning: Redpanda publish failed, falling back to direct WebSocket broadcast")
+                    await self._broadcast_to_websockets(message)
+            
+            await asyncio.wait_for(_do_broadcast(), timeout=1.0)
+        except asyncio.TimeoutError:
+            # Broadcast timeout - log but don't fail (broadcast is non-critical)
+            print("Warning: Broadcast timeout, continuing without broadcast")
         except Exception as e:
             print(f"Error broadcasting via Redpanda: {e}")
-            # Fallback: broadcast directly to WebSockets
-            await self._broadcast_to_websockets(message)
+            # Fallback: broadcast directly to WebSockets with timeout
+            try:
+                await asyncio.wait_for(self._broadcast_to_websockets(message), timeout=0.5)
+            except (asyncio.TimeoutError, Exception):
+                pass  # Broadcast is non-critical, continue
 
     def health_check(self) -> Dict[str, Any]:
         """Get health status of the connection manager."""

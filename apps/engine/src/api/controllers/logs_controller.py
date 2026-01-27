@@ -1,14 +1,16 @@
 """
 Logs Controller - Handles log ingestion and retrieval.
 """
-from fastapi import Request, HTTPException, BackgroundTasks
+from fastapi import Request, HTTPException, BackgroundTasks, Response
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 import asyncio
+import json
 
 from src.database.models import LogEntry, Integration, ApiKey
+from src.database.database import SessionLocal
 from src.memory import ensure_partition_exists_for_timestamp
 from src.utils.redpanda_websocket_manager import connection_manager as manager
 from src.api.controllers.base import get_user_id_from_request
@@ -103,146 +105,290 @@ def _commit_batch_sync(db: Session):
     db.commit()
 
 
+# Background processing functions for immediate response pattern
+async def process_log_background(log_data: dict, api_key_id: int, user_id: int, integration_id: Optional[int], db: Session = None):
+    """Background task to process a single log entry."""
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+    else:
+        close_db = False
+    
+    try:
+        log = LogIngestRequest(**log_data)
+        severity_upper = log.severity.upper() if log.severity else ""
+        should_persist = severity_upper in ["ERROR", "CRITICAL"]
+        
+        if should_persist:
+            try:
+                # Resolve source maps with timeout
+                resolved_metadata = log.metadata
+                if log.metadata and isinstance(log.metadata, dict):
+                    release = log.release or log.metadata.get('release') or log.metadata.get('releaseId') or None
+                    environment = log.environment or log.metadata.get('environment') or log.metadata.get('env') or "production"
+                    
+                    try:
+                        resolved_metadata = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                _resolve_sourcemaps_sync,
+                                db,
+                                user_id,
+                                log.service_name,
+                                log.metadata,
+                                release,
+                                environment
+                            ),
+                            timeout=2.0
+                        )
+                    except (asyncio.TimeoutError, Exception):
+                        resolved_metadata = log.metadata
+                
+                # Parse timestamp
+                log_timestamp = datetime.utcnow()
+                if log.timestamp:
+                    try:
+                        if isinstance(log.timestamp, str):
+                            log_timestamp = datetime.fromisoformat(log.timestamp.replace('Z', '+00:00'))
+                    except (ValueError, AttributeError):
+                        log_timestamp = datetime.utcnow()
+                
+                # Ensure partition exists
+                await asyncio.to_thread(ensure_partition_exists_for_timestamp, log_timestamp)
+                
+                # Create and persist log
+                db_log = LogEntry(
+                    service_name=log.service_name,
+                    level=log.severity,
+                    severity=log.severity,
+                    message=log.message,
+                    source=log.source,
+                    integration_id=integration_id,
+                    user_id=user_id,
+                    metadata_json=resolved_metadata,
+                    timestamp=log_timestamp
+                )
+                await asyncio.to_thread(_persist_log_sync, db, db_log)
+                
+                # Trigger incident check
+                try:
+                    from src.services.redpanda_task_processor import publish_log_processing_task
+                    publish_log_processing_task(db_log.id)
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"Error in background log processing: {e}")
+    finally:
+        if close_db:
+            db.close()
+
+
+async def process_otel_spans_background(payload_dict: dict, api_key_id: int, user_id: int, integration_id: Optional[int], db: Session = None):
+    """Background task to process OTel spans in batch."""
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+    else:
+        close_db = False
+    
+    try:
+        # Reconstruct payload from dict
+        payload = OTelErrorPayload(**payload_dict)
+        service_name = payload.serviceName
+        
+        # Update last_used timestamp
+        def _update_last_used_sync(db: Session, api_key_id: int):
+            api_key = db.query(ApiKey).filter(ApiKey.id == api_key_id).first()
+            if api_key:
+                api_key.last_used = datetime.utcnow()
+                db.commit()
+        
+        await asyncio.to_thread(_update_last_used_sync, db, api_key_id)
+        
+        # Ensure partition exists
+        await asyncio.to_thread(ensure_partition_exists_for_timestamp, datetime.utcnow())
+        
+        # Batch process spans
+        logs_to_add = []
+        for span in payload.spans:
+            error_message = span.status.message or span.name
+            
+            # Check for exception
+            exception_details = None
+            for event in span.events:
+                if event.name == 'exception' and event.attributes:
+                    exception_type = event.attributes.get('exception.type', 'Unknown')
+                    exception_message = event.attributes.get('exception.message', '')
+                    exception_stacktrace = event.attributes.get('exception.stacktrace', '')
+                    exception_details = f"{exception_type}: {exception_message}\n{exception_stacktrace}"
+                    break
+            
+            if not exception_details:
+                if 'exception.type' in span.attributes:
+                    exception_type = span.attributes.get('exception.type', 'Unknown')
+                    exception_message = span.attributes.get('exception.message', '')
+                    exception_stacktrace = span.attributes.get('exception.stacktrace', '')
+                    exception_details = f"{exception_type}: {exception_message}\n{exception_stacktrace}"
+            
+            if exception_details:
+                error_message = exception_details
+            
+            is_error = span.status.code == 2
+            severity = "ERROR" if is_error else "INFO"
+            
+            if not is_error and exception_details:
+                severity = "WARNING"
+                is_error = True
+            
+            metadata = {
+                "traceId": span.traceId,
+                "spanId": span.spanId,
+                "parentSpanId": span.parentSpanId,
+                "spanName": span.name,
+                "startTime": span.startTime,
+                "endTime": span.endTime,
+                "duration": span.endTime - span.startTime,
+                "attributes": span.attributes,
+                "events": [
+                    {
+                        "name": event.name,
+                        "time": event.time,
+                        "attributes": event.attributes
+                    }
+                    for event in span.events
+                ],
+                "resource": span.resource,
+                "statusCode": span.status.code,
+                "statusMessage": span.status.message
+            }
+            
+            # Prepare log data for broadcast (non-blocking with timeout)
+            log_data = {
+                "service_name": service_name,
+                "severity": severity,
+                "message": error_message,
+                "source": "otel",
+                "timestamp": datetime.utcnow().isoformat(),
+                "metadata": metadata
+            }
+            
+            # Broadcast with timeout (non-blocking)
+            try:
+                await asyncio.wait_for(manager.broadcast(log_data), timeout=1.0)
+            except (asyncio.TimeoutError, Exception):
+                pass  # Broadcast is non-critical
+            
+            # Collect errors for batch insert
+            if is_error or severity.upper() in ["ERROR", "CRITICAL"]:
+                logs_to_add.append({
+                    "service_name": service_name,
+                    "level": severity,
+                    "severity": severity,
+                    "message": error_message,
+                    "source": "otel",
+                    "integration_id": integration_id,
+                    "user_id": user_id,
+                    "metadata_json": metadata,
+                    "timestamp": datetime.utcnow()
+                })
+        
+        # Batch insert all error logs
+        if logs_to_add:
+            def _bulk_insert_logs_sync(db: Session, logs: List[dict]):
+                db.bulk_insert_mappings(LogEntry, logs)
+                db.commit()
+            
+            await asyncio.to_thread(_bulk_insert_logs_sync, db, logs_to_add)
+            
+            # Trigger incident checks
+            try:
+                from src.services.redpanda_task_processor import publish_log_processing_task
+                # Fetch recent logs to get IDs
+                def _fetch_recent_logs_sync(db: Session, service_name: str, source: str, limit: int):
+                    return db.query(LogEntry).filter(
+                        LogEntry.service_name == service_name,
+                        LogEntry.source == source
+                    ).order_by(LogEntry.id.desc()).limit(limit).all()
+                
+                recent_logs = await asyncio.to_thread(
+                    _fetch_recent_logs_sync,
+                    db,
+                    service_name,
+                    "otel",
+                    len(logs_to_add)
+                )
+                
+                for log in recent_logs:
+                    publish_log_processing_task(log.id)
+            except Exception:
+                pass
+    finally:
+        if close_db:
+            db.close()
+
+
 class LogsController:
     """Controller for log ingestion and retrieval."""
     
     @staticmethod
     async def ingest_log(log: LogIngestRequest, request: Request, background_tasks: BackgroundTasks, db: Session):
         """
-        Ingest logs from clients. All logs are broadcast to WebSockets.
-        Only ERROR and CRITICAL logs are persisted to the database.
+        Ingest logs from clients. Returns 202 Accepted immediately and processes in background.
+        All logs are broadcast to WebSockets. Only ERROR and CRITICAL logs are persisted to the database.
         """
         try:
             # API Key is already validated by middleware
             api_key = request.state.api_key
             
-            # Determine integration_id
+            # Determine integration_id quickly
             integration_id = api_key.integration_id
             if not integration_id and log.integration_id:
-                # Run DB query in thread pool to avoid blocking
-                integration = await asyncio.to_thread(
-                    _query_integration_sync,
-                    db,
-                    log.integration_id,
-                    api_key.user_id
-                )
-                if integration:
-                    integration_id = integration.id
+                try:
+                    integration = await asyncio.wait_for(
+                        asyncio.to_thread(_query_integration_sync, db, log.integration_id, api_key.user_id),
+                        timeout=0.5
+                    )
+                    if integration:
+                        integration_id = integration.id
+                except (asyncio.TimeoutError, Exception):
+                    pass  # Use default integration_id
             
-            # Prepare log data
+            # Prepare log data for background processing
             log_data = {
                 "service_name": log.service_name,
                 "severity": log.severity,
                 "message": log.message,
                 "source": log.source,
                 "timestamp": log.timestamp or datetime.utcnow().isoformat(),
-                "metadata": log.metadata
+                "metadata": log.metadata,
+                "release": log.release,
+                "environment": log.environment,
+                "integration_id": log.integration_id
             }
             
-            # 1. Broadcast to WebSockets (ALL LOGS)
-            # Don't let WebSocket failures prevent persistence
+            # Quick broadcast attempt (non-blocking with timeout)
             try:
-                await manager.broadcast(log_data)
-            except Exception as ws_error:
-                print(f"Warning: Failed to broadcast log to WebSockets: {ws_error}")
-                # Continue execution even if broadcast fails
+                await asyncio.wait_for(manager.broadcast(log_data), timeout=0.5)
+            except (asyncio.TimeoutError, Exception):
+                pass  # Broadcast is non-critical, continue
             
-            # 2. Persistence & Incident Logic (ERRORS ONLY)
-            severity_upper = log.severity.upper() if log.severity else ""
-            should_persist = severity_upper in ["ERROR", "CRITICAL"]
+            # Process in background and return immediately
+            background_tasks.add_task(
+                process_log_background,
+                log_data,
+                api_key.id,
+                api_key.user_id,
+                integration_id
+            )
             
-            if should_persist:
-                try:
-                    # Resolve source maps in metadata before saving (move to background task for non-blocking)
-                    resolved_metadata = log.metadata
-                    if log.metadata and isinstance(log.metadata, dict):
-                        # Use release/environment from top-level request, fallback to metadata
-                        release = log.release or log.metadata.get('release') or log.metadata.get('releaseId') or None
-                        environment = log.environment or log.metadata.get('environment') or log.metadata.get('env') or "production"
-                        
-                        # Try source map resolution in background to avoid blocking
-                        # If it fails or takes too long, use original metadata
-                        try:
-                            resolved_metadata = await asyncio.wait_for(
-                                asyncio.to_thread(
-                                    _resolve_sourcemaps_sync,
-                                    db,
-                                    api_key.user_id,
-                                    log.service_name,
-                                    log.metadata,
-                                    release,
-                                    environment
-                                ),
-                                timeout=2.0  # 2 second timeout for source map resolution
-                            )
-                        except ImportError:
-                            # Source map resolution not available - this is optional
-                            resolved_metadata = log.metadata
-                        except (asyncio.TimeoutError, Exception) as sm_error:
-                            # Don't fail log ingestion if source map resolution fails or times out
-                            import logging
-                            logger = logging.getLogger(__name__)
-                            logger.debug(f"Source map resolution failed (non-critical): {sm_error}")
-                            resolved_metadata = log.metadata
-                    
-                    # Parse timestamp and ensure partition exists
-                    log_timestamp = datetime.utcnow()
-                    if log.timestamp:
-                        try:
-                            # Try parsing ISO format timestamp
-                            if isinstance(log.timestamp, str):
-                                log_timestamp = datetime.fromisoformat(log.timestamp.replace('Z', '+00:00'))
-                            elif isinstance(log.timestamp, datetime):
-                                log_timestamp = log.timestamp
-                        except (ValueError, AttributeError) as e:
-                            print(f"Warning: Could not parse timestamp {log.timestamp}, using current time: {e}")
-                            log_timestamp = datetime.utcnow()
-                    
-                    # Ensure partition exists before inserting (non-blocking)
-                    await asyncio.to_thread(ensure_partition_exists_for_timestamp, log_timestamp)
-                    
-                    db_log = LogEntry(
-                        service_name=log.service_name,
-                        level=log.severity,
-                        severity=log.severity,
-                        message=log.message,
-                        source=log.source,
-                        integration_id=integration_id,
-                        user_id=api_key.user_id,  # Store user_id from API key
-                        metadata_json=resolved_metadata,  # Use resolved metadata with source maps
-                        timestamp=log_timestamp
-                    )
-                    # Persist log in thread pool to avoid blocking
-                    db_log = await asyncio.to_thread(_persist_log_sync, db, db_log)
-                    
-                    # Log successful persistence for debugging
-                    print(f"✓ Persisted {severity_upper} log: id={db_log.id}, service={log.service_name}, message={log.message[:50]}")
-                    
-                    # Trigger incident check via Redpanda
-                    try:
-                        from src.services.redpanda_task_processor import publish_log_processing_task
-                        publish_log_processing_task(db_log.id)
-                    except Exception as task_error:
-                        print(f"Warning: Failed to queue incident check task via Redpanda: {task_error}")
-                        # Don't fail the request if task queuing fails
-                    
-                    return {"status": "ingested", "id": db_log.id, "persisted": True, "severity": log.severity}
-                except Exception as db_error:
-                    # Rollback on error
-                    db.rollback()
-                    print(f"✗ Failed to persist log to database: {db_error}")
-                    print(f"  Log details: service={log.service_name}, severity={log.severity}, message={log.message[:50]}")
-                    # Return error response but don't raise exception (log was received)
-                    return {
-                        "status": "broadcasted",
-                        "persisted": False,
-                        "error": "Failed to persist log to database",
-                        "severity": log.severity
-                    }
-            else:
-                # Log received but not persisted (INFO/WARNING)
-                print(f"Received {severity_upper} log (not persisted): service={log.service_name}, message={log.message[:50]}")
-                return {"status": "broadcasted", "persisted": False, "severity": log.severity}
+            # Return 202 Accepted immediately
+            return Response(
+                status_code=202,
+                content=json.dumps({
+                    "status": "accepted",
+                    "message": "Log is being processed in background"
+                }),
+                media_type="application/json"
+            )
                 
         except Exception as e:
             # Catch any unexpected errors
@@ -254,21 +400,70 @@ class LogsController:
     @staticmethod
     async def ingest_logs_batch(batch: LogBatchRequest, request: Request, background_tasks: BackgroundTasks, db: Session):
         """
-        Ingest multiple logs in a batch. All logs are broadcast to WebSockets.
-        Only ERROR and CRITICAL logs are persisted to the database.
+        Ingest multiple logs in a batch. Returns 202 Accepted immediately and processes in background.
+        All logs are broadcast to WebSockets. Only ERROR and CRITICAL logs are persisted to the database.
         """
         try:
             # API Key is already validated by middleware
             api_key = request.state.api_key
-            
-            # Determine integration_id (same for all logs in batch)
             integration_id = api_key.integration_id
             
-            results = []
-            persisted_count = 0
-            broadcasted_count = 0
+            # Prepare batch data for background processing
+            batch_data = {
+                "logs": [log.dict() for log in batch.logs],
+                "api_key_id": api_key.id,
+                "user_id": api_key.user_id,
+                "integration_id": integration_id
+            }
             
+            # Quick broadcast attempts (non-blocking with timeout)
             for log in batch.logs:
+                log_data = {
+                    "service_name": log.service_name,
+                    "severity": log.severity,
+                    "message": log.message,
+                    "source": log.source,
+                    "timestamp": log.timestamp or datetime.utcnow().isoformat(),
+                    "metadata": log.metadata
+                }
+                try:
+                    await asyncio.wait_for(manager.broadcast(log_data), timeout=0.3)
+                except (asyncio.TimeoutError, Exception):
+                    pass  # Continue with next log
+            
+            # Process in background and return immediately
+            async def process_batch_background(batch_data: dict):
+                """Background task to process batch of logs."""
+                db = SessionLocal()
+                try:
+                    api_key_id = batch_data["api_key_id"]
+                    user_id = batch_data["user_id"]
+                    integration_id = batch_data["integration_id"]
+                    
+                    for log_dict in batch_data["logs"]:
+                        await process_log_background(log_dict, api_key_id, user_id, integration_id, db)
+                finally:
+                    db.close()
+            
+            background_tasks.add_task(process_batch_background, batch_data)
+            
+            # Return 202 Accepted immediately
+            return Response(
+                status_code=202,
+                content=json.dumps({
+                    "status": "accepted",
+                    "message": f"Batch of {len(batch.logs)} logs is being processed in background"
+                }),
+                media_type="application/json"
+            )
+            
+            # OLD CODE BELOW - keeping for reference but not executed
+            if False:
+                results = []
+                persisted_count = 0
+                broadcasted_count = 0
+                
+                for log in batch.logs:
                 try:
                     # Override integration_id if provided in log
                     log_integration_id = integration_id
@@ -450,150 +645,41 @@ class LogsController:
     async def ingest_otel_errors(payload: OTelErrorPayload, background_tasks: BackgroundTasks, request: Request, db: Session):
         """
         Ingest OpenTelemetry spans from HealOps SDK.
-        Now receives ALL spans (success & error).
+        Returns 202 Accepted immediately and processes spans in background with batch operations.
         - Broadcasts ALL spans to WebSocket (Live Logs)
         - Persists ONLY ERROR/CRITICAL spans to Database
         """
         # API key is already validated by APIKeyMiddleware and set in request.state
-        # Use it to update last_used timestamp
         if not hasattr(request.state, 'api_key') or not request.state.api_key:
             raise HTTPException(status_code=401, detail="Invalid API key")
         
         valid_key = request.state.api_key
         
-        # Update last_used timestamp (non-blocking)
-        def _update_last_used_sync(db: Session, api_key: ApiKey):
-            api_key.last_used = datetime.utcnow()
-            db.commit()
-        
-        await asyncio.to_thread(_update_last_used_sync, db, valid_key)
-        
-        # Ensure partition exists for current date (all logs will use current timestamp) - non-blocking
-        await asyncio.to_thread(ensure_partition_exists_for_timestamp, datetime.utcnow())
-        
-        # Process each span
-        persisted_count = 0
-        total_received = len(payload.spans)
-        
-        for span in payload.spans:
-            # Extract error information
-            error_message = span.status.message or span.name
-            
-            # Check for exception in events
-            exception_details = None
-            for event in span.events:
-                if event.name == 'exception' and event.attributes:
-                    exception_type = event.attributes.get('exception.type', 'Unknown')
-                    exception_message = event.attributes.get('exception.message', '')
-                    exception_stacktrace = event.attributes.get('exception.stacktrace', '')
-                    exception_details = f"{exception_type}: {exception_message}\n{exception_stacktrace}"
-                    break
-            
-            # Check for exception in attributes
-            if not exception_details:
-                if 'exception.type' in span.attributes or 'exception.message' in span.attributes:
-                    exception_type = span.attributes.get('exception.type', 'Unknown')
-                    exception_message = span.attributes.get('exception.message', '')
-                    exception_stacktrace = span.attributes.get('exception.stacktrace', '')
-                    exception_details = f"{exception_type}: {exception_message}\n{exception_stacktrace}"
-            
-            if exception_details:
-                error_message = exception_details
-            
-            # Determine severity based on status code
-            # SpanStatusCode: UNSET=0, OK=1, ERROR=2
-            is_error = span.status.code == 2
-            severity = "ERROR" if is_error else "INFO"
-            
-            # If it's not an error, check if it has exception details (could be a handled exception)
-            if not is_error and exception_details:
-                severity = "WARNING"
-                is_error = True  # Treat warning as something to persist? Requirement says "error logs", usually implies ERROR/CRITICAL. Let's stick to strict ERROR code for persistence unless it has exception.
-            
-            metadata = {
-                "traceId": span.traceId,
-                "spanId": span.spanId,
-                "parentSpanId": span.parentSpanId,
-                "spanName": span.name,
-                "startTime": span.startTime,
-                "endTime": span.endTime,
-                "duration": span.endTime - span.startTime,
-                "attributes": span.attributes,
-                "events": [
-                    {
-                        "name": event.name,
-                        "time": event.time,
-                        "attributes": event.attributes
-                    }
-                    for event in span.events
-                ],
-                "resource": span.resource,
-                "statusCode": span.status.code,
-                "statusMessage": span.status.message
-            }
-            
-            # Prepare log data for broadcast
-            log_data = {
-                "service_name": payload.serviceName,
-                "severity": severity,
-                "message": error_message,
-                "source": "otel",
-                "timestamp": datetime.utcnow().isoformat(),
-                "metadata": metadata
-            }
-            
-            # 1. Broadcast (ALL SPANS)
-            await manager.broadcast(log_data)
-            
-            # 2. Persist (ONLY ERRORS)
-            if is_error or severity.upper() in ["ERROR", "CRITICAL"]:
-                db_log = LogEntry(
-                    service_name=payload.serviceName,
-                    level=severity,
-                    severity=severity,
-                    message=error_message,
-                    source="otel",
-                    integration_id=valid_key.integration_id,
-                    user_id=valid_key.user_id,  # Store user_id from API key
-                    metadata_json=metadata
-                )
-                db.add(db_log)
-                persisted_count += 1
-        
-        if persisted_count > 0:
-            # Commit in thread pool to avoid blocking
-            await asyncio.to_thread(_commit_batch_sync, db)
-            
-            # Trigger async analysis for persisted logs via Redpanda
-            try:
-                from src.services.redpanda_task_processor import publish_log_processing_task
-                # Fetch IDs of newly inserted logs (non-blocking)
-                def _fetch_recent_logs_sync(db: Session, service_name: str, source: str, limit: int):
-                    return db.query(LogEntry).filter(
-                        LogEntry.service_name == service_name,
-                        LogEntry.source == source
-                    ).order_by(LogEntry.id.desc()).limit(limit).all()
-                
-                recent_logs = await asyncio.to_thread(
-                    _fetch_recent_logs_sync,
-                    db,
-                    payload.serviceName,
-                    "otel",
-                    persisted_count
-                )
-
-                for log in recent_logs:
-                    publish_log_processing_task(log.id)
-
-            except Exception as e:
-                print(f"Failed to trigger tasks via Redpanda: {e}")
-        
-        return {
-            "status": "success",
-            "received": total_received,
-            "persisted": persisted_count,
-            "message": f"Received {total_received} spans, persisted {persisted_count} errors"
+        # Prepare payload data for background processing
+        payload_dict = {
+            "apiKey": payload.apiKey,
+            "serviceName": payload.serviceName,
+            "spans": [span.dict() for span in payload.spans]
         }
+        
+        # Process in background and return immediately
+        background_tasks.add_task(
+            process_otel_spans_background,
+            payload_dict,
+            valid_key.id,
+            valid_key.user_id,
+            valid_key.integration_id
+        )
+        
+        # Return 202 Accepted immediately
+        return Response(
+            status_code=202,
+            content=json.dumps({
+                "status": "accepted",
+                "message": f"Processing {len(payload.spans)} spans in background"
+            }),
+            media_type="application/json"
+        )
     
     @staticmethod
     def list_logs(limit: int, request: Request, db: Session):
