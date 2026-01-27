@@ -464,158 +464,158 @@ class LogsController:
                 broadcasted_count = 0
                 
                 for log in batch.logs:
-                try:
-                    # Override integration_id if provided in log
-                    log_integration_id = integration_id
-                    if not log_integration_id and log.integration_id:
-                        # Run DB query in thread pool to avoid blocking
-                        integration = await asyncio.to_thread(
-                            _query_integration_sync,
-                            db,
-                            log.integration_id,
-                            api_key.user_id
-                        )
-                        if integration:
-                            log_integration_id = integration.id
-                    
-                    # Prepare log data
-                    log_data = {
-                        "service_name": log.service_name,
-                        "severity": log.severity,
-                        "message": log.message,
-                        "source": log.source,
-                        "timestamp": log.timestamp or datetime.utcnow().isoformat(),
-                        "metadata": log.metadata
-                    }
-                    
-                    # 1. Broadcast to WebSockets (ALL LOGS)
                     try:
-                        await manager.broadcast(log_data)
-                        broadcasted_count += 1
-                    except Exception as ws_error:
-                        print(f"Warning: Failed to broadcast log to WebSockets: {ws_error}")
-                        # Continue execution even if broadcast fails
-                    
-                    # 2. Persistence & Incident Logic (ERRORS ONLY)
-                    severity_upper = log.severity.upper() if log.severity else ""
-                    should_persist = severity_upper in ["ERROR", "CRITICAL"]
-                    
-                    if should_persist:
+                        # Override integration_id if provided in log
+                        log_integration_id = integration_id
+                        if not log_integration_id and log.integration_id:
+                            # Run DB query in thread pool to avoid blocking
+                            integration = await asyncio.to_thread(
+                                _query_integration_sync,
+                                db,
+                                log.integration_id,
+                                api_key.user_id
+                            )
+                            if integration:
+                                log_integration_id = integration.id
+                        
+                        # Prepare log data
+                        log_data = {
+                            "service_name": log.service_name,
+                            "severity": log.severity,
+                            "message": log.message,
+                            "source": log.source,
+                            "timestamp": log.timestamp or datetime.utcnow().isoformat(),
+                            "metadata": log.metadata
+                        }
+                        
+                        # 1. Broadcast to WebSockets (ALL LOGS)
                         try:
-                            # Use a savepoint for each log so failures don't affect others
-                            savepoint = db.begin_nested()
+                            await manager.broadcast(log_data)
+                            broadcasted_count += 1
+                        except Exception as ws_error:
+                            print(f"Warning: Failed to broadcast log to WebSockets: {ws_error}")
+                            # Continue execution even if broadcast fails
+                        
+                        # 2. Persistence & Incident Logic (ERRORS ONLY)
+                        severity_upper = log.severity.upper() if log.severity else ""
+                        should_persist = severity_upper in ["ERROR", "CRITICAL"]
+                        
+                        if should_persist:
                             try:
-                                # Parse timestamp and ensure partition exists
-                                log_timestamp = datetime.utcnow()
-                                if log.timestamp:
-                                    try:
-                                        # Try parsing ISO format timestamp
-                                        if isinstance(log.timestamp, str):
-                                            log_timestamp = datetime.fromisoformat(log.timestamp.replace('Z', '+00:00'))
-                                        elif isinstance(log.timestamp, datetime):
-                                            log_timestamp = log.timestamp
-                                    except (ValueError, AttributeError) as e:
-                                        print(f"Warning: Could not parse timestamp {log.timestamp}, using current time: {e}")
-                                        log_timestamp = datetime.utcnow()
-                                
-                                # Resolve source maps in metadata before saving (with timeout)
-                                resolved_metadata = log.metadata
-                                if log.metadata and isinstance(log.metadata, dict):
-                                    # Use release/environment from top-level request, fallback to metadata
-                                    release = log.release or log.metadata.get('release') or log.metadata.get('releaseId') or None
-                                    environment = log.environment or log.metadata.get('environment') or log.metadata.get('env') or "production"
-                                    
-                                    # Try source map resolution with timeout to avoid blocking
-                                    try:
-                                        resolved_metadata = await asyncio.wait_for(
-                                            asyncio.to_thread(
-                                                _resolve_sourcemaps_sync,
-                                                db,
-                                                api_key.user_id,
-                                                log.service_name,
-                                                log.metadata,
-                                                release,
-                                                environment
-                                            ),
-                                            timeout=2.0  # 2 second timeout
-                                        )
-                                    except ImportError:
-                                        # Source map resolution not available - this is optional
-                                        resolved_metadata = log.metadata
-                                    except (asyncio.TimeoutError, Exception) as sm_error:
-                                        # Don't fail log ingestion if source map resolution fails or times out
-                                        import logging
-                                        logger = logging.getLogger(__name__)
-                                        logger.debug(f"Source map resolution failed (non-critical): {sm_error}")
-                                        resolved_metadata = log.metadata
-                                
-                                # Ensure partition exists before inserting (non-blocking)
-                                await asyncio.to_thread(ensure_partition_exists_for_timestamp, log_timestamp)
-                                
-                                db_log = LogEntry(
-                                    service_name=log.service_name,
-                                    level=log.severity,
-                                    severity=log.severity,
-                                    message=log.message,
-                                    source=log.source,
-                                    integration_id=log_integration_id,
-                                    user_id=api_key.user_id,  # Store user_id from API key
-                                    metadata_json=resolved_metadata,  # Use resolved metadata with source maps
-                                    timestamp=log_timestamp
-                                )
-                                db.add(db_log)
-                                db.flush()  # Flush to get the ID without committing
-                                savepoint.commit()
-                                persisted_count += 1
-                                
-                                # Log successful persistence for debugging
-                                print(f"✓ Persisted {severity_upper} log: id={db_log.id}, service={log.service_name}, message={log.message[:50]}")
-                                
-                                # Trigger incident check via Redpanda
+                                # Use a savepoint for each log so failures don't affect others
+                                savepoint = db.begin_nested()
                                 try:
-                                    from src.services.redpanda_task_processor import publish_log_processing_task
-                                    publish_log_processing_task(db_log.id)
-                                except Exception as task_error:
-                                    print(f"Warning: Failed to queue incident check task via Redpanda: {task_error}")
-                                    # Don't fail the request if task queuing fails
-                                
-                                results.append({"status": "ingested", "id": db_log.id, "persisted": True, "severity": log.severity})
-                            except Exception as db_error:
-                                # Rollback only this savepoint, not the entire transaction
-                                savepoint.rollback()
-                                print(f"✗ Failed to persist log to database: {db_error}")
-                                print(f"  Log details: service={log.service_name}, severity={log.severity}, message={log.message[:50]}")
-                                # Return error response but don't raise exception (log was received)
+                                    # Parse timestamp and ensure partition exists
+                                    log_timestamp = datetime.utcnow()
+                                    if log.timestamp:
+                                        try:
+                                            # Try parsing ISO format timestamp
+                                            if isinstance(log.timestamp, str):
+                                                log_timestamp = datetime.fromisoformat(log.timestamp.replace('Z', '+00:00'))
+                                            elif isinstance(log.timestamp, datetime):
+                                                log_timestamp = log.timestamp
+                                        except (ValueError, AttributeError) as e:
+                                            print(f"Warning: Could not parse timestamp {log.timestamp}, using current time: {e}")
+                                            log_timestamp = datetime.utcnow()
+                                    
+                                    # Resolve source maps in metadata before saving (with timeout)
+                                    resolved_metadata = log.metadata
+                                    if log.metadata and isinstance(log.metadata, dict):
+                                        # Use release/environment from top-level request, fallback to metadata
+                                        release = log.release or log.metadata.get('release') or log.metadata.get('releaseId') or None
+                                        environment = log.environment or log.metadata.get('environment') or log.metadata.get('env') or "production"
+                                        
+                                        # Try source map resolution with timeout to avoid blocking
+                                        try:
+                                            resolved_metadata = await asyncio.wait_for(
+                                                asyncio.to_thread(
+                                                    _resolve_sourcemaps_sync,
+                                                    db,
+                                                    api_key.user_id,
+                                                    log.service_name,
+                                                    log.metadata,
+                                                    release,
+                                                    environment
+                                                ),
+                                                timeout=2.0  # 2 second timeout
+                                            )
+                                        except ImportError:
+                                            # Source map resolution not available - this is optional
+                                            resolved_metadata = log.metadata
+                                        except (asyncio.TimeoutError, Exception) as sm_error:
+                                            # Don't fail log ingestion if source map resolution fails or times out
+                                            import logging
+                                            logger = logging.getLogger(__name__)
+                                            logger.debug(f"Source map resolution failed (non-critical): {sm_error}")
+                                            resolved_metadata = log.metadata
+                                    
+                                    # Ensure partition exists before inserting (non-blocking)
+                                    await asyncio.to_thread(ensure_partition_exists_for_timestamp, log_timestamp)
+                                    
+                                    db_log = LogEntry(
+                                        service_name=log.service_name,
+                                        level=log.severity,
+                                        severity=log.severity,
+                                        message=log.message,
+                                        source=log.source,
+                                        integration_id=log_integration_id,
+                                        user_id=api_key.user_id,  # Store user_id from API key
+                                        metadata_json=resolved_metadata,  # Use resolved metadata with source maps
+                                        timestamp=log_timestamp
+                                    )
+                                    db.add(db_log)
+                                    db.flush()  # Flush to get the ID without committing
+                                    savepoint.commit()
+                                    persisted_count += 1
+                                    
+                                    # Log successful persistence for debugging
+                                    print(f"✓ Persisted {severity_upper} log: id={db_log.id}, service={log.service_name}, message={log.message[:50]}")
+                                    
+                                    # Trigger incident check via Redpanda
+                                    try:
+                                        from src.services.redpanda_task_processor import publish_log_processing_task
+                                        publish_log_processing_task(db_log.id)
+                                    except Exception as task_error:
+                                        print(f"Warning: Failed to queue incident check task via Redpanda: {task_error}")
+                                        # Don't fail the request if task queuing fails
+                                    
+                                    results.append({"status": "ingested", "id": db_log.id, "persisted": True, "severity": log.severity})
+                                except Exception as db_error:
+                                    # Rollback only this savepoint, not the entire transaction
+                                    savepoint.rollback()
+                                    print(f"✗ Failed to persist log to database: {db_error}")
+                                    print(f"  Log details: service={log.service_name}, severity={log.severity}, message={log.message[:50]}")
+                                    # Return error response but don't raise exception (log was received)
+                                    results.append({
+                                        "status": "broadcasted",
+                                        "persisted": False,
+                                        "error": "Failed to persist log to database",
+                                        "severity": log.severity
+                                    })
+                            except Exception as savepoint_error:
+                                # Handle savepoint creation errors
+                                print(f"✗ Failed to create savepoint: {savepoint_error}")
                                 results.append({
                                     "status": "broadcasted",
                                     "persisted": False,
                                     "error": "Failed to persist log to database",
                                     "severity": log.severity
                                 })
-                        except Exception as savepoint_error:
-                            # Handle savepoint creation errors
-                            print(f"✗ Failed to create savepoint: {savepoint_error}")
-                            results.append({
-                                "status": "broadcasted",
-                                "persisted": False,
-                                "error": "Failed to persist log to database",
-                                "severity": log.severity
-                            })
-                    else:
-                        # Log received but not persisted (INFO/WARNING)
-                        print(f"Received {severity_upper} log (not persisted): service={log.service_name}, message={log.message[:50]}")
-                        results.append({"status": "broadcasted", "persisted": False, "severity": log.severity})
-                        
-                except Exception as log_error:
-                    # Handle individual log errors without failing the entire batch
-                    print(f"✗ Error processing log in batch: {log_error}")
-                    import traceback
-                    traceback.print_exc()
-                    results.append({
-                        "status": "error",
-                        "error": str(log_error),
-                        "severity": log.severity if log else "UNKNOWN"
-                    })
+                        else:
+                            # Log received but not persisted (INFO/WARNING)
+                            print(f"Received {severity_upper} log (not persisted): service={log.service_name}, message={log.message[:50]}")
+                            results.append({"status": "broadcasted", "persisted": False, "severity": log.severity})
+                            
+                    except Exception as log_error:
+                        # Handle individual log errors without failing the entire batch
+                        print(f"✗ Error processing log in batch: {log_error}")
+                        import traceback
+                        traceback.print_exc()
+                        results.append({
+                            "status": "error",
+                            "error": str(log_error),
+                            "severity": log.severity if log else "UNKNOWN"
+                        })
             
             # Commit all persisted logs at once (non-blocking)
             if persisted_count > 0:
