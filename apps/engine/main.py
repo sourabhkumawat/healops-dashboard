@@ -1615,7 +1615,7 @@ Keep responses conversational and friendly. If asked about specific incidents or
         import requests
         from src.core.ai_analysis import MODEL_CONFIG
         
-        # Use chat model from config (free Xiaomi model)
+        # Use chat model from config (Xiaomi MiMo-V2-Flash)
         chat_config = MODEL_CONFIG.get("chat", MODEL_CONFIG["simple_analysis"])
         
         response = requests.post(

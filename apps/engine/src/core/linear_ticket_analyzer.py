@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 # Cost-optimized model configuration for ticket analysis
 TICKET_ANALYSIS_MODEL_CONFIG = {
     "feasibility_check": {
-        "model": "xiaomi/mimo-v2-flash:free",  # Free model for initial screening
+        "model": "deepseek/deepseek-r1-0528:free",  # Paid model for initial screening (free tier ended)
         "max_tokens": 300,
         "temperature": 0.2
     },

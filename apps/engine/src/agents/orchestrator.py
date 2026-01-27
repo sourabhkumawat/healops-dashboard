@@ -92,7 +92,7 @@ try:
     else:
         try:
             flash_llm = LLM(
-                model="openai/xiaomi/mimo-v2-flash:free",
+                model="openai/deepseek/deepseek-r1-0528:free",
                 base_url=base_url,
                 api_key=api_key
             )

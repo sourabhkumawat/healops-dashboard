@@ -11,13 +11,13 @@ api_key = os.getenv("OPENCOUNCIL_API")
 base_url = "https://openrouter.ai/api/v1"
 
 # Cost-effective models via OpenRouter
-# Xiaomi MiMo-V2-Flash (Free): Excellent reasoning/coding, 256K context, free of charge.
+# Xiaomi MiMo-V2-Flash: Excellent reasoning/coding, 256K context (paid model - free tier ended)
 # Grok Code Fast 1: Specialized for agentic coding with reasoning traces - $0.20/M Input, $1.50/M Output
 # NOTE: Prefixing with "openai/" forces CrewAI to use the OpenAI protocol (compatible with OpenRouter)
 # instead of trying to load native drivers for google/gemini which require GOOGLE_API_KEY.
 
 flash_llm = LLM(
-    model="openai/xiaomi/mimo-v2-flash:free",
+    model="openai/deepseek/deepseek-r1-0528:free",
     base_url=base_url,
     api_key=api_key
 )

@@ -16,7 +16,7 @@ from src.memory.memory import CodeMemory
 # Use cheaper models for simpler tasks, expensive models only when needed
 MODEL_CONFIG = {
     "simple_analysis": {
-        "model": "xiaomi/mimo-v2-flash:free",  # Free model
+        "model": "deepseek/deepseek-r1-0528:free",
         "max_tokens": 500,
         "temperature": 0.3
     },
@@ -31,7 +31,7 @@ MODEL_CONFIG = {
         "temperature": 0.2
     },
     "chat": {
-        "model": "xiaomi/mimo-v2-flash:free",  # Free model for Slack chat
+        "model": "deepseek/deepseek-r1-0528:free",  # Paid model for Slack chat (free tier ended)
         "max_tokens": 500,
         "temperature": 0.7
     }
@@ -1320,8 +1320,10 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
         # Estimate cost (approximate) - safely handle model_config
         try:
             model_name = model_config.get("model", "unknown") if isinstance(model_config, dict) else "unknown"
-            if "mimo-v2-flash" in model_name and "free" in model_name:
-                estimated_cost = 0.0  # Free model
+            if "deepseek/deepseek-r1-0528" in model_name:
+                # MiMo-V2-Flash (paid): Check OpenRouter pricing - using placeholder estimate
+                # Update with actual pricing from https://openrouter.ai/models
+                estimated_cost = (input_tokens * 0.10 / 1_000_000) + (output_tokens * 0.50 / 1_000_000)
             elif "grok-code-fast" in model_name:
                 # Grok Code Fast 1: $0.20/M Input, $1.50/M Output
                 estimated_cost = (input_tokens * 0.20 / 1_000_000) + (output_tokens * 1.50 / 1_000_000)
