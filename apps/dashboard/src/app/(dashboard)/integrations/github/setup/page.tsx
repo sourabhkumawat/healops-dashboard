@@ -20,7 +20,7 @@ import {
     SelectValue
 } from '@/components/ui/select';
 import { Loader2, CheckCircle2, Github, ArrowRight } from 'lucide-react';
-import { getRepositories, completeIntegrationSetup } from '@/actions/integrations';
+import { getRepositories, completeIntegrationSetup } from '@/lib/integrations-client';
 import { API_BASE } from '@/lib/config';
 
 type Repository = {

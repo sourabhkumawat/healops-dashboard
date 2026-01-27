@@ -5,7 +5,7 @@ import Image from 'next/image';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Loader2, Check, ArrowRight, Github } from 'lucide-react';
-import { generateApiKey } from '@/actions/integrations';
+import { generateApiKey } from '@/lib/integrations-client';
 import { useRouter } from 'next/navigation';
 
 // Helper Component defined outside render to avoid recreation

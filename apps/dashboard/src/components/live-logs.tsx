@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { LogEntry } from '@/actions/logs';
+import type { LogEntry } from '@/lib/types/logs';
 import { getWebSocketUrl, getApiBaseUrl } from '@/lib/config';
 
 interface LiveLogsProps {
@@ -454,32 +454,32 @@ export function LiveLogs({ initialLogs = [] }: LiveLogsProps) {
                                     </div>
 
                                     {/* Metadata (on hover) */}
-                                    {log.metadata && (
+                                    {log.metadata ? (
                                         <div className="hidden group-hover:block mt-2 pt-2 border-t border-zinc-800/50 space-y-1 text-zinc-500 text-[10px]">
-                                            {log.metadata.traceId && (
+                                            {log.metadata.traceId != null ? (
                                                 <div className="flex items-center gap-2">
                                                     <span className="text-zinc-600">
                                                         Trace:
                                                     </span>
                                                     <span className="font-mono text-zinc-400">
-                                                        {log.metadata.traceId}
+                                                        {String(log.metadata.traceId)}
                                                     </span>
                                                 </div>
-                                            )}
-                                            {log.metadata.spanId && (
+                                            ) : null}
+                                            {log.metadata.spanId != null ? (
                                                 <div className="flex items-center gap-2">
                                                     <span className="text-zinc-600">
                                                         Span:
                                                     </span>
                                                     <span className="font-mono text-zinc-400">
-                                                        {log.metadata.spanId}
+                                                        {String(log.metadata.spanId)}
                                                     </span>
                                                 </div>
-                                            )}
+                                            ) : null}
                                             {log.metadata.attributes &&
-                                                Object.keys(
-                                                    log.metadata.attributes
-                                                ).length > 0 && (
+                                            Object.keys(
+                                                log.metadata.attributes
+                                            ).length > 0 ? (
                                                     <div className="flex flex-wrap gap-x-3 gap-y-1">
                                                         {Object.entries(
                                                             log.metadata
@@ -511,9 +511,9 @@ export function LiveLogs({ initialLogs = [] }: LiveLogsProps) {
                                                                 </span>
                                                             ))}
                                                     </div>
-                                                )}
+                                                ) : null}
                                         </div>
-                                    )}
+                                    ) : null}
                                 </div>
                             </div>
                         </div>

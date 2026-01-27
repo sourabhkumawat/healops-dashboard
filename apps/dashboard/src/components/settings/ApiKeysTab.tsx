@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Key, Trash2, CheckCircle2, XCircle } from 'lucide-react';
-import { listApiKeys } from '@/actions/integrations';
+import { listApiKeys } from '@/lib/integrations-client';
 
 type ApiKey = {
     id: number;

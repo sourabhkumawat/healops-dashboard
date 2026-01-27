@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useMemo } from 'react';
 import { IncidentTable, Incident } from '@/components/incident-table';
 import { Loader2 } from 'lucide-react';
-import { getIncidents, PaginatedIncidentsResponse } from '@/actions/incidents';
+import { fetchClient } from '@/lib/client-api';
 import {
     Select,
     SelectContent,
@@ -45,9 +45,9 @@ export default function IncidentsPage() {
         const fetchFilterOptions = async () => {
             if (filtersLoadedRef.current) return;
             try {
-                const result = await getIncidents();
-                // getIncidents returns array when pagination is not provided
-                const allData = Array.isArray(result) ? result : result.data;
+                const res = await fetchClient('/incidents');
+                const data = res.ok ? await res.json() : null;
+                const allData = Array.isArray(data) ? data : (data?.data ?? []);
                 setAllIncidents(allData);
                 filtersLoadedRef.current = true;
             } catch (error) {
@@ -71,22 +71,23 @@ export default function IncidentsPage() {
             }
 
             try {
-                // Fetch paginated incidents
-                const response = await getIncidents(filters, {
-                    page: currentPage,
-                    page_size: pageSize
-                });
+                const params = new URLSearchParams();
+                if (filters.status) params.append('status', filters.status);
+                if (filters.severity) params.append('severity', filters.severity);
+                if (filters.source) params.append('source', filters.source);
+                if (filters.service) params.append('service', filters.service);
+                params.append('page', currentPage.toString());
+                params.append('page_size', pageSize.toString());
+                const res = await fetchClient(`/incidents?${params.toString()}`);
+                const response = res.ok ? await res.json() : null;
 
                 if (response && typeof response === 'object' && 'data' in response) {
-                    // Paginated response
-                    const paginatedResponse = response as PaginatedIncidentsResponse;
-                    setIncidents(paginatedResponse.data);
+                    setIncidents(response.data);
                     setPagination({
-                        total: paginatedResponse.pagination.total,
-                        totalPages: paginatedResponse.pagination.total_pages
+                        total: response.pagination.total,
+                        totalPages: response.pagination.total_pages
                     });
                 } else if (Array.isArray(response)) {
-                    // Fallback to array response (backward compatibility)
                     setIncidents(response);
                     setPagination({
                         total: response.length,

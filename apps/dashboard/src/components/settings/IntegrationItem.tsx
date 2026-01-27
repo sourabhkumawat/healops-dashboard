@@ -9,7 +9,7 @@ import {
     reconnectGitHubIntegration,
     reconnectLinearIntegration,
     getIntegrationConfig
-} from '@/actions/integrations';
+} from '@/lib/integrations-client';
 import { IntegrationConfig } from './IntegrationConfig';
 
 type Integration = {

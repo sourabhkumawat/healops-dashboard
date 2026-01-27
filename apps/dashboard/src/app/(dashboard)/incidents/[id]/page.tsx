@@ -18,7 +18,7 @@ import {
     Code
 } from 'lucide-react';
 import { Incident } from '@/components/incident-table';
-import { getIncident, updateIncidentStatus } from '@/actions/incidents';
+import { fetchClient } from '@/lib/client-api';
 import FileDiffCard from '@/components/FileDiffCard';
 import { AgentThinkingView } from '@/components/AgentThinkingView';
 import {
@@ -69,21 +69,15 @@ export default function IncidentDetailsPage() {
     // params.id can be string or string[] in Next.js, ensure we handle both
     const incidentIdParam = Array.isArray(params.id) ? params.id[0] : params.id;
     const incidentId = incidentIdParam ? Number(incidentIdParam) : NaN;
-
-    // Early return for invalid ID (after hooks, which is correct React pattern)
-    if (!incidentIdParam || isNaN(incidentId) || incidentId <= 0) {
-        return (
-            <div className="flex h-full flex-col items-center justify-center space-y-4">
-                <h2 className="text-xl font-bold">Invalid Incident ID</h2>
-                <Button onClick={() => router.push('/incidents')}>
-                    Back to Incidents
-                </Button>
-            </div>
-        );
-    }
+    const isValidId =
+        !!incidentIdParam && !isNaN(incidentId) && incidentId > 0;
 
     // Polling logic with exponential backoff
     useEffect(() => {
+        if (!isValidId) {
+            setLoading(false);
+            return;
+        }
         let pollCount = 0;
         const MAX_POLL_ATTEMPTS = 50; // Increased for longer analysis times
         const INITIAL_POLL_INTERVAL = 2000; // Start with 2 seconds
@@ -95,7 +89,8 @@ export default function IncidentDetailsPage() {
             if (fetchingIncidentRef.current) return false; // Prevent duplicate calls
             fetchingIncidentRef.current = true;
             try {
-                const result = await getIncident(incidentId);
+                const res = await fetchClient(`/incidents/${incidentId}`);
+                const result = res.ok ? await res.json() : null;
 
                 // Check if component is still mounted before setting state
                 if (!isMounted) {
@@ -206,7 +201,8 @@ export default function IncidentDetailsPage() {
                 pollCount++;
 
                 try {
-                    const result = await getIncident(incidentId);
+                    const res = await fetchClient(`/incidents/${incidentId}`);
+                    const result = res.ok ? await res.json() : null;
 
                     // Check again after async operation
                     if (!isMounted) {
@@ -306,15 +302,16 @@ export default function IncidentDetailsPage() {
             // Reset fetching flag
             fetchingIncidentRef.current = false;
         };
-    }, [incidentId]);
+    }, [incidentId, isValidId]);
 
     const handleResolve = async () => {
         setResolving(true);
         try {
-            const updatedIncident = await updateIncidentStatus(
-                incidentId,
-                'RESOLVED'
-            );
+            const res = await fetchClient(`/incidents/${incidentId}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ status: 'RESOLVED' })
+            });
+            const updatedIncident = res.ok ? await res.json() : null;
 
             if (updatedIncident) {
                 setData((prev) =>
@@ -330,6 +327,17 @@ export default function IncidentDetailsPage() {
             setResolving(false);
         }
     };
+
+    if (!isValidId) {
+        return (
+            <div className="flex h-full flex-col items-center justify-center space-y-4">
+                <h2 className="text-xl font-bold">Invalid Incident ID</h2>
+                <Button onClick={() => router.push('/incidents')}>
+                    Back to Incidents
+                </Button>
+            </div>
+        );
+    }
 
     if (loading) {
         return (

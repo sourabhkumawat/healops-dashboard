@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { IncidentTable, Incident } from '@/components/incident-table';
 import { LiveLogs } from '@/components/live-logs';
-import { SystemStats } from '@/actions/stats';
+import type { SystemStats } from '@/lib/types/stats';
 import { fetchClient } from '@/lib/client-api';
 import {
     Activity,

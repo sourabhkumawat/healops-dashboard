@@ -16,7 +16,7 @@ import {
     updateIntegration,
     getServices,
     getRepositories
-} from '@/actions/integrations';
+} from '@/lib/integrations-client';
 
 interface IntegrationConfigProps {
     integrationId: number;

@@ -3,7 +3,8 @@
 import { useEffect, useState, useRef, useMemo, Fragment } from 'react';
 import { useRouter } from 'next/navigation';
 import { useFlags } from 'launchdarkly-react-client-sdk';
-import { getLogs, getServices, LogEntry, LogFilters } from '@/actions/logs';
+import { fetchClient } from '@/lib/client-api';
+import type { LogEntry, LogFilters } from '@/lib/types/logs';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import {
@@ -61,11 +62,6 @@ export default function LogsPage() {
         }
     }, [showLogsTab, router]);
 
-    // Don't render the page if flag is off
-    if (!showLogsTab) {
-        return null;
-    }
-
     const [logs, setLogs] = useState<LogEntry[]>([]);
     const [filteredLogs, setFilteredLogs] = useState<LogEntry[]>([]);
     const [loading, setLoading] = useState(true);
@@ -100,20 +96,19 @@ export default function LogsPage() {
 
     // Fetch logs
     const fetchLogs = async () => {
-        if (fetchingLogsRef.current) return; // Prevent duplicate calls
+        if (fetchingLogsRef.current) return;
         fetchingLogsRef.current = true;
         setLoading(true);
         try {
-            const filters: LogFilters = {
-                limit: 200,
-                level: selectedLevel || undefined,
-                service: selectedService || undefined,
-                search: searchQuery || undefined
-            };
-            const data = await getLogs(filters);
+            const params = new URLSearchParams({ limit: '200' });
+            if (selectedLevel) params.append('level', selectedLevel);
+            if (selectedService) params.append('service', selectedService);
+            if (searchQuery) params.append('search', searchQuery);
+            const res = await fetchClient(`/logs?${params.toString()}`);
+            const json = res.ok ? await res.json() : null;
+            const data: LogEntry[] = json?.logs ?? [];
             setLogs(data);
             if (!liveTail) {
-                // Update filtered logs when not in live tail mode
                 applyFilters(data);
             }
         } catch (error) {
@@ -126,10 +121,12 @@ export default function LogsPage() {
 
     // Fetch services
     const fetchServices = async () => {
-        if (fetchingServicesRef.current) return; // Prevent duplicate calls
+        if (fetchingServicesRef.current) return;
         fetchingServicesRef.current = true;
         try {
-            const data = await getServices();
+            const res = await fetchClient('/services');
+            const json = res.ok ? await res.json() : null;
+            const data: string[] = json?.services ?? [];
             setServices(data);
         } catch (error) {
             console.error('Failed to fetch services:', error);
@@ -557,6 +554,8 @@ export default function LogsPage() {
     const displayedServices = showMoreServices
         ? filteredServices
         : filteredServices.slice(0, 10);
+
+    if (!showLogsTab) return null;
 
     return (
         <div className="flex-1 flex flex-col h-[calc(100vh-8rem)] -m-8 bg-zinc-950 text-zinc-100">

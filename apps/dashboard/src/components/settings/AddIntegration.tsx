@@ -19,7 +19,7 @@ import {
     listProviders,
     initiateGitHubOAuth,
     initiateLinearOAuth
-} from '@/actions/integrations';
+} from '@/lib/integrations-client';
 
 interface AddIntegrationProps {
     onCancel: () => void;

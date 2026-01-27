@@ -12,7 +12,7 @@ import {
     getIntegrationConfig,
     reconnectGitHubIntegration,
     reconnectLinearIntegration
-} from '@/actions/integrations';
+} from '@/lib/integrations-client';
 import Image from 'next/image';
 
 type Integration = {
