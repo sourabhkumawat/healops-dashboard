@@ -129,6 +129,11 @@ class IntegrationsController:
             f"?state={state}"
         )
         
+        # When client sends Accept: application/json (e.g. fetch from dashboard), return JSON
+        # so the frontend can read redirect_url without relying on CORS expose_headers.
+        accept = request.headers.get("Accept") or ""
+        if "application/json" in accept:
+            return JSONResponse(content={"redirect_url": install_url})
         return RedirectResponse(install_url)
     
     @staticmethod

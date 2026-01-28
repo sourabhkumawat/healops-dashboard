@@ -190,7 +190,21 @@ async function fetchRedirect(
 }
 
 export async function initiateGitHubOAuth() {
-    return fetchRedirect('/integrations/github/authorize');
+    // Request JSON so we get redirect_url in body (avoids CORS Location header issues)
+    const res = await fetchClient('/integrations/github/authorize', {
+        headers: { Accept: 'application/json' }
+    });
+    if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (data.redirect_url) return { redirectUrl: data.redirect_url };
+    }
+    const text = await res.text().catch(() => '');
+    try {
+        const err = text ? JSON.parse(text) : {};
+        return { error: err.detail || text || 'Redirect failed' };
+    } catch {
+        return { error: text || 'Redirect failed' };
+    }
 }
 
 export async function reconnectGitHubIntegration(integrationId: number) {
