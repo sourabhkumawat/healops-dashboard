@@ -51,7 +51,11 @@ import redis
 import asyncio
 import threading
 import logging
-
+from fastapi.middleware.cors import CORSMiddleware
+from src.middleware import APIKeyMiddleware, AuthenticationMiddleware
+from src.middleware.timeout import TimeoutMiddleware
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+REDIS_LOG_CHANNEL = "healops:logs"
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -190,18 +194,18 @@ def get_main_event_loop():
     return _main_event_loop
 
 # Add Middleware
-from fastapi.middleware.cors import CORSMiddleware
-from src.middleware import APIKeyMiddleware, AuthenticationMiddleware
-from src.middleware.timeout import TimeoutMiddleware
+
 
 # CORS Configuration - Allow all origins
 # Note: allow_credentials must be False when allowing all origins
+# expose_headers=["Location"] required so frontend can read redirect URL for GitHub/Linear reconnect
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Location"],
 )
 
 # Timeout Middleware - Add early to catch long-running requests
@@ -251,8 +255,7 @@ def test_email_endpoint(request_data: TestEmailRequest, current_user: User = Dep
 from fastapi import WebSocket, WebSocketDisconnect, BackgroundTasks
 
 # Redis Configuration
-REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-REDIS_LOG_CHANNEL = "healops:logs"
+
 
 # Initialize Redis client with error handling
 try:

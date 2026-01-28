@@ -7,7 +7,7 @@ import time
 import secrets
 import base64
 from fastapi import Request, HTTPException, Query, BackgroundTasks
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from pydantic import BaseModel
@@ -88,6 +88,11 @@ class IntegrationsController:
             f"?state={state}"
         )
         
+        # When client sends Accept: application/json (e.g. fetch from dashboard), return JSON
+        # so the frontend can read redirect_url without relying on CORS expose_headers.
+        accept = request.headers.get("Accept") or ""
+        if "application/json" in accept:
+            return JSONResponse(content={"redirect_url": install_url})
         return RedirectResponse(install_url)
     
     @staticmethod
