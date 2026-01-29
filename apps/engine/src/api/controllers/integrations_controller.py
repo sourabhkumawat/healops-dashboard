@@ -1283,20 +1283,23 @@ class IntegrationsController:
         default_repo = setup_data.get("default_repo") or setup_data.get("repository")
         if default_repo and integration.status == "ACTIVE":
             try:
-                from src.memory.cocoindex_flow import execute_flow_update
+                from src.memory.cocoindex_flow import execute_flow_update_async
+                # Capture primitives so the background task does not reference ORM/session after request ends
+                repo_name_to_index = default_repo
+                integration_id_to_index = integration.id
                 
-                def index_repository_background():
-                    """Background task to index repository with CocoIndex."""
+                async def index_repository_background():
+                    """Background task to index repository with CocoIndex (async to avoid event-loop warnings)."""
                     try:
-                        print(f"🔄 Starting CocoIndex indexing for repository: {default_repo}")
-                        execute_flow_update(
-                            repo_name=default_repo,
-                            integration_id=integration.id,
+                        print(f"🔄 Starting CocoIndex indexing for repository: {repo_name_to_index}")
+                        await execute_flow_update_async(
+                            repo_name=repo_name_to_index,
+                            integration_id=integration_id_to_index,
                             ref="main"
                         )
-                        print(f"✅ CocoIndex indexing completed for repository: {default_repo}")
+                        print(f"✅ CocoIndex indexing completed for repository: {repo_name_to_index}")
                     except Exception as e:
-                        print(f"⚠️  CocoIndex indexing failed for {default_repo}: {e}")
+                        print(f"⚠️  CocoIndex indexing failed for {repo_name_to_index}: {e}")
                         import traceback
                         traceback.print_exc()
                 

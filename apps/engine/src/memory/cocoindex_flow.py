@@ -3,6 +3,7 @@ CocoIndex flow definition for codebase indexing.
 Uses Tree-sitter for AST-aware chunking and PostgreSQL for persistent storage.
 """
 import os
+import re
 import cocoindex
 from src.memory.cocoindex_github_source import GitHubSource, FileKey, FileValue
 
@@ -127,6 +128,50 @@ def get_flow_for_repo(repo_name: str, integration_id: int, ref: str = "main"):
     return github_code_embedding_flow
 
 
+def _make_flow_func(repo_name: str, integration_id: int, ref: str):
+    """Build flow_func closure for a given repo/integration/ref (shared by sync and async)."""
+
+    def flow_func(flow_builder: cocoindex.FlowBuilder, data_scope: cocoindex.DataScope):
+        data_scope["files"] = flow_builder.add_source(
+            GitHubSource(
+                repo_name=repo_name,
+                ref=ref,
+                integration_id=integration_id,
+            )
+        )
+        code_embeddings = data_scope.add_collector()
+        with data_scope["files"].row() as file:
+            file["extension"] = file["path"].transform(extract_extension)
+            file["chunks"] = file["content"].transform(
+                cocoindex.functions.SplitRecursively(),
+                language=file["extension"],
+                chunk_size=1000,
+                chunk_overlap=300,
+            )
+            with file["chunks"].row() as chunk:
+                chunk["embedding"] = chunk["text"].call(code_to_embedding)
+                code_embeddings.collect(
+                    filename=file["path"],
+                    location=chunk["location"],
+                    code=chunk["text"],
+                    embedding=chunk["embedding"],
+                    type="code",
+                )
+        code_embeddings.export(
+            "code_embeddings",
+            cocoindex.storages.Postgres(),
+            primary_key_fields=["filename", "location"],
+            vector_indexes=[
+                cocoindex.VectorIndexDef(
+                    field_name="embedding",
+                    metric=cocoindex.VectorSimilarityMetric.COSINE_SIMILARITY,
+                )
+            ],
+        )
+
+    return flow_func
+
+
 def execute_flow_update(repo_name: str, integration_id: int, ref: str = "main"):
     """
     Execute CocoIndex flow update for a repository.
@@ -156,80 +201,58 @@ def execute_flow_update(repo_name: str, integration_id: int, ref: str = "main"):
         # We need to create a flow using open_flow with the flow definition
         # Sanitize flow name: only letters, digits, and underscores allowed
         # Replace invalid characters with underscores
-        import re
         sanitized_repo = re.sub(r'[^a-zA-Z0-9_]', '_', repo_name)
         flow_name = f"GitHubCodeEmbedding_{integration_id}_{sanitized_repo}"
-        
-        # Create flow function with bound parameters using a closure
-        # Note: github_code_embedding_flow is already a Flow object (decorated),
-        # so we can't call it. Instead, we inline the flow definition here.
-        def flow_func(flow_builder: cocoindex.FlowBuilder, data_scope: cocoindex.DataScope):
-            # 1. Add GitHub source
-            data_scope["files"] = flow_builder.add_source(
-                GitHubSource(
-                    repo_name=repo_name,
-                    ref=ref,
-                    integration_id=integration_id,
-                )
-            )
-            
-            # Collector for code embeddings
-            code_embeddings = data_scope.add_collector()
-            
-            # 2. Extract file extension for language detection (using module-level function)
-            # 3. Process each file: chunk using Tree-sitter, embed, collect
-            with data_scope["files"].row() as file:
-                # Extract extension for language detection
-                file["extension"] = file["path"].transform(extract_extension)
-                
-                # Use Tree-sitter for AST-aware chunking
-                file["chunks"] = file["content"].transform(
-                    cocoindex.functions.SplitRecursively(),
-                    language=file["extension"],
-                    chunk_size=1000,
-                    chunk_overlap=300,
-                )
-                
-                # 4. Embed each chunk
-                with file["chunks"].row() as chunk:
-                    # Use shared embedding transform for consistency
-                    chunk["embedding"] = chunk["text"].call(code_to_embedding)
-                    
-                    # Collect chunk with metadata
-                    code_embeddings.collect(
-                        filename=file["path"],
-                        location=chunk["location"],
-                        code=chunk["text"],
-                        embedding=chunk["embedding"],
-                        type="code",
-                    )
-            
-            # 5. Export to PostgreSQL with pgvector
-            code_embeddings.export(
-                "code_embeddings",
-                cocoindex.storages.Postgres(),
-                primary_key_fields=["filename", "location"],
-                vector_indexes=[
-                    cocoindex.VectorIndexDef(
-                        field_name="embedding",
-                        metric=cocoindex.VectorSimilarityMetric.COSINE_SIMILARITY,
-                    )
-                ],
-            )
-        
-        # Open/create the flow with parameters
-        # open_flow signature: open_flow(name: str, fl_def: Callable) -> Flow
+        flow_func = _make_flow_func(repo_name, integration_id, ref)
         flow = cocoindex.open_flow(flow_name, flow_func)
         
         # Setup the flow (creates tables, indexes, etc.)
         flow.setup(report_to_stdout=False)
         
         # Execute the flow update
-        stats = flow.update()
-        
+        result = flow.update()
         print(f"✅ CocoIndex flow update completed for {repo_name}")
-        if stats:
-            print(f"   Stats: {stats}")
+        if result is not None:
+            stats = getattr(result, "stats", result)
+            if stats is not None:
+                print(f"   Stats: {stats}")
+        return True
+    except Exception as e:
+        print(f"❌ CocoIndex flow update failed for {repo_name}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+async def execute_flow_update_async(repo_name: str, integration_id: int, ref: str = "main"):
+    """
+    Execute CocoIndex flow update for a repository (async).
+    Use this when called from async code / inside an event loop to avoid blocking and RuntimeWarnings.
+
+    Args:
+        repo_name: Repository name "owner/repo"
+        integration_id: GitHub integration ID
+        ref: Branch or commit SHA
+    """
+    if not os.getenv("COCOINDEX_DATABASE_URL"):
+        from src.database.database import DATABASE_URL
+        os.environ["COCOINDEX_DATABASE_URL"] = DATABASE_URL
+    try:
+        cocoindex.init()
+    except Exception:
+        pass
+    try:
+        sanitized_repo = re.sub(r'[^a-zA-Z0-9_]', '_', repo_name)
+        flow_name = f"GitHubCodeEmbedding_{integration_id}_{sanitized_repo}"
+        flow_func = _make_flow_func(repo_name, integration_id, ref)
+        flow = cocoindex.open_flow(flow_name, flow_func)
+        await flow.setup_async(report_to_stdout=False)
+        result = await flow.update_async(print_stats=False)
+        print(f"✅ CocoIndex flow update completed for {repo_name}")
+        if result is not None:
+            stats = getattr(result, "stats", result)
+            if stats is not None:
+                print(f"   Stats: {stats}")
         return True
     except Exception as e:
         print(f"❌ CocoIndex flow update failed for {repo_name}: {e}")

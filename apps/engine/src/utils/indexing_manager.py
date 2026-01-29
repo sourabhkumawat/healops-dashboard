@@ -79,10 +79,10 @@ class IndexingManager:
                     
                     try:
                         print(f"🔄 Starting indexing for {repo_name} (ref: {ref})")
-                        from src.memory.cocoindex_flow import execute_flow_update
+                        from src.memory.cocoindex_flow import execute_flow_update_async
                         
-                        # Execute the indexing
-                        success = execute_flow_update(repo_name, integration_id, ref)
+                        # Execute the indexing (async to avoid event-loop RuntimeWarnings)
+                        success = await execute_flow_update_async(repo_name, integration_id, ref)
                         
                         if success:
                             print(f"✅ Successfully indexed {repo_name}")
