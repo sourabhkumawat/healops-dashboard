@@ -637,12 +637,9 @@ def process_log_entry_from_redpanda(task_data: Dict[str, Any]):
 
                 # Batch commit: integration status + incident update (commit #1 of 2)
                 try:
-                    with db.begin_nested() as savepoint:
-                        # This batches integration status update with incident update
-                        savepoint.commit()
-                        db.commit()
-                        performance_metrics.record_database_commit()
-                        print(f"✓ Committed integration status and incident update for incident {existing_incident.id}")
+                    db.commit()
+                    performance_metrics.record_database_commit()
+                    print(f"✓ Committed integration status and incident update for incident {existing_incident.id}")
                 except Exception as e:
                     print(f"Error in incident update transaction: {e}")
                     db.rollback()
@@ -703,12 +700,9 @@ def process_log_entry_from_redpanda(task_data: Dict[str, Any]):
 
                 # Batch commit: integration status + incident creation (commit #1 of 2)
                 try:
-                    with db.begin_nested() as savepoint:
-                        # This batches integration status update with incident creation
-                        savepoint.commit()
-                        db.commit()
-                        performance_metrics.record_database_commit()
-                        print(f"✓ Committed integration status and incident creation for incident {incident.id}")
+                    db.commit()
+                    performance_metrics.record_database_commit()
+                    print(f"✓ Committed integration status and incident creation for incident {incident.id}")
                 except Exception as e:
                     print(f"Error in incident creation transaction: {e}")
                     db.rollback()

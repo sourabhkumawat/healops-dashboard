@@ -1713,12 +1713,6 @@ async def ingest_log(log: LogIngestRequest, request: Request, background_tasks: 
 async def ingest_logs_batch(batch: LogBatchRequest, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Ingest logs batch - delegates to LogsController."""
     return await LogsController.ingest_logs_batch(batch, request, background_tasks, db)
-    code: int
-    message: Optional[str] = None
-
-    apiKey: str
-    serviceName: str
-    spans: List[OTelSpan]
 
 @app.post("/otel/errors")
 async def ingest_otel_errors(payload: OTelErrorPayload, background_tasks: BackgroundTasks, request: Request, db: Session = Depends(get_db)):
