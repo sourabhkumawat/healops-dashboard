@@ -290,6 +290,12 @@ def run_robust_crew(
     except Exception as e:
         print(f"Warning: Failed to retrieve learning pattern: {e}")
     
+    # Scope files for the coding agent: only affected + learned files initially to save cost and time.
+    # Agent can use list_files() / read_file() when it needs to view other files.
+    scoped_files_for_agent = list(dict.fromkeys(affected_files)) if affected_files else (available_files[:50] if available_files else [])
+    if scoped_files_for_agent and scoped_files_for_agent != available_files:
+        print(f"📁 Scoped coding agent to {len(scoped_files_for_agent)} relevant file(s); use list_files() only when needed.")
+    
     # Index knowledge base
     # Note: Full repository indexing happens at connection time via CocoIndex
     # This is mainly for past fixes indexing and triggering incremental updates if needed
@@ -462,7 +468,7 @@ def run_robust_crew(
     else:
         print("ℹ️  No AgentEmployee records found - using CrewAI agents directly")
     
-    # Create agent executor function
+    # Create agent executor function (pass scoped files to save cost; agent can list_files() when needed)
     def agent_executor(step: Dict[str, Any], context: str, workspace: Workspace) -> Dict[str, Any]:
         """Execute agent action for a step."""
         return _execute_agent_action(
@@ -473,8 +479,7 @@ def run_robust_crew(
             agent_employee_map=agent_employee_map,
             github_integration=github_integration,
             repo_name=repo_name,
-            code_memory=code_memory,
-            available_files=available_files,
+            available_files=scoped_files_for_agent,
             db=db
         )
     
@@ -737,7 +742,6 @@ def _execute_agent_action(
     agents: Dict[str, Any],
     github_integration: GithubIntegration,
     repo_name: str,
-    code_memory: CodeMemory,
     available_files: List[str] = None,
     agent_employee_map: Optional[Dict[str, Any]] = None,
     db: Optional[Session] = None
@@ -745,7 +749,8 @@ def _execute_agent_action(
     """
     Execute agent action for a step.
     Supports both CrewAI tool calls and CodeAct code generation.
-    
+    (Code memory is provided to tools via set_agent_tools_context, not passed here.)
+
     Args:
         step: Current step dictionary
         context: Context string for agent
@@ -753,11 +758,10 @@ def _execute_agent_action(
         agents: Dictionary of agents
         github_integration: GitHub integration
         repo_name: Repository name
-        code_memory: Code memory instance
         available_files: List of available files in repository
         agent_employee_map: Optional mapping of AgentEmployee records to CrewAI agents
         db: Optional database session for status updates
-        
+
     Returns:
         Action result dictionary
     """
@@ -1168,7 +1172,9 @@ The context above includes a section "## PRE-LOADED FILE CONTENTS" with actual f
 - Only after full understanding should you generate fixes
 - If you need additional files not pre-loaded, use read_file() to read them
 
-**IMPORTANT**: Always use the exact file paths from the list above. Do NOT guess or assume file paths. If you need to find a file, use list_files() first.
+**IMPORTANT**: Always use the exact file paths from the list above. Do NOT guess or assume file paths.
+
+**SCOPED FILES (cost & time saving):** The files listed above are the ones most relevant to this incident. Work from these first. Use list_files() or read_file() only when you need to view another file not in the list.
 
 ### Code Execution Guidelines:
 

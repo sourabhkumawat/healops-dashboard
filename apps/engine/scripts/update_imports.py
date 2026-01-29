@@ -25,7 +25,7 @@ IMPORT_MAPPINGS = [
     (r'^from agent_scratchpad import', 'from src.agents.scratchpad import'),
     (r'^from execution_loop import', 'from src.agents.execution_loop import'),
     (r'^from context_manager import', 'from src.agents.context_manager import'),
-    (r'^from agents import', 'from src.agents.legacy import'),
+    (r'^from agents import', 'from src.agents.definitions import'),
     (r'^from crew import', 'from src.agents.crew import'),
     
     # Core imports

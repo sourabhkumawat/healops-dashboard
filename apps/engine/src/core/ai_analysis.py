@@ -6,7 +6,7 @@ import json
 import re
 import hashlib
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 from src.database.models import Incident, LogEntry, Integration
 from sqlalchemy.orm import Session
 from src.integrations.github.integration import GithubIntegration
@@ -44,16 +44,9 @@ MAX_INCIDENT_PROMPT_TOKENS = 20000  # Reduced from 25K to 20K (~$0.06 vs $0.075 
 
 # Limit logs based on token count, not just count
 MAX_TOKENS_FOR_LOGS = 10000  # Reduced from 15K to 10K tokens for logs
-MAX_TOKENS_PER_LOG = 120  # Reduced from 150 to 120 tokens per log (~420 chars)
 
-# COST OPTIMIZATION: Reduced limits to save costs while maintaining quality
-# Reserve ~10K tokens for system prompt and response, leaving ~60K for input
-# For code files, limit each file to prevent overflow
-MAX_TOKENS_FOR_FILES = 60000  # Reduced from 80K to 60K (~$0.18 vs $0.24)
-MAX_TOKENS_PER_FILE = 8000  # Reduced from 10K to 8K per file (~28K chars)
-
-# Final safety check: truncate entire prompt if it exceeds 80K tokens (reduced for cost)
-MAX_TOTAL_PROMPT_TOKENS = 80000  # Reduced from 100K to 80K (~$0.24 vs $0.30)
+# Small/cheap model for lightweight AI tasks (stack trace classification, skipped-resolution copy)
+_SMALL_MODEL = "google/gemini-flash-1.5-8b"
 
 
 def estimate_tokens(text: str) -> int:
@@ -118,12 +111,11 @@ def get_incident_fingerprint(incident: Incident, logs: list[LogEntry]) -> str:
         return hashlib.sha256(str(incident.id if incident else "unknown").encode()).hexdigest()[:16]
 
 
-def should_use_expensive_model(incident: Incident, logs: list[LogEntry], root_cause: Optional[str]) -> bool:
+def should_use_expensive_model(logs: list[LogEntry], root_cause: Optional[str]) -> bool:
     """
     Determine if we should use expensive model (Claude 3.5 Sonnet) or cheaper alternatives.
     
     Args:
-        incident: The incident
         logs: Related log entries
         root_cause: Root cause analysis (if available)
         
@@ -131,18 +123,15 @@ def should_use_expensive_model(incident: Incident, logs: list[LogEntry], root_ca
         True if expensive model should be used
     """
     try:
-        # Use expensive model if:
-        # Use expensive model if:
-        # 1. Complex error patterns (stack traces from application code, multiple errors)
+        # Use expensive model if: complex error patterns (stack traces from app code, multiple errors)
         has_stack_trace = False
         error_count = 0
         for log in (logs or [])[:10]:
-            if log and log.message:
-                # Check if message contains stack trace and it's NOT from node_modules
-                if "Traceback" in log.message or "at " in log.message or "File \"" in log.message:
-                    # Only count stack traces from application code, not node_modules
-                    if not is_stacktrace_from_node_modules(log.message):
+            if log:
+                for trace_str in _get_trace_strings_from_log(log):
+                    if not is_stacktrace_from_node_modules(trace_str):
                         has_stack_trace = True
+                        break
                 if hasattr(log, 'severity') and log.severity and log.severity.upper() in ["ERROR", "CRITICAL"]:
                     error_count += 1
         
@@ -416,9 +405,8 @@ def is_stacktrace_from_node_modules(stack_trace: str) -> bool:
                 - If it's mixed but primarily application code, return false
             """
 
-        cheapest_model = "google/gemini-flash-1.5-8b"
         r = openrouter_chat_completion(
-            cheapest_model,
+            _SMALL_MODEL,
             [{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=100,
@@ -450,6 +438,234 @@ def is_stacktrace_from_node_modules(stack_trace: str) -> bool:
         traceback.print_exc()
         # On error, default to False (assume application code to be safe)
         return False
+
+
+# Shared keywords to detect stack-trace-like content (used by trace extraction helpers)
+_STACK_TRACE_KEYWORDS = ("Traceback", "at ", "File \"", "Error:", "Exception:", "node_modules")
+
+
+def _get_trace_strings_from_log(log: Any) -> List[str]:
+    """
+    Extract stack trace strings from a single log (message + metadata events).
+    Returns non-empty snippets of at least 50 chars. Reused by Linear description,
+    should_use_expensive_model, and incident-from-external check.
+    """
+    traces: List[str] = []
+    msg = getattr(log, "message", None) or ""
+    if msg and any(k in msg for k in _STACK_TRACE_KEYWORDS):
+        s = msg.strip()
+        if len(s) >= 50:
+            traces.append(s)
+    meta = getattr(log, "metadata_json", None) or {}
+    if isinstance(meta, dict):
+        for event in meta.get("events") or []:
+            if isinstance(event, dict):
+                attrs = (event.get("attributes") or {})
+                if isinstance(attrs, dict) and attrs.get("exception.stacktrace"):
+                    s = (attrs["exception.stacktrace"] or "").strip()
+                    if len(s) >= 50:
+                        traces.append(s)
+    return traces
+
+
+def _get_trace_strings_from_incident(incident: Incident) -> List[str]:
+    """Extract stack trace strings from incident (message/title + metadata events)."""
+    traces: List[str] = []
+    if not incident:
+        return traces
+    msg = getattr(incident, "message", None) or getattr(incident, "title", None) or ""
+    if msg and any(k in msg for k in _STACK_TRACE_KEYWORDS):
+        s = msg.strip()
+        if len(s) >= 50:
+            traces.append(s)
+    meta = getattr(incident, "metadata_json", None) or {}
+    if isinstance(meta, dict):
+        for event in meta.get("events") or []:
+            if isinstance(event, dict):
+                attrs = (event.get("attributes") or {})
+                if isinstance(attrs, dict) and attrs.get("exception.stacktrace"):
+                    s = (attrs["exception.stacktrace"] or "").strip()
+                    if len(s) >= 50:
+                        traces.append(s)
+    return traces
+
+
+def _collect_stack_traces_from_incident(incident: Incident, logs: list) -> List[str]:
+    """
+    Collect stack trace strings from incident and logs for classification.
+    Returns a deduplicated list of non-empty stack trace snippets (each at least 50 chars).
+    Reuses _get_trace_strings_from_incident and _get_trace_strings_from_log.
+    """
+    seen: set = set()
+    result: List[str] = []
+    for s in _get_trace_strings_from_incident(incident):
+        key = s[:200]
+        if key not in seen:
+            seen.add(key)
+            result.append(s)
+    for log in logs or []:
+        if not log:
+            continue
+        for s in _get_trace_strings_from_log(log):
+            key = s[:200]
+            if key not in seen:
+                seen.add(key)
+                result.append(s)
+    return result
+
+
+def is_incident_from_external_code(incident: Incident, logs: list) -> Tuple[bool, str]:
+    """
+    Determine if the incident's error originates from node_modules or other external
+    (third-party) code. Reuses is_stacktrace_from_node_modules for classification.
+
+    Use this before running the coding agent to avoid wasting cost and time on
+    issues we cannot fix (e.g. dependencies).
+
+    Args:
+        incident: The incident.
+        logs: Related log entries.
+
+    Returns:
+        (True, sample_trace) if the incident is from external/node_modules code;
+        (False, "") otherwise. sample_trace is a truncated stack trace for display.
+    """
+    traces = _collect_stack_traces_from_incident(incident, logs)
+    if not traces:
+        return False, ""
+
+    # Check the first substantial trace; if it's from node_modules, skip resolution
+    sample = traces[0]
+    if is_stacktrace_from_node_modules(sample):
+        return True, (sample[:1500] + ("..." if len(sample) > 1500 else ""))
+    return False, ""
+
+
+def _generate_skipped_resolution_description_with_ai(
+    incident: Incident,
+    sample_trace: str,
+) -> Optional[str]:
+    """
+    Use a small model to generate a clear, contextual "why we didn't auto-resolve" description
+    based on the incident and stack trace. Returns None on failure (caller should fall back to static template).
+    """
+    if not get_api_key():
+        return None
+    title = getattr(incident, "title", None) or "Incident"
+    service = getattr(incident, "service_name", None) or "Service"
+    truncated = (sample_trace[:1500] + "...") if len(sample_trace) > 1500 else sample_trace
+
+    prompt = f"""You are writing a short, developer-friendly explanation for a dashboard. We did NOT auto-fix this incident because the error comes from dependency code (e.g. node_modules or vendor libs), which we do not modify.
+
+Context:
+- Incident: {title}
+- Service: {service}
+
+Stack trace snippet (use this to make the explanation specific—e.g. mention the package or error type if visible):
+```
+{truncated}
+```
+
+Write a single markdown document (no YAML, no code fence around the whole thing) with:
+1. A heading: ## Why we didn't auto-resolve this incident
+2. One short paragraph explaining that the error originates from dependency/external code and we only fix application code (be specific if the trace shows a package name or error type).
+3. A subsection "### Flow (what happened)" with a simple ASCII diagram showing: Your app → Dependency → Error; Our agent skips. One line of "Next steps" after the diagram.
+4. A subsection "### What you can do" with 3–4 bullet points: upgrade/pin dependency, handle in app code, report upstream. Keep bullets concise.
+
+Include the incident title and service at the top (e.g. **Incident:** ... **Service:** ...). Do not repeat the full stack trace in your text. Output only the markdown."""
+
+    try:
+        r = openrouter_chat_completion(
+            _SMALL_MODEL,
+            [{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=600,
+            timeout=10,
+            title="HealOps Skipped Resolution Description",
+        )
+        if not r.get("success") or not r.get("content"):
+            return None
+        content = (r["content"] or "").strip()
+        # Remove wrapping markdown code block if present
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:markdown)?\s*", "", content)
+            content = re.sub(r"\s*```\s*$", "", content)
+        if len(content) < 100:
+            return None
+        return content
+    except Exception as e:
+        print(f"⚠️  AI skipped-resolution description failed: {e}")
+        return None
+
+
+def _build_skipped_resolution_description_static(
+    incident: Incident,
+    sample_trace: str,
+) -> str:
+    """Static fallback when AI is unavailable or fails."""
+    title = getattr(incident, "title", None) or "Incident"
+    service = getattr(incident, "service_name", None) or "Service"
+    reason_text = (
+        "The error **originates from external or dependency code** (e.g. `node_modules`, "
+        "third-party or vendor libs). Our coding agent only modifies your application "
+        "code, not dependencies, so we did not attempt an automated fix."
+    )
+    flow = (
+        "### Flow (what happened)\n\n"
+        "```\n[Your app] → calls → [Dependency in node_modules/vendor]\n"
+        "                          ↓\nError thrown here (stack trace points to dependency)\n"
+        "                          ↓\n[Our agent] → skips → No change to your repo\n```\n\n"
+        "**Next steps:** Upgrade or patch the dependency, report upstream, or fix the call site in your app."
+    )
+    copywriting = (
+        "### What you can do\n\n"
+        "- **Upgrade the dependency** if a newer version fixes the issue.\n"
+        "- **Pin a known-good version** if a recent upgrade introduced the bug.\n"
+        "- **Handle the error in your code** (try/catch) and log or report it.\n"
+        "- **Report upstream** to the package maintainers if it's a bug in the dependency."
+    )
+    trace_section = ""
+    if sample_trace:
+        trace_section = "\n### Stack trace (relevant snippet)\n\n```\n" + sample_trace.strip() + "\n```\n"
+    return f"""## Why we didn't auto-resolve this incident
+
+**Incident:** {title}  
+**Service:** {service}
+
+{reason_text}
+
+{flow}
+
+{trace_section}
+{copywriting}
+""".strip()
+
+
+def build_skipped_resolution_description(
+    incident: Incident,
+    sample_trace: str = "",
+) -> str:
+    """
+    Build a developer-friendly description for the frontend when we skip automated
+    resolution (e.g. because the error is from node_modules or third-party code).
+    Uses a small AI model to tailor the text to the incident and stack trace when
+    possible; falls back to a static template if the API is unavailable or fails.
+
+    Args:
+        incident: The incident.
+        sample_trace: Truncated stack trace snippet to display.
+
+    Returns:
+        Markdown string suitable for code_fix_explanation / frontend display.
+    """
+    # Prefer AI-generated description for clear, context-aware copy
+    if sample_trace:
+        ai_description = _generate_skipped_resolution_description_with_ai(incident, sample_trace)
+        if ai_description:
+            # Append the raw trace snippet so developers always have it
+            trace_block = "\n### Stack trace (relevant snippet)\n\n```\n" + sample_trace.strip() + "\n```"
+            return ai_description.rstrip() + trace_block
+    return _build_skipped_resolution_description_static(incident, sample_trace)
 
 
 def normalize_path(path: str) -> str:
@@ -928,37 +1144,16 @@ def build_enhanced_linear_description(
             except Exception as e:
                 print(f"⚠️  Error building trace flow for Linear ticket: {e}")
     
-    # Stack Traces (filter out node_modules to avoid wasting computation)
+    # Stack Traces (filter out node_modules; reuse shared trace extraction)
     stack_traces = []
-    for log in logs[:10]:  # Check first 10 logs
+    for log in logs[:10]:
         try:
-            if log.message:
-                # Check if message contains stack trace
-                if any(keyword in log.message for keyword in ["Traceback", "at ", "File \"", "Error:", "Exception:"]):
-                    # Use AI to check if stack trace is from node_modules
-                    if not is_stacktrace_from_node_modules(log.message):
-                        stack_traces.append({
-                            "log_id": log.id,
-                            "message": log.message[:1000]  # Limit length
-                        })
-            
-            # Check metadata for stack traces
-            metadata = log.metadata_json or {}
-            if isinstance(metadata, dict):
-                # Check events for stack traces
-                events = metadata.get("events", [])
-                if isinstance(events, list):
-                    for event in events:
-                        if isinstance(event, dict):
-                            attrs = event.get("attributes", {})
-                            if isinstance(attrs, dict) and attrs.get("exception.stacktrace"):
-                                stacktrace = attrs.get("exception.stacktrace", "")
-                                # Use AI to check if stack trace is from node_modules
-                                if not is_stacktrace_from_node_modules(stacktrace):
-                                    stack_traces.append({
-                                        "log_id": log.id,
-                                        "message": stacktrace[:1000]
-                                    })
+            for trace_str in _get_trace_strings_from_log(log):
+                if not is_stacktrace_from_node_modules(trace_str):
+                    stack_traces.append({
+                        "log_id": log.id,
+                        "message": trace_str[:1000]
+                    })
         except (AttributeError, TypeError, KeyError):
             continue
     
@@ -1014,49 +1209,6 @@ def build_enhanced_linear_description(
         description_parts.append("")
     
     return "\n".join(description_parts)
-
-
-def extract_file_paths_from_trace(logs: list[LogEntry]) -> list[str]:
-    """
-    Extract file paths from all logs in a trace.
-    This provides better context by looking at all spans, not just error spans.
-    
-    Args:
-        logs: List of log entries from the same trace
-        
-    Returns:
-        List of unique file paths found across all logs
-    """
-    if not logs:
-        return []
-    
-    all_paths = []
-    
-    for log in logs:
-        try:
-            paths = extract_file_paths_from_log(log)
-            if paths:
-                all_paths.extend(paths)
-        except Exception as e:
-            # Skip logs that cause errors during path extraction
-            print(f"⚠️  Error extracting paths from log {log.id if hasattr(log, 'id') else 'unknown'}: {e}")
-            continue
-    
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_paths = []
-    for path in all_paths:
-        if path and isinstance(path, str) and path not in seen and not path.startswith("http"):
-            seen.add(path)
-            unique_paths.append(path)
-    
-    # Limit to prevent context overflow (max 50 file paths)
-    if len(unique_paths) > 50:
-        print(f"⚠️  Found {len(unique_paths)} file paths, limiting to 50 most relevant")
-        unique_paths = unique_paths[:50]
-    
-    print(f"📁 Extracted {len(unique_paths)} unique file path(s) from {len(logs)} trace log(s)")
-    return unique_paths
 
 
 def analyze_incident_with_openrouter(incident: Incident, logs: list[LogEntry], db: Session) -> Dict[str, Any]:
@@ -1311,7 +1463,7 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
     try:
         # COST OPTIMIZATION: Use cheaper model for initial analysis
         # Only use expensive model if code generation is needed
-        use_expensive = should_use_expensive_model(incident, logs, None)
+        use_expensive = should_use_expensive_model(logs, None)
         
         if use_expensive:
             model_config = MODEL_CONFIG["complex_analysis"]  # Claude 3 Haiku
@@ -1451,16 +1603,15 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                         # Check if log contains code-related patterns
                         has_code_pattern = any(pattern in log_msg for pattern in code_patterns)
                         
-                        # If it's a stack trace, verify it's NOT from node_modules
                         if has_code_pattern:
-                            is_stack_trace = any(pattern in log_msg for pattern in ["traceback", "stack trace", "at ", "file \""])
-                            if is_stack_trace:
-                                # Only count stack traces from application code
-                                if not is_stacktrace_from_node_modules(log.message):
+                            # If we have trace strings, verify at least one is NOT from node_modules
+                            trace_strs = _get_trace_strings_from_log(log)
+                            if trace_strs:
+                                if not any(is_stacktrace_from_node_modules(t) for t in trace_strs):
                                     logs_suggest_code = True
                                     break
                             else:
-                                # Not a stack trace, or pattern match is for other code-related errors
+                                # Pattern match but no trace text, or other code-related error
                                 logs_suggest_code = True
                                 break
             
@@ -1566,92 +1717,104 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                                 )
                                 # Skip agent execution - will continue to code_fix_explanation handling at end
                             else:
-                                # Use robust crew system (Manus-style architecture)
-                                try:
-                                    print("🚀 Using robust multi-agent crew system (Manus-style)")
-                                    from src.agents.orchestrator import run_robust_crew
-                                    enhanced_result = run_robust_crew(
+                                # Pre-check: skip resolution if error is from node_modules or external code
+                                is_external, sample_trace = is_incident_from_external_code(incident, logs)
+                                if is_external:
+                                    print("⚠️  Skipping agent execution - error is from node_modules or external code")
+                                    code_fix_explanation = build_skipped_resolution_description(
                                         incident=incident,
-                                        logs=logs,
-                                        root_cause=root_cause,
-                                        github_integration=github_integration,
-                                        repo_name=repo_name,
-                                        db=db
+                                        sample_trace=sample_trace,
                                     )
-                                    
-                                    # Process robust crew result - adapt format
-                                    # Robust crew returns: status, fixes, events, plan_progress
-                                    fixes = enhanced_result.get("fixes", {})
-                                    
-                                    # Convert fixes to PR format
-                                    changes = {}
-                                    for file_path, file_info in fixes.items():
-                                        if isinstance(file_info, dict):
-                                            changes[file_path] = file_info.get("content", "")
-                                        else:
-                                            changes[file_path] = str(file_info)
-                                    
-                                    # Determine decision based on result
-                                    if enhanced_result.get("status") == "success" and changes:
-                                        decision_action = "CREATE_PR"
-                                        confidence_score = 85  # Default confidence for robust crew
-                                    elif enhanced_result.get("status") == "partial" and changes:
-                                        decision_action = "CREATE_DRAFT_PR"
-                                        confidence_score = 70
-                                    else:
-                                        decision_action = "SKIP_PR"
-                                        confidence_score = 0
-                                    
-                                    is_draft = decision_action == "CREATE_DRAFT_PR"
-                                    
-                                    # Create decision object for compatibility
-                                    decision = {
-                                        "action": decision_action,
-                                        "reasoning": f"Robust crew completed with {len(changes)} files changed. Status: {enhanced_result.get('status')}",
-                                        "warnings": [] if decision_action == "CREATE_PR" else ["Partial completion - review recommended"]
-                                    }
-                                    
-                                    if changes and decision_action in ["CREATE_PR", "CREATE_PR_WITH_WARNINGS", "CREATE_DRAFT_PR"]:
-                                        # Build PR body with appropriate warnings
-                                        warnings_text = ""
-                                        if decision_action == "CREATE_PR_WITH_WARNINGS":
-                                            warnings = enhanced_result.get("decision", {}).get("warnings", [])
-                                            if warnings:
-                                                warnings_text = "\n### ⚠️ Warnings\n" + "\n".join(f"- {w}" for w in warnings) + "\n"
-                                        elif decision_action == "CREATE_DRAFT_PR":
-                                            warnings = enhanced_result.get("decision", {}).get("warnings", [])
-                                            if warnings:
-                                                warnings_text = "\n### ⚠️ Low Confidence - Draft PR\n" + "\n".join(f"- {w}" for w in warnings) + "\n"
-                                            warnings_text += "\n**This is a draft PR. Please review the changes on the incident page before merging.**\n"
-                                        
-                                        # Check if incident has Linear issue for branch naming
-                                        linear_issue_id = None
-                                        linear_issue_url = None
-                                        linear_issue_identifier = None
-                                        if incident.metadata_json and incident.metadata_json.get("linear_issue"):
-                                            linear_issue_data = incident.metadata_json["linear_issue"]
-                                            linear_issue_identifier = linear_issue_data.get("identifier")  # e.g., "ID-123"
-                                            linear_issue_url = linear_issue_data.get("url")
-                                        
-                                        # Use Linear standard format for branch name if Linear issue exists
-                                        if linear_issue_identifier:
-                                            # Linear format: ID-123-fix-description
-                                            branch_suffix = incident.title.lower().replace(' ', '-')[:30]
-                                            # Remove special characters that might cause issues
-                                            branch_suffix = ''.join(c for c in branch_suffix if c.isalnum() or c == '-')
-                                            head_branch = f"{linear_issue_identifier}-fix-{branch_suffix}"
-                                        else:
-                                            head_branch = f"healops-enhanced-fix-{incident.id}"
-                                        
-                                        # Add Linear issue reference to PR body
-                                        linear_ref = ""
-                                        if linear_issue_identifier and linear_issue_url:
-                                            linear_ref = f"\n**Linear Issue:** [{linear_issue_identifier}]({linear_issue_url})\n"
-                                        
-                                        pr_result = github_integration.create_pr(
+                                    result["resolution_skipped"] = True
+                                    result["resolution_skipped_reason"] = "node_modules_or_external_code"
+                                    # Skip agent execution - will continue to code_fix_explanation handling at end
+                                else:
+                                    # Use robust crew system (Manus-style architecture)
+                                    try:
+                                        print("🚀 Using robust multi-agent crew system (Manus-style)")
+                                        from src.agents.orchestrator import run_robust_crew
+                                        enhanced_result = run_robust_crew(
+                                            incident=incident,
+                                            logs=logs,
+                                            root_cause=root_cause,
+                                            github_integration=github_integration,
                                             repo_name=repo_name,
-                                            title=f"Fix: {incident.title} (Enhanced AI)" + (" [DRAFT]" if is_draft else ""),
-                                            body=f"""## Incident Fix (Enhanced AI)
+                                            db=db
+                                        )
+                                        
+                                        # Process robust crew result - adapt format
+                                        # Robust crew returns: status, fixes, events, plan_progress
+                                        fixes = enhanced_result.get("fixes", {})
+                                        
+                                        # Convert fixes to PR format
+                                        changes = {}
+                                        for file_path, file_info in fixes.items():
+                                            if isinstance(file_info, dict):
+                                                changes[file_path] = file_info.get("content", "")
+                                            else:
+                                                changes[file_path] = str(file_info)
+                                        
+                                        # Determine decision based on result
+                                        if enhanced_result.get("status") == "success" and changes:
+                                            decision_action = "CREATE_PR"
+                                            confidence_score = 85  # Default confidence for robust crew
+                                        elif enhanced_result.get("status") == "partial" and changes:
+                                            decision_action = "CREATE_DRAFT_PR"
+                                            confidence_score = 70
+                                        else:
+                                            decision_action = "SKIP_PR"
+                                            confidence_score = 0
+                                        
+                                        is_draft = decision_action == "CREATE_DRAFT_PR"
+                                        
+                                        # Create decision object for compatibility
+                                        decision = {
+                                            "action": decision_action,
+                                            "reasoning": f"Robust crew completed with {len(changes)} files changed. Status: {enhanced_result.get('status')}",
+                                            "warnings": [] if decision_action == "CREATE_PR" else ["Partial completion - review recommended"]
+                                        }
+                                        
+                                        if changes and decision_action in ["CREATE_PR", "CREATE_PR_WITH_WARNINGS", "CREATE_DRAFT_PR"]:
+                                            # Build PR body with appropriate warnings
+                                            warnings_text = ""
+                                            if decision_action == "CREATE_PR_WITH_WARNINGS":
+                                                warnings = enhanced_result.get("decision", {}).get("warnings", [])
+                                                if warnings:
+                                                    warnings_text = "\n### ⚠️ Warnings\n" + "\n".join(f"- {w}" for w in warnings) + "\n"
+                                            elif decision_action == "CREATE_DRAFT_PR":
+                                                warnings = enhanced_result.get("decision", {}).get("warnings", [])
+                                                if warnings:
+                                                    warnings_text = "\n### ⚠️ Low Confidence - Draft PR\n" + "\n".join(f"- {w}" for w in warnings) + "\n"
+                                                warnings_text += "\n**This is a draft PR. Please review the changes on the incident page before merging.**\n"
+                                            
+                                            # Check if incident has Linear issue for branch naming
+                                            linear_issue_id = None
+                                            linear_issue_url = None
+                                            linear_issue_identifier = None
+                                            if incident.metadata_json and incident.metadata_json.get("linear_issue"):
+                                                linear_issue_data = incident.metadata_json["linear_issue"]
+                                                linear_issue_identifier = linear_issue_data.get("identifier")  # e.g., "ID-123"
+                                                linear_issue_url = linear_issue_data.get("url")
+                                            
+                                            # Use Linear standard format for branch name if Linear issue exists
+                                            if linear_issue_identifier:
+                                                # Linear format: ID-123-fix-description
+                                                branch_suffix = incident.title.lower().replace(' ', '-')[:30]
+                                                # Remove special characters that might cause issues
+                                                branch_suffix = ''.join(c for c in branch_suffix if c.isalnum() or c == '-')
+                                                head_branch = f"{linear_issue_identifier}-fix-{branch_suffix}"
+                                            else:
+                                                head_branch = f"healops-enhanced-fix-{incident.id}"
+                                            
+                                            # Add Linear issue reference to PR body
+                                            linear_ref = ""
+                                            if linear_issue_identifier and linear_issue_url:
+                                                linear_ref = f"\n**Linear Issue:** [{linear_issue_identifier}]({linear_issue_url})\n"
+                                            
+                                            pr_result = github_integration.create_pr(
+                                                repo_name=repo_name,
+                                                title=f"Fix: {incident.title} (Enhanced AI)" + (" [DRAFT]" if is_draft else ""),
+                                                body=f"""## Incident Fix (Enhanced AI)
 
 **Incident ID:** #{incident.id}
 **Service:** {incident.service_name}
@@ -1674,148 +1837,148 @@ This PR was generated using the enhanced multi-agent system with:
 ---
 *Generated by HealOps Enhanced Multi-Agent System*
 """,
-                                            head_branch=head_branch,
-                                            base_branch="main",
-                                            changes=changes,
-                                            draft=is_draft
-                                        )
-                                        
-                                        # Track PR created by Alex for QA review
-                                        if pr_result.get("status") == "success":
-                                            try:
-                                                from src.database.models import AgentPR, AgentEmployee
-                                                pr_number = pr_result.get("pr_number")
-                                                pr_url = pr_result.get("pr_url")
-                                                
-                                                # Find Alex agent
-                                                alex_agent = db.query(AgentEmployee).filter(
-                                                    AgentEmployee.email == "alexandra.chen@healops.work"
-                                                ).first()
-                                                
-                                                if alex_agent:
-                                                    agent_pr = AgentPR(
-                                                        pr_number=pr_number,
-                                                        repo_name=repo_name,
-                                                        pr_url=pr_url,
-                                                        title=f"Fix: {incident.title} (Enhanced AI)" + (" [DRAFT]" if is_draft else ""),
-                                                        head_branch=head_branch,
-                                                        base_branch="main",
-                                                        agent_employee_id=alex_agent.id,
-                                                        agent_name=alex_agent.name,
-                                                        incident_id=incident.id,
-                                                        qa_review_status="pending"
-                                                    )
-                                                    db.add(agent_pr)
-                                                    db.commit()
-                                                    print(f"✅ Tracked Enhanced AI PR #{pr_number} created by {alex_agent.name} for QA review")
+                                                head_branch=head_branch,
+                                                base_branch="main",
+                                                changes=changes,
+                                                draft=is_draft
+                                            )
+                                            
+                                            # Track PR created by Alex for QA review
+                                            if pr_result.get("status") == "success":
+                                                try:
+                                                    from src.database.models import AgentPR, AgentEmployee
+                                                    pr_number = pr_result.get("pr_number")
+                                                    pr_url = pr_result.get("pr_url")
                                                     
-                                                    # Update Linear issue with PR link if Linear integration exists
-                                                    if linear_issue_identifier and incident.metadata_json and incident.metadata_json.get("linear_issue"):
-                                                        try:
-                                                            from src.utils.integrations import get_linear_integration_for_user
-                                                            from src.integrations.linear.integration import LinearIntegration
-                                                            
-                                                            linear_integration_obj = get_linear_integration_for_user(db, incident.user_id)
-                                                            if linear_integration_obj:
-                                                                linear_integration = LinearIntegration(integration_id=linear_integration_obj.id)
-                                                                linear_issue_id = incident.metadata_json["linear_issue"]["id"]
-                                                                
-                                                                # Add comment to Linear issue with PR link
-                                                                comment_body = f"**Pull Request Created**\n\nPR: {pr_url}\nBranch: `{head_branch}`\n\nThis PR addresses the incident and includes the fix."
-                                                                linear_integration.add_comment_to_issue(linear_issue_id, comment_body)
-                                                                print(f"✅ Added PR link to Linear issue {linear_issue_identifier}")
-                                                        except Exception as e:
-                                                            print(f"⚠️  Failed to update Linear issue with PR link: {e}")
-                                                            import traceback
-                                                            traceback.print_exc()
+                                                    # Find Alex agent
+                                                    alex_agent = db.query(AgentEmployee).filter(
+                                                        AgentEmployee.email == "alexandra.chen@healops.work"
+                                                    ).first()
                                                     
-                                                    # Trigger QA review
-                                                    try:
-                                                        from src.agents.qa_orchestrator import review_pr_for_alex
-                                                        import asyncio
-                                                        integration_id = None
-                                                        if hasattr(github_integration, 'installation_id') and github_integration.installation_id:
-                                                            integration = db.query(Integration).filter(
-                                                                Integration.installation_id == github_integration.installation_id
-                                                            ).first()
-                                                            if integration:
-                                                                integration_id = integration.id
-                                                        
-                                                        asyncio.create_task(
-                                                            review_pr_for_alex(
-                                                                repo_name=repo_name,
-                                                                pr_number=pr_number,
-                                                                user_id=incident.user_id,
-                                                                integration_id=integration_id,
-                                                                db=db
-                                                            )
+                                                    if alex_agent:
+                                                        agent_pr = AgentPR(
+                                                            pr_number=pr_number,
+                                                            repo_name=repo_name,
+                                                            pr_url=pr_url,
+                                                            title=f"Fix: {incident.title} (Enhanced AI)" + (" [DRAFT]" if is_draft else ""),
+                                                            head_branch=head_branch,
+                                                            base_branch="main",
+                                                            agent_employee_id=alex_agent.id,
+                                                            agent_name=alex_agent.name,
+                                                            incident_id=incident.id,
+                                                            qa_review_status="pending"
                                                         )
-                                                    except Exception as e:
-                                                        print(f"⚠️  Failed to trigger QA review: {e}")
-                                            except Exception as e:
-                                                print(f"⚠️  Failed to track Enhanced AI PR for QA review: {e}")
-                                        
-                                        if pr_result.get("status") == "success":
-                                            result["pr_url"] = pr_result.get("pr_url")
-                                            result["pr_number"] = pr_result.get("pr_number")
-                                            result["pr_files_changed"] = list(changes.keys())
-                                            result["changes"] = changes
-                                            result["enhanced_crew"] = True
-                                            result["confidence_score"] = confidence_score
-                                            result["is_draft"] = is_draft
-                                            result["decision"] = enhanced_result.get("decision")
+                                                        db.add(agent_pr)
+                                                        db.commit()
+                                                        print(f"✅ Tracked Enhanced AI PR #{pr_number} created by {alex_agent.name} for QA review")
+                                                        
+                                                        # Update Linear issue with PR link if Linear integration exists
+                                                        if linear_issue_identifier and incident.metadata_json and incident.metadata_json.get("linear_issue"):
+                                                            try:
+                                                                from src.utils.integrations import get_linear_integration_for_user
+                                                                from src.integrations.linear.integration import LinearIntegration
+                                                                
+                                                                linear_integration_obj = get_linear_integration_for_user(db, incident.user_id)
+                                                                if linear_integration_obj:
+                                                                    linear_integration = LinearIntegration(integration_id=linear_integration_obj.id)
+                                                                    linear_issue_id = incident.metadata_json["linear_issue"]["id"]
+                                                                    
+                                                                    # Add comment to Linear issue with PR link
+                                                                    comment_body = f"**Pull Request Created**\n\nPR: {pr_url}\nBranch: `{head_branch}`\n\nThis PR addresses the incident and includes the fix."
+                                                                    linear_integration.add_comment_to_issue(linear_issue_id, comment_body)
+                                                                    print(f"✅ Added PR link to Linear issue {linear_issue_identifier}")
+                                                            except Exception as e:
+                                                                print(f"⚠️  Failed to update Linear issue with PR link: {e}")
+                                                                import traceback
+                                                                traceback.print_exc()
+                                                        
+                                                        # Trigger QA review
+                                                        try:
+                                                            from src.agents.qa_orchestrator import review_pr_for_alex
+                                                            import asyncio
+                                                            integration_id = None
+                                                            if hasattr(github_integration, 'installation_id') and github_integration.installation_id:
+                                                                integration = db.query(Integration).filter(
+                                                                    Integration.installation_id == github_integration.installation_id
+                                                                ).first()
+                                                                if integration:
+                                                                    integration_id = integration.id
+                                                            
+                                                            asyncio.create_task(
+                                                                review_pr_for_alex(
+                                                                    repo_name=repo_name,
+                                                                    pr_number=pr_number,
+                                                                    user_id=incident.user_id,
+                                                                    integration_id=integration_id,
+                                                                    db=db
+                                                                )
+                                                            )
+                                                        except Exception as e:
+                                                            print(f"⚠️  Failed to trigger QA review: {e}")
+                                                except Exception as e:
+                                                    print(f"⚠️  Failed to track Enhanced AI PR for QA review: {e}")
                                             
-                                            # Store original file contents for comparison on UI
-                                            original_contents = {}
-                                            for file_path in changes.keys():
-                                                original_content = github_integration.get_file_contents(repo_name, file_path, ref="main")
-                                                if original_content:
-                                                    original_contents[file_path] = original_content
-                                            result["original_contents"] = original_contents
-                                            
-                                            if is_draft:
-                                                print(f"📝 Created DRAFT PR using enhanced crew: {pr_result.get('pr_url')}")
+                                            if pr_result.get("status") == "success":
+                                                result["pr_url"] = pr_result.get("pr_url")
+                                                result["pr_number"] = pr_result.get("pr_number")
+                                                result["pr_files_changed"] = list(changes.keys())
+                                                result["changes"] = changes
+                                                result["enhanced_crew"] = True
+                                                result["confidence_score"] = confidence_score
+                                                result["is_draft"] = is_draft
+                                                result["decision"] = enhanced_result.get("decision")
+                                                
+                                                # Store original file contents for comparison on UI
+                                                original_contents = {}
+                                                for file_path in changes.keys():
+                                                    original_content = github_integration.get_file_contents(repo_name, file_path, ref="main")
+                                                    if original_content:
+                                                        original_contents[file_path] = original_content
+                                                result["original_contents"] = original_contents
+                                                
+                                                if is_draft:
+                                                    print(f"📝 Created DRAFT PR using enhanced crew: {pr_result.get('pr_url')}")
+                                                else:
+                                                    print(f"✅ Created PR using enhanced crew: {pr_result.get('pr_url')}")
                                             else:
-                                                print(f"✅ Created PR using enhanced crew: {pr_result.get('pr_url')}")
+                                                print(f"⚠️  Enhanced crew PR creation failed: {pr_result.get('message')}")
+                                                result["pr_error"] = pr_result.get("message")
+                                                result["code_fix_explanation"] = f"Agent attempted to create a pull request but encountered an error: {pr_result.get('message')}. The code changes were generated but could not be submitted to GitHub."
+                                        elif not changes:
+                                            print("⚠️  Enhanced crew generated no changes")
+                                            result["enhanced_crew"] = True
+                                            result["decision"] = enhanced_result.get("decision")
+                                            # Capture explanation for why no changes were generated
+                                            decision_info = enhanced_result.get("decision", {})
+                                            reasoning = decision_info.get("reasoning", "The agent analyzed the codebase but determined no code changes are needed.")
+                                            result["code_fix_explanation"] = f"Agent attempted to generate code fixes but found no changes necessary. {reasoning}"
                                         else:
-                                            print(f"⚠️  Enhanced crew PR creation failed: {pr_result.get('message')}")
-                                            result["pr_error"] = pr_result.get("message")
-                                            result["code_fix_explanation"] = f"Agent attempted to create a pull request but encountered an error: {pr_result.get('message')}. The code changes were generated but could not be submitted to GitHub."
-                                    elif not changes:
-                                        print("⚠️  Enhanced crew generated no changes")
-                                        result["enhanced_crew"] = True
-                                        result["decision"] = enhanced_result.get("decision")
-                                        # Capture explanation for why no changes were generated
-                                        decision_info = enhanced_result.get("decision", {})
-                                        reasoning = decision_info.get("reasoning", "The agent analyzed the codebase but determined no code changes are needed.")
-                                        result["code_fix_explanation"] = f"Agent attempted to generate code fixes but found no changes necessary. {reasoning}"
-                                    else:
-                                        # SKIP_PR or other action - still store decision and changes for UI
-                                        print(f"⚠️  Enhanced crew decision: {decision_action}")
-                                        result["enhanced_crew"] = True
-                                        result["decision"] = enhanced_result.get("decision")
-                                        result["confidence_score"] = confidence_score
-                                        # Capture explanation for why PR was skipped
-                                        decision_info = enhanced_result.get("decision", {})
-                                        reasoning = decision_info.get("reasoning", f"Agent determined that creating a PR is not appropriate. Status: {enhanced_result.get('status')}")
-                                        result["code_fix_explanation"] = f"Agent analyzed the incident and attempted to generate fixes. {reasoning}"
-                                        if changes:
-                                            result["changes"] = changes
-                                            # Store original contents for UI display
-                                            original_contents = {}
-                                            for file_path in changes.keys():
-                                                original_content = github_integration.get_file_contents(repo_name, file_path, ref="main")
-                                                if original_content:
-                                                    original_contents[file_path] = original_content
-                                            result["original_contents"] = original_contents
+                                            # SKIP_PR or other action - still store decision and changes for UI
+                                            print(f"⚠️  Enhanced crew decision: {decision_action}")
+                                            result["enhanced_crew"] = True
+                                            result["decision"] = enhanced_result.get("decision")
+                                            result["confidence_score"] = confidence_score
+                                            # Capture explanation for why PR was skipped
+                                            decision_info = enhanced_result.get("decision", {})
+                                            reasoning = decision_info.get("reasoning", f"Agent determined that creating a PR is not appropriate. Status: {enhanced_result.get('status')}")
+                                            result["code_fix_explanation"] = f"Agent analyzed the incident and attempted to generate fixes. {reasoning}"
+                                            if changes:
+                                                result["changes"] = changes
+                                                # Store original contents for UI display
+                                                original_contents = {}
+                                                for file_path in changes.keys():
+                                                    original_content = github_integration.get_file_contents(repo_name, file_path, ref="main")
+                                                    if original_content:
+                                                        original_contents[file_path] = original_content
+                                                result["original_contents"] = original_contents
                                     
-                                except Exception as e:
-                                    import traceback
-                                    error_trace = traceback.format_exc()
-                                    print(f"⚠️  Enhanced crew failed: {e}")
-                                    print(f"Full traceback:\n{error_trace}")
-                                    result["pr_error"] = str(e)
-                                    result["code_fix_explanation"] = f"Enhanced crew execution failed: {str(e)[:200]}. Please check logs for details."
+                                    except Exception as e:
+                                        import traceback
+                                        error_trace = traceback.format_exc()
+                                        print(f"⚠️  Enhanced crew failed: {e}")
+                                        print(f"Full traceback:\n{error_trace}")
+                                        result["pr_error"] = str(e)
+                                        result["code_fix_explanation"] = f"Enhanced crew execution failed: {str(e)[:200]}. Please check logs for details."
                         else:
                             print(f"⚠️  No repository name found for incident {incident.id} (integration {integration.id})")
                             code_fix_explanation = f"No repository name configured for this service ({incident.service_name}). Please configure the repository name in the GitHub integration settings (service mappings or default repo_name)."

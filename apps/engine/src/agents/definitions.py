@@ -18,6 +18,7 @@ from src.agents.prompts import (
     DECISION_MAKER_PROMPT,
     QA_REVIEWER_PROMPT
 )
+from src.config.prompts import CODING_AGENT_PROMPT, RCA_AGENT_PROMPT
 from src.tools.coding import (
     read_file,
     find_symbol_definition,
@@ -258,6 +259,57 @@ def create_qa_agents() -> tuple:
     )
     
     return (qa_reviewer,)
+
+# ============================================================================
+# Simple four-agent crew (log parser, RCA, coder, safety)
+# ============================================================================
+
+def create_simple_crew_agents() -> tuple:
+    """
+    Create the simple four-agent CrewAI crew: Log Parsing Specialist, Root Cause Analyst,
+    Senior Coding Agent, and Safety & Compliance Officer.
+    Used for reference or alternative flows; the main flow uses create_all_enhanced_agents().
+    """
+    if not flash_llm or not coding_llm:
+        raise ValueError("LLMs not initialized. Check OPENCOUNCIL_API.")
+    log_parser = Agent(
+        role='Log Parsing Specialist',
+        goal='Extract structured signals from raw logs and identify anomalies.',
+        backstory='You are an expert in parsing logs from various systems (Kubernetes, Cloud Run, Postgres). You can spot stack traces and error codes instantly.',
+        verbose=True,
+        allow_delegation=False,
+        llm=flash_llm,
+    )
+    rca_analyst = Agent(
+        role='Root Cause Analyst',
+        goal='Determine the underlying cause of the incident based on parsed logs and system state.',
+        backstory=RCA_AGENT_PROMPT,
+        verbose=True,
+        allow_delegation=True,
+        llm=flash_llm,
+    )
+    coding_agent = Agent(
+        role='Senior Coding Agent',
+        goal='Implement code fixes and improvements based on RCA and Safety analysis, utilizing code memory.',
+        backstory=CODING_AGENT_PROMPT,
+        verbose=True,
+        allow_delegation=False,
+        llm=coding_llm,
+        memory=True,
+    )
+    safety_officer = Agent(
+        role='Safety & Compliance Officer',
+        goal='Ensure that proposed healing actions are safe and reversible.',
+        backstory='You are responsible for system stability. You reject any action that could cause data loss or downtime without approval.',
+        verbose=True,
+        allow_delegation=False,
+        llm=flash_llm,
+    )
+    return log_parser, rca_analyst, coding_agent, safety_officer
+
+
+# Alias for backward compatibility (e.g. scripts/update_imports.py mapping "from agents import" -> definitions)
+create_agents = create_simple_crew_agents
 
 # ============================================================================
 # Convenience Functions
