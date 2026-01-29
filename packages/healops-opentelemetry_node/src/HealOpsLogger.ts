@@ -1052,7 +1052,7 @@ export class HealOpsLogger {
                         'X-HealOps-Key': this.config.apiKey,
                         'Content-Type': 'application/json'
                     },
-                    timeout: 5000, // Longer timeout for batches
+                    timeout: 15000, // 15s for batches (avoids "context canceled" behind Cloudflare tunnel)
                     maxRedirects: 0, // Prevent redirects that might cause issues
                     validateStatus: (status) => status < 500 // Don't throw on 4xx errors, let us handle them
                 }
