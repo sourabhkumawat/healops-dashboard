@@ -989,23 +989,17 @@ class IntegrationsController:
                         "repo": repo_name
                     }
                 
-                # Only index main/master branches by default (can be configured)
-                branches_to_index = ["main", "master"]
-                if ref not in branches_to_index:
-                    print(f"   Branch {ref} is not in indexable branches {branches_to_index}, skipping")
-                    return {
-                        "status": "ok",
-                        "message": f"Branch {ref} not configured for indexing",
-                        "repo": repo_name,
-                        "branch": ref
-                    }
-                
-                # Schedule reindexing for each matching integration
+                # Index only branches listed in integration config (default: main, master)
+                DEFAULT_BRANCHES = ["main", "master","dev",'development','experiment']
                 indexed_count = 0
                 for integration, matched_repo in matching_integrations:
+                    config = integration.config or {}
+                    branches_to_index = config.get("branches_to_index") or DEFAULT_BRANCHES
+                    if ref not in branches_to_index:
+                        print(f"   Branch {ref} is not in indexable branches {branches_to_index} for integration {integration.id}, skipping")
+                        continue
                     try:
                         print(f"   Scheduling reindex for integration {integration.id} ({integration.name})")
-                        # Schedule reindex (non-blocking, uses asyncio.create_task internally)
                         await indexing_manager.schedule_reindex(
                             repo_name=repo_name,
                             integration_id=integration.id,
@@ -1016,7 +1010,15 @@ class IntegrationsController:
                         print(f"   ⚠️  Failed to schedule reindex for integration {integration.id}: {e}")
                         import traceback
                         traceback.print_exc()
-                
+
+                if indexed_count == 0:
+                    return {
+                        "status": "ok",
+                        "message": f"Branch {ref} not configured for indexing by any matching integration",
+                        "repo": repo_name,
+                        "branch": ref
+                    }
+
                 return {
                     "status": "ok",
                     "message": f"Reindexing scheduled for {indexed_count} integration(s)",
