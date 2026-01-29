@@ -2,12 +2,10 @@ from crewai import Agent, LLM
 import os
 from src.memory.memory import CodeMemory
 from src.config.prompts import CODING_AGENT_PROMPT, RCA_AGENT_PROMPT
+from src.core.openrouter_client import get_api_key
 
-# Placeholder for LLM configuration
-# In a real scenario, we'd use Azure OpenAI or a local model via Ollama
-# For now, we'll assume OpenAI API key is present or we mock it
-# Using OpenRouter as requested
-api_key = os.getenv("OPENCOUNCIL_API")
+# Using OpenRouter for LLM
+api_key = get_api_key()
 base_url = "https://openrouter.ai/api/v1"
 
 # Cost-effective models via OpenRouter
@@ -17,7 +15,7 @@ base_url = "https://openrouter.ai/api/v1"
 # instead of trying to load native drivers for google/gemini which require GOOGLE_API_KEY.
 
 flash_llm = LLM(
-    model="openai/deepseek/deepseek-r1-0528:free",
+    model="openrouter/xiaomi/mimo-v2-flash",  # LiteLLM format: openrouter/<openrouter-model-id>
     base_url=base_url,
     api_key=api_key
 )
@@ -47,7 +45,7 @@ def create_agents():
         backstory=RCA_AGENT_PROMPT,
         verbose=True,
         allow_delegation=True,
-        llm=coding_llm # Use DeepSeek for RCA (better reasoning)
+        llm=flash_llm # Use Flash for RCA (better reasoning)
     )
 
     coding_agent = Agent(
@@ -56,7 +54,7 @@ def create_agents():
         backstory=CODING_AGENT_PROMPT,
         verbose=True,
         allow_delegation=False,
-        llm=coding_llm, # Use DeepSeek for Coding (SOTA coding capability)
+        llm=coding_llm, 
         memory=True
     )
 

@@ -25,6 +25,7 @@ from src.database.database import SessionLocal
 from src.database.models import Integration, User
 from src.services.linear_polling_service import PollingConfig, LinearPollingService
 from src.integrations.linear.integration import LinearIntegration
+from src.core.openrouter_client import get_api_key
 
 
 class LinearTicketResolutionSetup:
@@ -87,16 +88,16 @@ class LinearTicketResolutionSetup:
 
         print("  • Checking required environment variables...")
         required_vars = [
-            "DATABASE_URL",
-            "OPENCOUNCIL_API",  # For AI analysis
+            ("DATABASE_URL", lambda: os.getenv("DATABASE_URL")),
+            ("OPENCOUNCIL_API", get_api_key),  # OpenRouter / AI analysis
         ]
 
         missing_vars = []
-        for var in required_vars:
-            if not os.getenv(var):
-                missing_vars.append(var)
+        for name, getter in required_vars:
+            if not getter():
+                missing_vars.append(name)
             else:
-                print(f"    ✅ {var} configured")
+                print(f"    ✅ {name} configured")
 
         if missing_vars:
             raise Exception(f"Missing environment variables: {', '.join(missing_vars)}")

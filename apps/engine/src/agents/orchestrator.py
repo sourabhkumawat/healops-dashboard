@@ -16,6 +16,7 @@ import time
 import logging
 from contextlib import contextmanager
 from datetime import datetime
+import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 # Configure logging
@@ -76,9 +77,11 @@ from src.agents.definitions import create_all_enhanced_agents
 from src.tools.coding import set_coding_tools_context, CodingToolsContext
 from src.memory.models import AgentWorkspace
 from src.utils.db_retry import execute_with_retry
+from src.utils.observability import log_phase, log_phase_start
 
 # LLM Configuration
-api_key = os.getenv("OPENCOUNCIL_API")
+from src.core.openrouter_client import get_api_key
+api_key = get_api_key()
 base_url = "https://openrouter.ai/api/v1"
 
 try:
@@ -92,12 +95,12 @@ try:
     else:
         try:
             flash_llm = LLM(
-                model="openai/deepseek/deepseek-r1-0528:free",
+                model="openrouter/xiaomi/mimo-v2-flash",  # LiteLLM format: openrouter/<openrouter-model-id>
                 base_url=base_url,
                 api_key=api_key
             )
             coding_llm = LLM(
-                model="openai/x-ai/grok-code-fast-1",
+                model="openrouter/x-ai/grok-code-fast-1",  # LiteLLM format
                 base_url=base_url,
                 api_key=api_key
             )
@@ -140,6 +143,9 @@ def run_robust_crew(
     Returns:
         Result dictionary with fixes, events, and execution details
     """
+    # Observability: run start
+    log_phase("run_start", incident_id=incident.id, repo_name=repo_name, logs_count=len(logs))
+
     # Initialize all components
     event_stream = EventStream(incident.id)
     
@@ -259,7 +265,15 @@ def run_robust_crew(
     error_signature = get_incident_fingerprint(incident, logs)
     
     # Retrieve memory
+    _t0 = log_phase_start("memory_retrieve_start", incident_id=incident.id)
     memory_data = code_memory.retrieve_context(error_signature)
+    log_phase(
+        "memory_retrieved",
+        incident_id=incident.id,
+        duration_sec=time.time() - _t0,
+        fixes_count=len(memory_data.get("known_fixes", [])),
+        past_errors_count=len(memory_data.get("past_errors", [])),
+    )
     
     # Retrieve learning pattern for this error type
     learning_pattern = None
@@ -279,6 +293,7 @@ def run_robust_crew(
     # Index knowledge base
     # Note: Full repository indexing happens at connection time via CocoIndex
     # This is mainly for past fixes indexing and triggering incremental updates if needed
+    _t_index = log_phase_start("knowledge_index_start", incident_id=incident.id)
     try:
         # CocoIndex handles incremental updates automatically
         # This call may trigger updates or is a no-op if index exists
@@ -287,15 +302,35 @@ def run_robust_crew(
             knowledge_retriever.index_codebase_patterns(files_to_index)
         
         # Index past fixes (these are added to the CocoIndex vector store)
-        if memory_data.get("known_fixes"):
-            knowledge_retriever.index_past_fixes(memory_data["known_fixes"])
+        fixes_to_index = memory_data.get("known_fixes") or []
+        if fixes_to_index:
+            knowledge_retriever.index_past_fixes(fixes_to_index)
+        log_phase(
+            "knowledge_indexed",
+            incident_id=incident.id,
+            duration_sec=time.time() - _t_index,
+            fixes_indexed=len(fixes_to_index),
+        )
     except Exception as e:
+        log_phase(
+            "knowledge_index_failed",
+            incident_id=incident.id,
+            duration_sec=time.time() - _t_index,
+            error=str(e)[:200],
+        )
         print(f"Warning: Knowledge indexing failed: {e}")
     
     # Retrieve knowledge for planning
     knowledge_context = None
+    _t_retrieve = log_phase_start("knowledge_retrieve_start", incident_id=incident.id)
     try:
         knowledge = knowledge_retriever.retrieve_for_planning(root_cause, affected_files)
+        log_phase(
+            "knowledge_retrieved",
+            incident_id=incident.id,
+            duration_sec=time.time() - _t_retrieve,
+            result_count=len(knowledge) if knowledge else 0,
+        )
         if knowledge:
             knowledge_context = "\n".join([k["content"][:200] for k in knowledge[:3]])
             # Inject knowledge events
@@ -309,6 +344,12 @@ def run_robust_crew(
                     }
                 )
     except Exception as e:
+        log_phase(
+            "knowledge_retrieve_failed",
+            incident_id=incident.id,
+            duration_sec=time.time() - _t_retrieve,
+            error=str(e)[:200],
+        )
         print(f"Warning: Knowledge retrieval failed: {e}")
     
     # Enhance knowledge context with learning pattern
@@ -347,7 +388,14 @@ def run_robust_crew(
         
         enhanced_knowledge_context = (knowledge_context or "") + files_context
         
+        _t_plan = log_phase_start("plan_create_start", incident_id=incident.id)
         plan = planner.create_plan(root_cause, affected_files, coding_llm, enhanced_knowledge_context)
+        log_phase(
+            "plan_created",
+            incident_id=incident.id,
+            duration_sec=time.time() - _t_plan,
+            steps_count=len(plan),
+        )
         workspace.set_plan(plan)
         scratchpad.initialize(plan)
         
@@ -439,7 +487,8 @@ def run_robust_crew(
     }
     
     crew_start_time = time.time()
-    
+    log_phase("crew_start", incident_id=incident.id, plan_steps=len(planner.plan) if planner.plan else 0)
+
     try:
         # Wrap agent loop execution with timeout
         def _run_agent_loop():
@@ -574,6 +623,14 @@ def run_robust_crew(
                     }
                 )
         
+        log_phase(
+            "crew_completed",
+            incident_id=incident.id,
+            duration_sec=time.time() - crew_start_time,
+            success=result["success"],
+            iterations=result["iterations"],
+            fixes_count=len(fixes),
+        )
         return {
             "status": "success" if result["success"] else "partial",
             "success": result["success"],
@@ -588,6 +645,12 @@ def run_robust_crew(
         # Handle timeout errors specifically
         elapsed_time = time.time() - crew_start_time if 'crew_start_time' in locals() else 0
         error_msg = str(timeout_err)
+        log_phase(
+            "crew_timeout",
+            incident_id=incident.id,
+            duration_sec=elapsed_time,
+            timeout_sec=CREW_EXECUTION_TIMEOUT,
+        )
         event_stream.add_event(
             EventType.ERROR,
             {
@@ -605,6 +668,12 @@ def run_robust_crew(
             "workspace_state": workspace.get_workspace_state()
         }
     except Exception as e:
+        log_phase(
+            "crew_failed",
+            incident_id=incident.id,
+            duration_sec=time.time() - crew_start_time,
+            error=str(e)[:200],
+        )
         event_stream.add_event(
             EventType.ERROR,
             {"message": f"Agent loop failed: {str(e)}"}
@@ -1293,7 +1362,7 @@ Generate the Python code to complete the step now:
                         "problematic_line": line[:150],
                         "line_number": i
                     }
-        
+        print(code)
         # Execute code safely
         execution_result = _execute_code_safely(code, workspace, github_integration, repo_name)
         
@@ -1351,20 +1420,47 @@ def _call_llm_with_timeout(llm, prompt: str, timeout_seconds: int = None) -> Any
             raise TimeoutError(f"LLM call exceeded {timeout_seconds} seconds")
 
 
+def _timeout_context_threading_based(seconds: int):
+    """
+    Threading-based timeout (used when signal is not allowed, e.g. non-main thread).
+    Does not interrupt running code; raises TimeoutError only after the block completes
+    if it took longer than seconds.
+    """
+    timeout_occurred = threading.Event()
+
+    @contextmanager
+    def _ctx():
+        start_time = time.time()
+        try:
+            yield
+            if time.time() - start_time > seconds:
+                raise TimeoutError(f"Code execution exceeded {seconds} seconds")
+        finally:
+            timeout_occurred.set()
+
+    return _ctx()
+
+
 @contextmanager
 def _timeout_context(seconds: int):
     """
     Context manager for code execution timeout.
-    Works on both Unix (signal-based) and Windows (threading-based).
+    Uses signal on Unix only when in the main thread (signal only works there);
+    otherwise uses threading-based timeout.
+    On Windows, always uses threading-based timeout.
     
     Args:
         seconds: Timeout in seconds
     """
-    if hasattr(signal, 'SIGALRM'):
-        # Unix/Linux: Use signal-based timeout
+    use_signal = (
+        hasattr(signal, 'SIGALRM')
+        and threading.current_thread() is threading.main_thread()
+    )
+    if use_signal:
+        # Unix/Linux, main thread: Use signal-based timeout
         def timeout_handler(signum, frame):
             raise TimeoutError(f"Code execution exceeded {seconds} seconds")
-        
+
         old_handler = signal.signal(signal.SIGALRM, timeout_handler)
         signal.alarm(seconds)
         try:
@@ -1373,31 +1469,9 @@ def _timeout_context(seconds: int):
             signal.alarm(0)
             signal.signal(signal.SIGALRM, old_handler)
     else:
-        # Windows: Use threading-based timeout (less reliable but works)
-        import threading
-        
-        timeout_occurred = threading.Event()
-        
-        def timeout_worker():
-            timeout_occurred.wait(seconds)
-            if not timeout_occurred.is_set():
-                # Timeout occurred - raise in main thread
-                # Note: This is a best-effort approach on Windows
-                # The actual execution might continue, but we'll mark it as timed out
-                pass
-        
-        timer_thread = threading.Thread(target=timeout_worker, daemon=True)
-        timer_thread.start()
-        
-        start_time = time.time()
-        try:
+        # Non-main thread or Windows: Use threading-based timeout (no signal)
+        with _timeout_context_threading_based(seconds):
             yield
-            # Check if timeout occurred
-            if time.time() - start_time > seconds:
-                raise TimeoutError(f"Code execution exceeded {seconds} seconds")
-        finally:
-            timeout_occurred.set()
-            timer_thread.join(timeout=0.1)
 
 
 def _execute_code_safely(

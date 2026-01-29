@@ -11,12 +11,13 @@ from src.database.models import Incident, LogEntry, Integration
 from sqlalchemy.orm import Session
 from src.integrations.github.integration import GithubIntegration
 from src.memory.memory import CodeMemory
+from src.core.openrouter_client import openrouter_chat_completion, get_api_key
 
 # Cost-optimized model configuration
 # Use cheaper models for simpler tasks, expensive models only when needed
 MODEL_CONFIG = {
     "simple_analysis": {
-        "model": "deepseek/deepseek-r1-0528:free",
+        "model": "xiaomi/mimo-v2-flash",
         "max_tokens": 500,
         "temperature": 0.3
     },
@@ -31,7 +32,7 @@ MODEL_CONFIG = {
         "temperature": 0.2
     },
     "chat": {
-        "model": "deepseek/deepseek-r1-0528:free",  # Paid model for Slack chat (free tier ended)
+        "model": "xiaomi/mimo-v2-flash",  # Paid model for Slack chat (free tier ended)
         "max_tokens": 500,
         "temperature": 0.7
     }
@@ -132,13 +133,16 @@ def should_use_expensive_model(incident: Incident, logs: list[LogEntry], root_ca
     try:
         # Use expensive model if:
         # Use expensive model if:
-        # 1. Complex error patterns (stack traces, multiple errors)
+        # 1. Complex error patterns (stack traces from application code, multiple errors)
         has_stack_trace = False
         error_count = 0
         for log in (logs or [])[:10]:
             if log and log.message:
+                # Check if message contains stack trace and it's NOT from node_modules
                 if "Traceback" in log.message or "at " in log.message or "File \"" in log.message:
-                    has_stack_trace = True
+                    # Only count stack traces from application code, not node_modules
+                    if not is_stacktrace_from_node_modules(log.message):
+                        has_stack_trace = True
                 if hasattr(log, 'severity') and log.severity and log.severity.upper() in ["ERROR", "CRITICAL"]:
                     error_count += 1
         
@@ -233,8 +237,7 @@ def generate_incident_title_and_description(log: LogEntry, service_name: str) ->
     Returns:
         Tuple of (title, description) - falls back to simple format if AI fails
     """
-    api_key = os.getenv("OPENCOUNCIL_API")
-    if not api_key:
+    if not get_api_key():
         # Fallback to simple format if API key not available
         return (
             f"Detected {log.severity} in {service_name}",
@@ -242,8 +245,6 @@ def generate_incident_title_and_description(log: LogEntry, service_name: str) ->
         )
     
     try:
-        import requests
-        
         # Prepare log message for analysis (limit to reasonable size)
         log_message = log.message[:1000] if log.message else "No error message available"
         
@@ -267,34 +268,18 @@ Format your response as JSON:
 
 Focus on making it easy for users to understand what the problem is without needing to read the raw error log."""
 
-        # Use simple/cheap model for this task
         model_config = MODEL_CONFIG["simple_analysis"]
-        
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": os.getenv("APP_URL", "https://healops.ai"),
-                "X-Title": "HealOps Incident Title Generation",
-            },
-            json={
-                "model": model_config["model"],
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                "temperature": 0.3,
-                "max_tokens": 200,  # Small response for title + description
-            },
-            timeout=10  # Short timeout for quick response
+        r = openrouter_chat_completion(
+            model_config["model"],
+            [{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=200,
+            timeout=10,
+            title="HealOps Incident Title Generation",
         )
         
-        if response.status_code == 200:
-            result = response.json()
-            content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if r["success"] and r["content"]:
+            content = r["content"]
             
             # Try to parse JSON response
             try:
@@ -385,6 +370,86 @@ def extract_paths_from_stacktrace(text: str) -> list[str]:
             paths.append(match)
     
     return paths
+
+
+def is_stacktrace_from_node_modules(stack_trace: str) -> bool:
+    """
+    Use AI to determine if a stack trace is from node_modules or actual application code.
+    This helps avoid wasting computation on issues we cannot resolve (node_modules).
+    
+    Purely relies on AI output - no pattern matching or code-based decisions.
+    
+    Args:
+        stack_trace: The stack trace string to analyze
+        
+    Returns:
+        True if the stack trace is primarily from node_modules, False if from application code
+        Returns False if AI is unavailable or fails (assume application code to be safe)
+    """
+    if not stack_trace or len(stack_trace.strip()) < 50:
+        # Too short to analyze, assume it's from code (safe default)
+        return False
+    
+    if not get_api_key():
+        # No API key - cannot use AI, default to False (assume application code)
+        print("⚠️  OPENCOUNCIL_API not set, cannot analyze stack trace. Assuming application code.")
+        return False
+    
+    try:
+        # Truncate stack trace if too long to save tokens
+        truncated_trace = stack_trace[:2000] if len(stack_trace) > 2000 else stack_trace
+        
+        prompt = f"""Analyze the following stack trace and determine if it originates primarily from node_modules (third-party dependencies) or from application code.
+
+                Stack Trace:
+                {truncated_trace}
+
+                Respond with ONLY a JSON object:
+                {{
+                "is_node_modules": true or false
+                }}
+
+                Rules:
+                - If the stack trace shows paths containing "/node_modules/" or references to third-party libraries, it's likely node_modules
+                - If the stack trace shows paths to application code (src/, app/, pages/, components/, etc.), it's likely application code
+                - If it's mixed but primarily node_modules, return true
+                - If it's mixed but primarily application code, return false
+            """
+
+        cheapest_model = "google/gemini-flash-1.5-8b"
+        r = openrouter_chat_completion(
+            cheapest_model,
+            [{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=100,
+            timeout=5,
+            title="HealOps Stack Trace Analysis",
+        )
+        
+        if r["success"] and r["content"]:
+            content = r["content"]
+            try:
+                json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+                if json_match:
+                    content = json_match.group(1)
+                parsed = json.loads(content.strip())
+                is_node_modules = parsed.get("is_node_modules", False)
+                return bool(is_node_modules)
+            except (json.JSONDecodeError, KeyError, AttributeError) as e:
+                print(f"⚠️  Failed to parse AI response for stack trace classification: {e}")
+                print(f"   Response content: {content[:200]}")
+                return False
+        else:
+            if not r["success"]:
+                print(f"⚠️  OpenRouter API error for stack trace classification: {r['status_code']} - {r.get('error_message', '')}")
+            return False
+            
+    except Exception as e:
+        print(f"⚠️  Error in is_stacktrace_from_node_modules: {e}")
+        import traceback
+        traceback.print_exc()
+        # On error, default to False (assume application code to be safe)
+        return False
 
 
 def normalize_path(path: str) -> str:
@@ -863,17 +928,19 @@ def build_enhanced_linear_description(
             except Exception as e:
                 print(f"⚠️  Error building trace flow for Linear ticket: {e}")
     
-    # Stack Traces
+    # Stack Traces (filter out node_modules to avoid wasting computation)
     stack_traces = []
     for log in logs[:10]:  # Check first 10 logs
         try:
             if log.message:
                 # Check if message contains stack trace
                 if any(keyword in log.message for keyword in ["Traceback", "at ", "File \"", "Error:", "Exception:"]):
-                    stack_traces.append({
-                        "log_id": log.id,
-                        "message": log.message[:1000]  # Limit length
-                    })
+                    # Use AI to check if stack trace is from node_modules
+                    if not is_stacktrace_from_node_modules(log.message):
+                        stack_traces.append({
+                            "log_id": log.id,
+                            "message": log.message[:1000]  # Limit length
+                        })
             
             # Check metadata for stack traces
             metadata = log.metadata_json or {}
@@ -885,10 +952,13 @@ def build_enhanced_linear_description(
                         if isinstance(event, dict):
                             attrs = event.get("attributes", {})
                             if isinstance(attrs, dict) and attrs.get("exception.stacktrace"):
-                                stack_traces.append({
-                                    "log_id": log.id,
-                                    "message": attrs.get("exception.stacktrace", "")[:1000]
-                                })
+                                stacktrace = attrs.get("exception.stacktrace", "")
+                                # Use AI to check if stack trace is from node_modules
+                                if not is_stacktrace_from_node_modules(stacktrace):
+                                    stack_traces.append({
+                                        "log_id": log.id,
+                                        "message": stacktrace[:1000]
+                                    })
         except (AttributeError, TypeError, KeyError):
             continue
     
@@ -1007,8 +1077,7 @@ def analyze_incident_with_openrouter(incident: Incident, logs: list[LogEntry], d
     Returns:
         Dict with 'root_cause' and 'action_taken' keys
     """
-    api_key = os.getenv("OPENCOUNCIL_API")
-    if not api_key:
+    if not get_api_key():
         print("⚠️  OPENCOUNCIL_API not set, skipping AI analysis")
         # Return an error message instead of None so UI stops loading
         return {
@@ -1240,8 +1309,6 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
         prompt = base_prompt
     
     try:
-        import requests
-        
         # COST OPTIMIZATION: Use cheaper model for initial analysis
         # Only use expensive model if code generation is needed
         use_expensive = should_use_expensive_model(incident, logs, None)
@@ -1253,66 +1320,32 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
             model_config = MODEL_CONFIG["simple_analysis"]  # Gemini Flash
             print("💰 Using Gemini Flash for simple analysis (cost-optimized)")
         
-        # Use OpenRouter API
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": os.getenv("APP_URL", "https://healops.ai"),  # Optional
-                "X-Title": "HealOps Incident Analysis",  # Optional
-            },
-            json={
-                "model": model_config["model"],
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                "temperature": model_config["temperature"],
-                "max_tokens": model_config["max_tokens"],
-            },
-            timeout=int(os.getenv("HTTP_LLM_API_TIMEOUT", "60"))  # 60 seconds for LLM API calls
+        r = openrouter_chat_completion(
+            model_config["model"],
+            [{"role": "user", "content": prompt}],
+            temperature=model_config["temperature"],
+            max_tokens=model_config["max_tokens"],
+            timeout=int(os.getenv("HTTP_LLM_API_TIMEOUT", "60")),
+            title="HealOps Incident Analysis"
         )
         
-        if response.status_code == 402:
-            # Insufficient credits error - provide helpful message
-            error_data = response.json() if response.text else {}
-            error_msg = error_data.get("error", {}).get("message", "Insufficient credits")
-            print(f"❌ OpenRouter API: Insufficient credits - {error_msg}")
+        if r["status_code"] == 402:
+            print(f"❌ OpenRouter API: Insufficient credits - {r.get('error_message', '')}")
             return {
                 "root_cause": "AI analysis is currently unavailable due to insufficient API credits. Please add credits at https://openrouter.ai/settings/credits or contact your administrator.",
                 "action_taken": None
             }
-        elif response.status_code != 200:
-            error_text = response.text[:300] if response.text else "Unknown error"
-            try:
-                error_data = response.json()
-                error_msg = error_data.get("error", {}).get("message", error_text)
-            except:
-                error_msg = error_text
-            
-            print(f"❌ OpenRouter API error (status {response.status_code}): {error_msg}")
-            # Return error message so UI stops loading
+        if not r["success"]:
+            print(f"❌ OpenRouter API error (status {r['status_code']}): {r.get('error_message', '')}")
             return {
-                "root_cause": f"Analysis failed: {error_msg}. Please check OpenRouter API configuration or try again later.",
+                "root_cause": f"Analysis failed: {r.get('error_message', 'Unknown error')}. Please check OpenRouter API configuration or try again later.",
                 "action_taken": None
             }
         
-        try:
-            result = response.json()
-        except (json.JSONDecodeError, ValueError) as e:
-            print(f"⚠️  Failed to parse API response as JSON: {e}")
-            return {
-                "root_cause": "Analysis failed: Invalid response from AI service. Please try again later.",
-                "action_taken": None
-            }
-        
-        content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        content = r["content"] or ""
         
         # COST TRACKING: Log token usage for monitoring
-        usage = result.get("usage", {}) or {}
+        usage = r.get("usage") or {}
         input_tokens = usage.get("prompt_tokens", 0) or 0
         output_tokens = usage.get("completion_tokens", 0) or 0
         total_tokens = usage.get("total_tokens", 0) or 0
@@ -1320,10 +1353,9 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
         # Estimate cost (approximate) - safely handle model_config
         try:
             model_name = model_config.get("model", "unknown") if isinstance(model_config, dict) else "unknown"
-            if "deepseek/deepseek-r1-0528" in model_name:
-                # MiMo-V2-Flash (paid): Check OpenRouter pricing - using placeholder estimate
-                # Update with actual pricing from https://openrouter.ai/models
-                estimated_cost = (input_tokens * 0.10 / 1_000_000) + (output_tokens * 0.50 / 1_000_000)
+            if "xiaomi/mimo-v2-flash" in model_name:
+                # MiMo-V2-Flash: $0.09/M input, $0.29/M output (https://openrouter.ai/xiaomi/mimo-v2-flash)
+                estimated_cost = (input_tokens * 0.09 / 1_000_000) + (output_tokens * 0.29 / 1_000_000)
             elif "grok-code-fast" in model_name:
                 # Grok Code Fast 1: $0.20/M Input, $1.50/M Output
                 estimated_cost = (input_tokens * 0.20 / 1_000_000) + (output_tokens * 1.50 / 1_000_000)
@@ -1331,9 +1363,6 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                 estimated_cost = (input_tokens * 0.0375 / 1_000_000) + (output_tokens * 0.15 / 1_000_000)
             elif model_name == "google/gemini-flash-1.5":
                 estimated_cost = (input_tokens * 0.075 / 1_000_000) + (output_tokens * 0.30 / 1_000_000)
-            elif "deepseek" in model_name:
-                # Pricing based on OpenRouter screenshot for DeepSeek V3
-                estimated_cost = (input_tokens * 0.30 / 1_000_000) + (output_tokens * 1.20 / 1_000_000)
             elif model_name == "anthropic/claude-3-haiku":
                 estimated_cost = (input_tokens * 0.25 / 1_000_000) + (output_tokens * 1.25 / 1_000_000)
             else:  # Claude 3.5 Sonnet or default
@@ -1419,9 +1448,21 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                             "nameerror", "indentationerror", "importerror", "modulenotfounderror",
                             "function", "method", "class", "undefined", "null pointer", "none"
                         ]
-                        if any(pattern in log_msg for pattern in code_patterns):
-                            logs_suggest_code = True
-                            break
+                        # Check if log contains code-related patterns
+                        has_code_pattern = any(pattern in log_msg for pattern in code_patterns)
+                        
+                        # If it's a stack trace, verify it's NOT from node_modules
+                        if has_code_pattern:
+                            is_stack_trace = any(pattern in log_msg for pattern in ["traceback", "stack trace", "at ", "file \""])
+                            if is_stack_trace:
+                                # Only count stack traces from application code
+                                if not is_stacktrace_from_node_modules(log.message):
+                                    logs_suggest_code = True
+                                    break
+                            else:
+                                # Not a stack trace, or pattern match is for other code-related errors
+                                logs_suggest_code = True
+                                break
             
             # Decision: Generate code if ANY signal suggests code changes
             # But exclude if action_taken is clearly operational (unless root_cause strongly suggests code)

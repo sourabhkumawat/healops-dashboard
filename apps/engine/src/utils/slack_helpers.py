@@ -3,6 +3,7 @@ Slack helper utilities for bot token management, conversation context, and agent
 """
 import os
 from typing import Optional, Dict, Any, List
+from src.core.openrouter_client import openrouter_chat_completion, get_api_key
 
 # Conversation context storage (in-memory, can be moved to Redis for production)
 _conversation_contexts: Dict[str, List[Dict[str, str]]] = {}
@@ -160,8 +161,7 @@ def generate_agent_response_llm(agent: Any, query: str, thread_id: str = None, c
     Returns:
         Response text
     """
-    api_key = os.getenv("OPENCOUNCIL_API")
-    if not api_key:
+    if not get_api_key():
         # Fallback to simple responses if LLM not configured
         return generate_agent_response_simple(agent, query)
     
@@ -194,42 +194,23 @@ Keep responses conversational and friendly. If asked about specific incidents or
     messages.append({"role": "user", "content": query})
     
     try:
-        import requests
         from src.core.ai_analysis import MODEL_CONFIG
         
-        # Use chat model from config (Xiaomi MiMo-V2-Flash)
         chat_config = MODEL_CONFIG.get("chat", MODEL_CONFIG["simple_analysis"])
-        
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": os.getenv("APP_URL", "https://healops.ai"),
-                "X-Title": "HealOps Agent Chat",
-            },
-            json={
-                "model": chat_config["model"],
-                "messages": messages,
-                "temperature": chat_config["temperature"],
-                "max_tokens": chat_config["max_tokens"],
-            },
-            timeout=int(os.getenv("HTTP_LLM_API_TIMEOUT", "60"))  # 60 seconds for LLM API calls
+        r = openrouter_chat_completion(
+            chat_config["model"],
+            messages,
+            temperature=chat_config["temperature"],
+            max_tokens=chat_config["max_tokens"],
+            timeout=int(os.getenv("HTTP_LLM_API_TIMEOUT", "60")),
+            title="HealOps Agent Chat",
         )
         
-        if response.status_code == 200:
-            result = response.json()
-            assistant_message = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-            
-            if assistant_message:
-                # NOTE: Do NOT add to conversation context here - we'll add it AFTER posting
-                # to prevent the bot from responding to its own messages
-                # The conversation context will be added after the message is successfully posted
-                return assistant_message
-            else:
-                return generate_agent_response_simple(agent, query)
+        if r["success"] and r["content"]:
+            return r["content"]
         else:
-            print(f"⚠️  LLM API error: {response.status_code} - {response.text[:200]}")
+            if not r["success"]:
+                print(f"⚠️  LLM API error: {r['status_code']} - {r.get('error_message', '')[:200]}")
             return generate_agent_response_simple(agent, query)
             
     except Exception as e:

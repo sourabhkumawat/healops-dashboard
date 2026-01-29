@@ -41,7 +41,8 @@ from src.tools.qa_review import (
 )
 
 # LLM Configuration
-api_key = os.getenv("OPENCOUNCIL_API")
+from src.core.openrouter_client import get_api_key
+api_key = get_api_key()
 base_url = "https://openrouter.ai/api/v1"
 
 # Cost-optimized LLMs
@@ -53,12 +54,12 @@ try:
         coding_llm = None
     else:
         flash_llm = LLM(
-            model="openai/deepseek/deepseek-r1-0528:free",
+            model="openrouter/xiaomi/mimo-v2-flash",  # LiteLLM format: openrouter/<openrouter-model-id>
             base_url=base_url,
             api_key=api_key
         )
         coding_llm = LLM(
-            model="openai/x-ai/grok-code-fast-1",
+            model="openrouter/x-ai/grok-code-fast-1",  # LiteLLM format
             base_url=base_url,
             api_key=api_key
         )

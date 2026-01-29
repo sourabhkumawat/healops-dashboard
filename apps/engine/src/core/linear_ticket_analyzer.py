@@ -12,12 +12,13 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Tuple
 from src.database.models import Integration, LinearResolutionAttempt
 from src.integrations.linear.integration import LinearIntegration
+from src.core.openrouter_client import openrouter_chat_completion, get_api_key
 from sqlalchemy.orm import Session
 
 # Cost-optimized model configuration for ticket analysis
 TICKET_ANALYSIS_MODEL_CONFIG = {
     "feasibility_check": {
-        "model": "deepseek/deepseek-r1-0528:free",  # Paid model for initial screening (free tier ended)
+        "model": "xiaomi/mimo-v2-flash",  # Paid model for initial screening (free tier ended)
         "max_tokens": 300,
         "temperature": 0.2
     },
@@ -49,8 +50,7 @@ class LinearTicketAnalyzer:
 
     def __init__(self, integration: LinearIntegration):
         self.integration = integration
-        self.api_key = os.getenv("OPENCOUNCIL_API")
-        if not self.api_key:
+        if not get_api_key():
             print("⚠️  OPENCOUNCIL_API not set, ticket analysis will be limited")
 
     def analyze_ticket_resolvability(
@@ -315,44 +315,19 @@ Provide your analysis in this JSON format:
 
     def _make_ai_request(self, prompt: str, model_config: Dict[str, Any]) -> str:
         """Make request to AI API using OpenRouter."""
-        import requests
-
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://healops.ai",
-            "X-Title": "Healops Linear Ticket Analysis"
-        }
-
-        payload = {
-            "model": model_config["model"],
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "max_tokens": model_config["max_tokens"],
-            "temperature": model_config["temperature"]
-        }
-
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=30
+        r = openrouter_chat_completion(
+            model_config["model"],
+            [{"role": "user", "content": prompt}],
+            temperature=model_config["temperature"],
+            max_tokens=model_config["max_tokens"],
+            timeout=30,
+            title="HealOps Linear Ticket Analysis",
         )
-        response.raise_for_status()
-
-        result = response.json()
-        if "error" in result:
-            raise Exception(f"AI API error: {result['error']}")
-
-        choices = result.get("choices", [])
-        if not choices:
+        if not r["success"]:
+            raise Exception(r.get("error_message") or "No response from AI API")
+        if not r["content"]:
             raise Exception("No response from AI API")
-
-        return choices[0]["message"]["content"]
+        return r["content"]
 
     def _parse_feasibility_response(self, response: str) -> Dict[str, Any]:
         """Parse the initial feasibility check response."""

@@ -21,6 +21,7 @@ class GithubIntegration:
     def __init__(self, access_token: Optional[str] = None, integration_id: Optional[int] = None):
         self.access_token = access_token
         self.installation_id = None
+        self._integration_id = integration_id  # Store for reload after 401 (e.g. post-reconnect)
         self._cached_token = None
         self._token_expires_at = None
         
@@ -106,6 +107,24 @@ class GithubIntegration:
             traceback.print_exc()
         
         return None
+    
+    def _clear_token_and_reload(self) -> bool:
+        """Clear cached token and reload integration from DB (e.g. after reconnect). Returns True if client was re-initialized."""
+        self._cached_token = None
+        self._token_expires_at = None
+        self.client = None
+        if not self._integration_id:
+            return False
+        db = SessionLocal()
+        try:
+            integration = db.query(Integration).filter(Integration.id == self._integration_id).first()
+            if integration and integration.installation_id:
+                self.installation_id = integration.installation_id
+                self._ensure_client()
+                return self.client is not None
+        finally:
+            db.close()
+        return False
     
     def verify_connection(self) -> Dict[str, Any]:
         """Verify GitHub token validity."""
@@ -224,34 +243,43 @@ class GithubIntegration:
         if file_path.startswith("node:internal/") or file_path.startswith("node:"):
             return None
         
-        try:
-            repo = self.client.get_repo(repo_name)
-            contents = repo.get_contents(file_path, ref=ref)
-            if contents.encoding == "base64":
-                import base64
-                return base64.b64decode(contents.content).decode("utf-8")
-            return contents.decoded_content.decode("utf-8")
-        except Exception as e:
-            # Handle 404 errors gracefully (file doesn't exist)
-            error_str = str(e).lower()
-            is_404 = "404" in error_str or "not found" in error_str
-            
-            # Only log non-404 errors or 404s for files that should exist
-            # Skip logging for Node.js internals and other expected missing files
-            if not is_404 or (is_404 and not file_path.startswith("node:")):
-                # Check if this is a GitHub API 404 error
-                if hasattr(e, 'status') and e.status == 404:
-                    # File doesn't exist - this is expected for some files
-                    # Only log at debug level
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.debug(f"File not found in repository: {file_path} (expected for some files)")
-                else:
-                    # Other errors should be logged
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.warning(f"Error fetching file {file_path}: {e}")
-            return None
+        # Normalize path: strip leading slash so GitHub API gets repo-relative path
+        file_path = file_path.lstrip("/")
+        
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        for attempt in range(2):
+            try:
+                repo = self.client.get_repo(repo_name)
+                contents = repo.get_contents(file_path, ref=ref)
+                if contents.encoding == "base64":
+                    import base64
+                    return base64.b64decode(contents.content).decode("utf-8")
+                return contents.decoded_content.decode("utf-8")
+            except GithubException as e:
+                # On 401 Bad credentials (e.g. after reconnect or token revoked), reload from DB and retry once
+                if getattr(e, "status", None) == 401 and attempt == 0:
+                    if self._clear_token_and_reload():
+                        continue
+                error_str = str(e).lower()
+                is_404 = "404" in error_str or "not found" in error_str
+                if not is_404 or (is_404 and not file_path.startswith("node:")):
+                    if getattr(e, "status", None) == 404:
+                        logger.debug(f"File not found in repository: {file_path} (expected for some files)")
+                    else:
+                        logger.warning(f"Error fetching file {file_path}: {e}")
+                return None
+            except Exception as e:
+                error_str = str(e).lower()
+                is_404 = "404" in error_str or "not found" in error_str
+                if not is_404 or (is_404 and not file_path.startswith("node:")):
+                    if hasattr(e, "status") and e.status == 404:
+                        logger.debug(f"File not found in repository: {file_path} (expected for some files)")
+                    else:
+                        logger.warning(f"Error fetching file {file_path}: {e}")
+                return None
+        return None
     
     def search_code(self, repo_name: str, query: str, language: Optional[str] = None) -> list[Dict[str, Any]]:
         """
@@ -336,45 +364,51 @@ class GithubIntegration:
             '.gradle', '.idea', '.vscode', 'coverage', '.pytest_cache'
         }
         
-        try:
-            repo = self.client.get_repo(repo_name)
-            files = []
-            
-            # For root path and max_depth >= 2, use tree API for better performance
-            if path == "" and max_depth >= 2:
-                try:
-                    files = self._get_repo_structure_via_tree(repo, ref, max_depth, skip_dirs)
-                except Exception as tree_error:
-                    print(f"   Tree API failed, falling back to recursive method: {tree_error}")
-                    # Fall through to recursive method
+        for attempt in range(2):
+            try:
+                repo = self.client.get_repo(repo_name)
+                files = []
+                
+                # For root path and max_depth >= 2, use tree API for better performance
+                if path == "" and max_depth >= 2:
+                    try:
+                        files = self._get_repo_structure_via_tree(repo, ref, max_depth, skip_dirs)
+                    except Exception as tree_error:
+                        print(f"   Tree API failed, falling back to recursive method: {tree_error}")
+                        # Fall through to recursive method
+                        files = self._get_repo_structure_recursive(repo, repo_name, path, ref, max_depth, skip_dirs)
+                else:
+                    # Recursive method (original implementation) as fallback
                     files = self._get_repo_structure_recursive(repo, repo_name, path, ref, max_depth, skip_dirs)
-            else:
-                # Recursive method (original implementation) as fallback
-                files = self._get_repo_structure_recursive(repo, repo_name, path, ref, max_depth, skip_dirs)
-            
-            # Cache the result (only for root path)
-            if path == "":
-                cache_key = self._get_cache_key(repo_name, ref, max_depth)
-                _repo_structure_cache[cache_key] = (files.copy(), datetime.utcnow())
-                # Limit cache size to prevent memory issues (keep last 50 entries)
-                if len(_repo_structure_cache) > 50:
-                    # Remove oldest entry
-                    oldest_key = min(_repo_structure_cache.keys(), 
-                                   key=lambda k: _repo_structure_cache[k][1])
-                    del _repo_structure_cache[oldest_key]
-            
-            return files
-            
-        except GithubException as e:
-            print(f"Error getting repo structure: {e} (status: {e.status})")
-            if e.status == 404:
-                print(f"   Path '{path}' not found in repository '{repo_name}' on branch '{ref}'")
-            return []
-        except Exception as e:
-            print(f"Error getting repo structure: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
+                
+                # Cache the result (only for root path)
+                if path == "":
+                    cache_key = self._get_cache_key(repo_name, ref, max_depth)
+                    _repo_structure_cache[cache_key] = (files.copy(), datetime.utcnow())
+                    # Limit cache size to prevent memory issues (keep last 50 entries)
+                    if len(_repo_structure_cache) > 50:
+                        # Remove oldest entry
+                        oldest_key = min(_repo_structure_cache.keys(), 
+                                       key=lambda k: _repo_structure_cache[k][1])
+                        del _repo_structure_cache[oldest_key]
+                
+                return files
+                
+            except GithubException as e:
+                # On 401 Bad credentials (e.g. after reconnect), reload from DB and retry once
+                if getattr(e, "status", None) == 401 and attempt == 0:
+                    if self._clear_token_and_reload():
+                        continue
+                print(f"Error getting repo structure: {e} (status: {e.status})")
+                if e.status == 404:
+                    print(f"   Path '{path}' not found in repository '{repo_name}' on branch '{ref}'")
+                return []
+            except Exception as e:
+                print(f"Error getting repo structure: {e}")
+                import traceback
+                traceback.print_exc()
+                return []
+        return []
     
     def _get_cache_key(self, repo_name: str, ref: str, max_depth: int) -> str:
         """Generate a cache key for repository structure."""

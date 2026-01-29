@@ -8,7 +8,9 @@ error handling, and replanning.
 from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime
 import os
+import time
 from src.core.event_stream import EventStream, EventType
+from src.utils.observability import log_phase, log_phase_start
 from src.core.task_planner import TaskPlanner, StepStatus
 from src.agents.workspace import Workspace
 from src.agents.context_manager import ContextManager
@@ -107,16 +109,26 @@ class AgentLoop:
             
             # Mark step as in progress
             self.planner.mark_step_in_progress(current_step["step_number"])
+            step_num = current_step["step_number"]
+            step_desc = (current_step.get("description") or "")[:80]
+            log_phase(
+                "step_start",
+                incident_id=self.incident_id,
+                iteration=self.current_iteration,
+                step_number=step_num,
+                description_preview=step_desc,
+            )
             self.event_stream.add_event(
                 EventType.PLAN_STEP_STARTED,
                 {
-                    "step_number": current_step["step_number"],
+                    "step_number": step_num,
                     "description": current_step["description"],
                     "iteration": self.current_iteration
                 }
             )
             
             # Build context for agent
+            _step_t0 = time.time()
             agent_context = self._build_context(current_step)
             
             # Execute agent action (one at a time)
@@ -135,6 +147,14 @@ class AgentLoop:
             
             # Observe result
             observation = self._observe_result(action_result, current_step)
+            log_phase(
+                "step_end",
+                incident_id=self.incident_id,
+                duration_sec=time.time() - _step_t0,
+                iteration=self.current_iteration,
+                step_number=current_step["step_number"],
+                success=observation["success"],
+            )
             
             # Update planner based on observation
             if observation["success"]:
@@ -564,6 +584,13 @@ class AgentLoop:
             reason: Reason for replanning
             agent_executor: Agent executor function (for LLM access)
         """
+        log_phase(
+            "replan_triggered",
+            incident_id=self.incident_id,
+            reason=reason,
+            iteration=self.current_iteration,
+            replan_count=self.planner.replan_count + 1,
+        )
         try:
             self.event_stream.add_event(
                 EventType.PLAN_UPDATED,

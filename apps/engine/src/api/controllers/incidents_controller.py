@@ -8,13 +8,14 @@ from datetime import datetime
 import time
 import asyncio
 
-from src.database.models import Incident, LogEntry, User, IncidentStatus, IncidentSeverity
+from src.database.models import Incident, LogEntry, User, IncidentStatus, IncidentSeverity, Integration
 from src.database.database import SessionLocal
 from src.core.ai_analysis import analyze_incident_with_openrouter
 from src.middleware import check_rate_limit
 from src.services.email.service import send_incident_resolved_email
 from src.agents.orchestrator import run_robust_crew
 from src.integrations import GithubIntegration
+from src.integrations.github import get_installation_repositories
 from src.api.controllers.base import get_user_id_from_request
 
 
@@ -516,13 +517,25 @@ class IncidentsController:
                 if log_id_list:
                     logs = db.query(LogEntry).filter(LogEntry.id.in_(log_id_list)).order_by(LogEntry.timestamp.desc()).all()
             
-            # Get GitHub integration
+            # Get GitHub integration (use incident's integration_id or fallback to user's first ACTIVE GitHub integration)
             github_integration = None
-            if incident.integration_id:
+            integration = None
+            effective_integration_id = incident.integration_id
+            if not effective_integration_id and incident.user_id:
+                fallback = db.query(Integration).filter(
+                    Integration.user_id == incident.user_id,
+                    Integration.provider == "GITHUB",
+                    Integration.status == "ACTIVE"
+                ).first()
+                if fallback:
+                    effective_integration_id = fallback.id
+                    print(f"   📌 No integration on incident; using user's GitHub integration (ID: {effective_integration_id})")
+            if effective_integration_id:
+                integration = db.query(Integration).filter(Integration.id == effective_integration_id).first()
                 try:
-                    print(f"🔧 Loading GitHub integration (ID: {incident.integration_id})...")
-                    github_integration = GithubIntegration(integration_id=incident.integration_id)
-                    print(f"✅ GitHub integration loaded (ID: {incident.integration_id})")
+                    print(f"🔧 Loading GitHub integration (ID: {effective_integration_id})...")
+                    github_integration = GithubIntegration(integration_id=effective_integration_id)
+                    print(f"✅ GitHub integration loaded (ID: {effective_integration_id})")
                     
                     # Verify connection
                     if github_integration.client:
@@ -531,6 +544,8 @@ class IncidentsController:
                             print(f"✅ GitHub connection verified: {verification.get('username', 'N/A')}")
                         else:
                             print(f"⚠️  GitHub connection verification failed: {verification.get('message', 'Unknown error')}")
+                            if integration and not integration.installation_id:
+                                print(f"⚠️  This integration uses a legacy OAuth token (no GitHub App linked). Go to Settings → Integrations → click Reconnect on GitHub to link the App and fix 401 errors.")
                     else:
                         print(f"⚠️  GitHub client not initialized after loading integration")
                 except Exception as e:
@@ -538,9 +553,30 @@ class IncidentsController:
                     import traceback
                     traceback.print_exc()
             
-            repo_name = incident.repo_name or "owner/repo"
+            # Resolve repo_name: incident first, then integration default/service mapping, then first repo from installation
+            repo_name = incident.repo_name
+            if not repo_name and integration:
+                if integration.config and isinstance(integration.config, dict):
+                    config = integration.config
+                    service_mappings = config.get("service_mappings") or {}
+                    repo_name = service_mappings.get(incident.service_name) or config.get("repo_name") or config.get("repository")
+                # Fallback: use first repo from GitHub App installation if no default/service mapping set
+                if not repo_name and integration.installation_id:
+                    try:
+                        repos = get_installation_repositories(integration.installation_id)
+                        if repos:
+                            repo_name = repos[0].get("full_name")
+                            if repo_name:
+                                print(f"   📌 Using first repo from installation: {repo_name}")
+                    except Exception as e:
+                        print(f"   ⚠️  Could not list installation repos: {e}")
+            repo_name = repo_name or "owner/repo"
             root_cause = incident.root_cause or "Test root cause - agent testing"
             
+            if repo_name == "owner/repo":
+                print(f"⚠️  Repository not set: set incident.repo_name or integration default repo / service mapping for '{incident.service_name}'")
+                if integration and not integration.installation_id:
+                    print(f"⚠️  Cannot list repos: this integration has no GitHub App installation. Reconnect GitHub from Settings → Integrations to link the App.")
             if not incident.root_cause:
                 print(f"⚠️  Root cause not set, using placeholder: {root_cause}")
             
@@ -578,6 +614,7 @@ class IncidentsController:
                     "repo_name": repo_name,
                     "has_integration": github_integration is not None
                 },
+                "github_reconnect_required": bool(integration and not integration.installation_id),
                 "agent_execution": {
                     "iterations": result.get("iterations", 0),
                     "plan_progress": result.get("plan_progress", {}),

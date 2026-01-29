@@ -217,8 +217,8 @@ class LinearPollingService:
                 logger.info(f"✅ Found {active_integrations} active Linear integrations")
 
             # Check OpenRouter API key
-            api_key = os.getenv("OPENCOUNCIL_API")
-            if not api_key:
+            from src.core.openrouter_client import get_api_key
+            if not get_api_key():
                 logger.warning("⚠️  OPENCOUNCIL_API not configured - AI analysis will be limited")
             else:
                 logger.info("✅ OpenRouter API key configured")

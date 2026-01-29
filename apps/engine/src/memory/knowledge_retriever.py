@@ -4,6 +4,9 @@ Uses CocoIndex with Tree-sitter AST-aware chunking and PostgreSQL storage.
 """
 from typing import List, Dict, Any, Optional
 import os
+import time
+
+from src.utils.observability import log_phase, log_phase_start
 
 # Lazy import CocoIndex dependencies to avoid import errors when module not installed
 try:
@@ -139,6 +142,7 @@ class KnowledgeRetriever:
         
         try:
             import numpy as np
+            _t0 = time.time()
             # Use sentence-transformers directly for embedding generation (same model as CocoIndex)
             # This ensures consistency with CocoIndex embeddings
             # Use sentence-transformers directly for embedding generation
@@ -146,11 +150,13 @@ class KnowledgeRetriever:
                 from sentence_transformers import SentenceTransformer
                 # Use same model as CocoIndex flow
                 model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+                log_phase("embed_model_loaded", duration_sec=time.time() - _t0, op="index_past_fixes", cached=False)
             except ImportError:
                 print("Warning: sentence-transformers not available, skipping fix indexing")
                 return
             
             # Get embedding for each fix
+            _index_start = time.time()
             for fix in fixes[:100]:  # Limit to 100 fixes
                 fix_text = f"""
 Fix Description: {fix.get('description', '')}
@@ -207,7 +213,19 @@ Error Signature: {fix.get('error_signature', '')}
                     raw_conn.close()
             
             self.indexed = True
+            log_phase(
+                "index_past_fixes_done",
+                duration_sec=time.time() - _t0,
+                fixes_indexed=min(len(fixes), 100),
+                integration_id=self.integration_id,
+            )
         except Exception as e:
+            log_phase(
+                "index_past_fixes_failed",
+                duration_sec=time.time() - _t0,
+                error=str(e)[:200],
+                integration_id=self.integration_id,
+            )
             print(f"⚠️  Warning: Failed to index past fixes: {e}")
             print(f"   Table: {self._get_table_name()}")
             print(f"   Integration ID: {self.integration_id}")
@@ -269,11 +287,13 @@ Error Signature: {fix.get('error_signature', '')}
         
         try:
             import numpy as np
+            _t0 = time.time()
             # Use sentence-transformers directly for query embedding (same model as CocoIndex)
             try:
                 from sentence_transformers import SentenceTransformer
                 # Use same model as CocoIndex flow
                 model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+                log_phase("embed_model_loaded", duration_sec=time.time() - _t0, op="retrieve_knowledge", cached=False)
             except ImportError:
                 print("Warning: sentence-transformers not available, cannot retrieve knowledge")
                 return []
@@ -346,11 +366,26 @@ Error Signature: {fix.get('error_signature', '')}
                         
                         # Sort by relevance and return top k
                         results.sort(key=lambda x: x["relevance_score"], reverse=True)
-                        return results[:k]
+                        out = results[:k]
+                        log_phase(
+                            "retrieve_knowledge_done",
+                            duration_sec=time.time() - _t0,
+                            k=k,
+                            result_count=len(out),
+                            integration_id=self.integration_id,
+                        )
+                        return out
             finally:
                 raw_conn.close()
                     
         except Exception as e:
+            log_phase(
+                "retrieve_knowledge_failed",
+                duration_sec=time.time() - _t0,
+                k=k,
+                error=str(e)[:200],
+                integration_id=self.integration_id,
+            )
             print(f"⚠️  Warning: Vector search failed: {e}")
             print(f"   Table: {self._get_table_name()}")
             print(f"   Integration ID: {self.integration_id}")
