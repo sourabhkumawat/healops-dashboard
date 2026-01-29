@@ -17,6 +17,7 @@ from src.agents.orchestrator import run_robust_crew
 from src.integrations import GithubIntegration
 from src.integrations.github import get_installation_repositories
 from src.api.controllers.base import get_user_id_from_request
+from src.services.incident_resolution_requests import ensure_incident_resolution_requested
 
 
 class IncidentsController:
@@ -144,9 +145,22 @@ class IncidentsController:
         if incident.log_ids:
             logs = await asyncio.to_thread(_fetch_logs_sync, db, incident.log_ids, user_id)
 
-        # Trigger AI analysis in background if root_cause is not set (non-blocking)
-        if not incident.root_cause:
-            background_tasks.add_task(IncidentsController.analyze_incident_async, incident_id)
+        # Ensure incident resolution is requested (idempotent; non-blocking to API thread).
+        # IMPORTANT: do not use the request-scoped SQLAlchemy Session across threads.
+        if incident.status != IncidentStatus.RESOLVED.value:
+            def _ensure_requested_sync():
+                local_db = SessionLocal()
+                try:
+                    ensure_incident_resolution_requested(
+                        db=local_db,
+                        incident_id=incident_id,
+                        requested_by_user_id=user_id,
+                        requested_by_trigger="incident_view",
+                    )
+                finally:
+                    local_db.close()
+
+            await asyncio.to_thread(_ensure_requested_sync)
 
         return {
             "incident": incident,

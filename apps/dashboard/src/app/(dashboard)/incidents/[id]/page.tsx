@@ -44,6 +44,13 @@ interface ActionResult {
     changes?: Record<string, string>; // Filename -> New Content
     original_contents?: Record<string, string>; // Filename -> Original Content
     code_fix_explanation?: string;
+    resolution?: {
+        status?: 'queued' | 'running' | 'completed' | 'failed';
+        requested_at?: string;
+        started_at?: string;
+        completed_at?: string;
+        last_error?: string | null;
+    };
 }
 
 interface IncidentWithAction extends Incident {
@@ -60,6 +67,7 @@ export default function IncidentDetailsPage() {
     const [loading, setLoading] = useState(true);
     const [resolving, setResolving] = useState(false);
     const [analyzing, setAnalyzing] = useState(false);
+    const [agentResolving, setAgentResolving] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
     const pollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -105,6 +113,11 @@ export default function IncidentDetailsPage() {
                     // Check if analysis is available
                     const rootCause = result.incident?.root_cause;
                     const hasRootCause = !!rootCause;
+                    const resolutionStatus =
+                        result.incident?.action_result?.resolution?.status;
+                    const isResolutionInProgress =
+                        resolutionStatus === 'queued' ||
+                        resolutionStatus === 'running';
                     const hasAnalysisError =
                         hasRootCause &&
                         rootCause &&
@@ -112,7 +125,9 @@ export default function IncidentDetailsPage() {
                             rootCause.includes('Analysis error') ||
                             rootCause.includes('not configured'));
 
-                    if (hasRootCause) {
+                    setAgentResolving(isResolutionInProgress);
+
+                    if (hasRootCause && !isResolutionInProgress) {
                         // Analysis complete - stop polling
                         if (pollTimeoutRef.current) {
                             clearTimeout(pollTimeoutRef.current);
@@ -215,6 +230,11 @@ export default function IncidentDetailsPage() {
 
                         const rootCause = result.incident?.root_cause;
                         const hasRootCause = !!rootCause;
+                        const resolutionStatus =
+                            result.incident?.action_result?.resolution?.status;
+                        const isResolutionInProgress =
+                            resolutionStatus === 'queued' ||
+                            resolutionStatus === 'running';
                         const hasAnalysisError =
                             hasRootCause &&
                             rootCause &&
@@ -222,7 +242,9 @@ export default function IncidentDetailsPage() {
                                 rootCause.includes('Analysis error') ||
                                 rootCause.includes('not configured'));
 
-                        if (hasRootCause) {
+                        setAgentResolving(isResolutionInProgress);
+
+                        if (hasRootCause && !isResolutionInProgress) {
                             // Analysis complete!
                             // Log only in development
                             if (
@@ -399,6 +421,15 @@ export default function IncidentDetailsPage() {
                                     >
                                         {incident.service_name}
                                     </Badge>
+                                    {agentResolving && (
+                                        <Badge
+                                            variant="outline"
+                                            className="text-xs bg-blue-500/10 text-blue-600 border-blue-500/20"
+                                        >
+                                            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                            Agent resolving
+                                        </Badge>
+                                    )}
                                     <span className="text-xs text-muted-foreground">
                                         {new Date(
                                             incident.created_at

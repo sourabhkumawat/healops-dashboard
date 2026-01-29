@@ -16,6 +16,13 @@ from contextlib import contextmanager
 
 from src.services.redpanda_service import redpanda_service
 from src.services.linear_ticket_resolver import process_ticket_task_from_redpanda
+from src.services.incident_resolution_requests import (
+    ensure_incident_resolution_requested,
+    try_claim_incident_resolution,
+    mark_incident_resolution_completed,
+    mark_incident_resolution_failed,
+    run_incident_resolution_job,
+)
 from src.database.database import SessionLocal
 from src.database.models import LogEntry, Incident, IncidentSeverity, IntegrationStatus, IntegrationStatusEnum, Integration
 from src.core.ai_analysis import generate_incident_title_and_description, build_enhanced_linear_description
@@ -23,6 +30,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import joinedload, selectinload
 from datetime import datetime, timedelta
 import threading
+from concurrent.futures import ThreadPoolExecutor, Future, TimeoutError as FuturesTimeoutError
 
 # Global event loop reference for async operations
 _main_event_loop = None
@@ -113,6 +121,12 @@ class PerformanceMetrics:
 # Global performance metrics instance
 performance_metrics = PerformanceMetrics()
 
+# Global executor for incident resolution jobs (keep bounded)
+_incident_resolution_executor = ThreadPoolExecutor(
+    max_workers=3,
+    thread_name_prefix="incident-resolver",
+)
+
 @contextmanager
 def performance_timer(metric_name: str = "operation"):
     """Context manager for timing operations."""
@@ -127,26 +141,92 @@ def performance_timer(metric_name: str = "operation"):
 
 def trigger_incident_analysis_async(incident_id: int, user_id: int):
     """
-    Helper function to trigger incident analysis in a thread-safe way.
-    This avoids circular import issues and handles event loop properly.
-    """
-    def run_analysis():
-        try:
-            # Import here to avoid circular dependencies
-            from main import analyze_incident_async
-            # Create new event loop for this thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(analyze_incident_async(incident_id, user_id))
-            finally:
-                loop.close()
-        except Exception as e:
-            print(f"⚠️  Error in background analysis thread for incident {incident_id}: {e}")
+    Legacy helper (deprecated).
 
-    # Run in a separate thread to avoid blocking
-    thread = threading.Thread(target=run_analysis, daemon=True)
-    thread.start()
+    Do not use for incident resolution. All resolution work should be scheduled
+    via Redpanda tasks (e.g., `resolve_incident`).
+    """
+    print(
+        "⚠️  trigger_incident_analysis_async is deprecated; "
+        "use ensure_incident_resolution_requested(...) instead."
+    )
+
+
+def route_incident_task(task_data: Dict[str, Any]):
+    """
+    Route incident-topic tasks by task_type.
+
+    - process_log_entry: existing log->incident processing
+    - resolve_incident: heavy incident resolution (agent)
+    """
+    task_type = task_data.get("task_type")
+    if task_type == "process_log_entry":
+        return process_log_entry_from_redpanda(task_data)
+    if task_type == "resolve_incident":
+        return handle_resolve_incident_task(task_data)
+    print(f"⚠️  Unknown incident task type: {task_type}")
+    return None
+
+
+def handle_resolve_incident_task(task_data: Dict[str, Any]):
+    """Handle resolve_incident tasks from Redpanda without blocking the consumer thread."""
+    incident_id = task_data.get("incident_id")
+    requested_by_user_id = task_data.get("requested_by_user_id")
+    if not incident_id or not requested_by_user_id:
+        print(
+            f"⚠️  Invalid resolve_incident task payload: incident_id={incident_id}, requested_by_user_id={requested_by_user_id}"
+        )
+        return
+
+    print(f"🔄 [Redpanda Consumer] Received resolve_incident for incident {incident_id}")
+
+    def _run_with_claim_and_timeout():
+        db = SessionLocal()
+        try:
+            # Idempotent claim: only one worker should proceed
+            claimed = try_claim_incident_resolution(db=db, incident_id=int(incident_id))
+            if not claimed:
+                return {"success": True, "skipped": True, "reason": "not_queued_or_already_claimed"}
+
+            result = run_incident_resolution_job(
+                incident_id=int(incident_id),
+                requested_by_user_id=int(requested_by_user_id),
+            )
+            if result.get("success"):
+                mark_incident_resolution_completed(db=db, incident_id=int(incident_id))
+            else:
+                mark_incident_resolution_failed(
+                    db=db,
+                    incident_id=int(incident_id),
+                    error=str(result.get("error") or "resolution_failed"),
+                )
+            return result
+        except Exception as e:
+            try:
+                mark_incident_resolution_failed(
+                    db=db, incident_id=int(incident_id), error=f"exception: {str(e)[:500]}"
+                )
+            except Exception:
+                pass
+            return {"success": False, "error": str(e)}
+        finally:
+            db.close()
+
+    try:
+        future: Future = _incident_resolution_executor.submit(_run_with_claim_and_timeout)
+
+        def _on_done(fut: Future):
+            try:
+                _ = fut.result(timeout=0.1)
+            except FuturesTimeoutError:
+                pass
+            except Exception as e:
+                print(f"⚠️  resolve_incident job finished with error: {e}")
+
+        future.add_done_callback(_on_done)
+        print(f"✓ Submitted incident {incident_id} resolution job to threadpool")
+    except Exception as e:
+        print(f"✗ Failed to submit incident resolution job: {e}")
 
 
 def get_available_integration_for_user(db, user_id: int, service_name: str = None):
@@ -723,8 +803,13 @@ def process_log_entry_from_redpanda(task_data: Dict[str, Any]):
                     print(f"⚠️  Error checking for Linear integration: {e}")
 
                 # Automatically trigger analysis for new incidents
-                print(f"🤖 Auto-triggering analysis for new incident {incident.id}")
-                trigger_incident_analysis_async(incident.id, incident.user_id)
+                print(f"🤖 Ensuring resolution is queued for new incident {incident.id}")
+                ensure_incident_resolution_requested(
+                    db=db,
+                    incident_id=incident.id,
+                    requested_by_user_id=incident.user_id,
+                    requested_by_trigger="incident_created_from_log",
+                )
 
                 return f"Incident created: {incident.id}"
 
@@ -760,7 +845,7 @@ def setup_redpanda_task_processor():
     print("Setting up Redpanda task processor...")
 
     # Setup incident consumer
-    redpanda_service.setup_incident_consumer(process_log_entry_from_redpanda)
+    redpanda_service.setup_incident_consumer(route_incident_task)
     
     # Setup ticket consumer
     redpanda_service.setup_ticket_consumer(process_ticket_task_from_redpanda)
