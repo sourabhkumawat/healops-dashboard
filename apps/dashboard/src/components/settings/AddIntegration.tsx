@@ -261,14 +261,20 @@ export function AddIntegration({ onCancel, onSuccess }: AddIntegrationProps) {
                                             return;
                                         }
                                         setLoading(true);
-                                        const result = await connectSignoz(signozUrl, signozApiKey);
-                                        setLoading(false);
-                                        if (result.error) {
-                                            alert(result.error);
-                                        } else {
-                                            setSignozUrl('');
-                                            setSignozApiKey('');
-                                            onSuccess();
+                                        try {
+                                            const result = await connectSignoz(signozUrl, signozApiKey);
+                                            if (result.error) {
+                                                alert(result.error);
+                                            } else {
+                                                setSignozUrl('');
+                                                setSignozApiKey('');
+                                                onSuccess();
+                                            }
+                                        } catch (err) {
+                                            const message = err instanceof Error ? err.message : String(err);
+                                            alert(`Failed to connect: ${message}`);
+                                        } finally {
+                                            setLoading(false);
                                         }
                                     }}
                                     disabled={loading}
