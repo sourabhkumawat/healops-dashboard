@@ -1,5 +1,6 @@
 ---
 description: Imports must be at the top of the file
+
 globs: **/*.py
 alwaysApply: false
 ---

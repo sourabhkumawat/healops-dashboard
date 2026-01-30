@@ -40,6 +40,7 @@ next-env.d.ts
 # Vercel
 .vercel
 
+
 # Testing
 /coverage
 
@@ -49,3 +50,4 @@ next-env.d.ts
 apps/engine/venv
 apps/engine/.deps_installed
 .vscode
+.cursor/
