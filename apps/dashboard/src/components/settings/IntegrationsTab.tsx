@@ -8,12 +8,23 @@ import {
     listIntegrations,
     initiateGitHubOAuth,
     initiateLinearOAuth,
+    connectSignoz,
     disconnectIntegration,
     getIntegrationConfig,
     reconnectGitHubIntegration,
     reconnectLinearIntegration
 } from '@/lib/integrations-client';
 import Image from 'next/image';
+import {
+    Dialog,
+    DialogContent,
+    DialogHeader,
+    DialogTitle,
+    DialogFooter,
+    DialogDescription
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 
 type Integration = {
     id: number;
@@ -70,6 +81,10 @@ export function IntegrationsTab() {
     const [reconnecting, setReconnecting] = useState<number | null>(null);
     const [integrationConfigs, setIntegrationConfigs] = useState<Record<number, IntegrationConfig>>({});
     const [loadingConfigs, setLoadingConfigs] = useState<Set<number>>(new Set());
+    const [showSignozDialog, setShowSignozDialog] = useState(false);
+    const [signozUrl, setSignozUrl] = useState('');
+    const [signozApiKey, setSignozApiKey] = useState('');
+    const [signozConnecting, setSignozConnecting] = useState(false);
     const fetchingIntegrationsRef = useRef(false);
 
     const fetchIntegrations = async () => {
@@ -141,8 +156,14 @@ export function IntegrationsTab() {
     };
 
     const handleConnect = async (providerId: string) => {
-        setConnecting(providerId);
+        if (providerId === 'signoz') {
+            setSignozUrl('');
+            setSignozApiKey('');
+            setShowSignozDialog(true);
+            return;
+        }
 
+        setConnecting(providerId);
         try {
             if (providerId === 'github') {
                 const result = await initiateGitHubOAuth();
@@ -166,7 +187,33 @@ export function IntegrationsTab() {
             }
         } catch (error) {
             console.error('Connection error:', error);
+            alert('Failed to connect. Please try again.');
+        } finally {
             setConnecting(null);
+        }
+    };
+
+    const handleSignozConnect = async () => {
+        if (!signozUrl.trim() || !signozApiKey.trim()) {
+            alert('Please enter SigNoz URL and API key.');
+            return;
+        }
+        setSignozConnecting(true);
+        try {
+            const result = await connectSignoz(signozUrl.trim(), signozApiKey.trim());
+            if (result.error) {
+                alert(result.error);
+            } else {
+                setShowSignozDialog(false);
+                setSignozUrl('');
+                setSignozApiKey('');
+                await fetchIntegrations();
+            }
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            alert(`Failed to connect: ${message}`);
+        } finally {
+            setSignozConnecting(false);
         }
     };
 
@@ -461,6 +508,56 @@ export function IntegrationsTab() {
                     })}
                 </div>
             )}
+
+            <Dialog open={showSignozDialog} onOpenChange={setShowSignozDialog}>
+                <DialogContent className="sm:max-w-md bg-zinc-900 border-zinc-700">
+                    <DialogHeader>
+                        <DialogTitle className="text-zinc-100">Connect SigNoz</DialogTitle>
+                        <DialogDescription className="text-zinc-400">
+                            Enter your SigNoz URL and API key. HealOps will fetch error logs and traces to create incidents.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="grid gap-4 py-4">
+                        <div className="space-y-2">
+                            <Label className="text-zinc-100">SigNoz URL</Label>
+                            <Input
+                                type="url"
+                                placeholder="https://app.signoz.io"
+                                value={signozUrl}
+                                onChange={(e) => setSignozUrl(e.target.value)}
+                                className="bg-zinc-800 border-zinc-700 text-zinc-100"
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <Label className="text-zinc-100">API Key</Label>
+                            <Input
+                                type="password"
+                                placeholder="Your SigNoz API key"
+                                value={signozApiKey}
+                                onChange={(e) => setSignozApiKey(e.target.value)}
+                                className="bg-zinc-800 border-zinc-700 text-zinc-100"
+                            />
+                        </div>
+                    </div>
+                    <DialogFooter>
+                        <Button
+                            variant="outline"
+                            className="border-zinc-700"
+                            onClick={() => setShowSignozDialog(false)}
+                            disabled={signozConnecting}
+                        >
+                            Cancel
+                        </Button>
+                        <Button
+                            className="bg-orange-600 hover:bg-orange-700 text-white"
+                            onClick={handleSignozConnect}
+                            disabled={signozConnecting}
+                        >
+                            {signozConnecting ? 'Connecting...' : 'Connect SigNoz'}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </div>
     );
 }
