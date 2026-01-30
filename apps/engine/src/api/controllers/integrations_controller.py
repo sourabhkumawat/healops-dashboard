@@ -1,25 +1,34 @@
 """
 Integrations Controller - Handles GitHub and other integration management.
 """
-import os
-import json
-import time
-import secrets
+import asyncio
 import base64
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import time
+import traceback
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any
+
 from fastapi import Request, HTTPException, Query, BackgroundTasks
 from fastapi.responses import RedirectResponse, JSONResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
-from pydantic import BaseModel
-from typing import Optional, Dict, Any
-from datetime import datetime, timedelta
 
-from src.database.models import Integration, AgentPR, AgentEmployee
-from src.integrations import GithubIntegration
-from src.integrations.github import get_installation_info, get_installation_repositories
-from src.auth import encrypt_token
-from src.utils.integrations import backfill_integration_to_incidents
+from src.agents.qa_orchestrator import review_pr_for_alex
 from src.api.controllers.base import get_user_id_from_request
+from src.auth import encrypt_token
+from src.database.models import Integration, AgentPR, AgentEmployee
+from src.integrations import GithubIntegration, IntegrationRegistry
+from src.integrations.github import get_installation_info, get_installation_repositories
+from src.integrations.linear.integration import LinearIntegration
+from src.integrations.linear.oauth import exchange_code_for_token, get_authorization_url
+from src.memory.cocoindex_flow import execute_flow_update_async
+from src.utils.integrations import backfill_integration_to_incidents
 from src.utils.indexing_manager import indexing_manager
 
 # Configuration constants
@@ -170,7 +179,6 @@ class IntegrationsController:
                     print(f"DEBUG: Decoded state - user_id={user_id}, reconnect={reconnect}, integration_id={integration_id}")
                 except Exception as e:
                     print(f"ERROR: Failed to decode state parameter: {e}")
-                    import traceback
                     traceback.print_exc()
                     raise HTTPException(status_code=400, detail=f"Invalid state parameter: {str(e)}")
             
@@ -286,7 +294,6 @@ class IntegrationsController:
         except Exception as e:
             # Log unexpected errors
             print(f"ERROR: Unexpected error in github_callback: {e}")
-            import traceback
             traceback.print_exc()
             # Redirect to frontend with error
             error_msg = f"Internal server error: {str(e)}"
@@ -368,8 +375,6 @@ class IntegrationsController:
     @staticmethod
     def list_providers():
         """List available integration providers."""
-        from src.integrations import IntegrationRegistry
-        
         return IntegrationRegistry.list_providers()
     
     @staticmethod
@@ -379,8 +384,6 @@ class IntegrationsController:
         SECURITY: This endpoint requires authentication to ensure integrations are
         created for the correct user. User ID is included in state parameter.
         """
-        from src.integrations.linear.oauth import get_authorization_url
-        
         # Get authenticated user_id (middleware ensures this is set)
         user_id = get_user_id_from_request(request, db=db)
         
@@ -416,10 +419,6 @@ class IntegrationsController:
         
         Linear redirects here after authorization with code in query params.
         """
-        from src.integrations.linear.oauth import exchange_code_for_token
-        from src.integrations.linear.integration import LinearIntegration
-        from src.auth.crypto_utils import encrypt_token
-        
         try:
             if not code:
                 print("ERROR: code parameter missing")
@@ -598,7 +597,6 @@ class IntegrationsController:
             raise
         except Exception as e:
             print(f"ERROR: Unexpected error in linear_callback: {e}")
-            import traceback
             traceback.print_exc()
             error_msg = f"Internal server error: {str(e)}"
             return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&error={error_msg}")
@@ -643,7 +641,6 @@ class IntegrationsController:
             raise HTTPException(status_code=404, detail="Integration not found")
         
         try:
-            from src.integrations.linear.integration import LinearIntegration
             linear_integration = LinearIntegration(integration_id=integration_id)
             verification = linear_integration.verify_connection()
             
@@ -676,7 +673,6 @@ class IntegrationsController:
             raise HTTPException(status_code=404, detail="Integration not found")
         
         try:
-            from src.integrations.linear.integration import LinearIntegration
             linear_integration = LinearIntegration(integration_id=integration_id)
             teams = linear_integration.get_teams()
             
@@ -838,9 +834,6 @@ class IntegrationsController:
         Triggers QA review when Alex creates or updates a PR.
         """
         try:
-            import hmac
-            import hashlib
-            
             # Read body
             body_bytes = await request.body()
             body_str = body_bytes.decode('utf-8')
@@ -916,9 +909,6 @@ class IntegrationsController:
                     
                     # Trigger QA review asynchronously
                     print(f"🚀 Triggering QA review for PR #{pr_number} by {alex_agent.name}")
-                    from src.agents.qa_orchestrator import review_pr_for_alex
-                    import asyncio
-                    
                     # Run review in background
                     asyncio.create_task(
                         review_pr_for_alex(
@@ -1008,7 +998,6 @@ class IntegrationsController:
                         indexed_count += 1
                     except Exception as e:
                         print(f"   ⚠️  Failed to schedule reindex for integration {integration.id}: {e}")
-                        import traceback
                         traceback.print_exc()
 
                 if indexed_count == 0:
@@ -1038,7 +1027,6 @@ class IntegrationsController:
             raise
         except Exception as e:
             print(f"❌ Error handling GitHub webhook: {e}")
-            import traceback
             traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error processing webhook: {str(e)}")
     
@@ -1112,7 +1100,6 @@ class IntegrationsController:
             raise
         except Exception as e:
             print(f"ERROR fetching repositories: {e}")
-            import traceback
             traceback.print_exc()
             return {
                 "repositories": [],
@@ -1283,7 +1270,6 @@ class IntegrationsController:
         default_repo = setup_data.get("default_repo") or setup_data.get("repository")
         if default_repo and integration.status == "ACTIVE":
             try:
-                from src.memory.cocoindex_flow import execute_flow_update_async
                 # Capture primitives so the background task does not reference ORM/session after request ends
                 repo_name_to_index = default_repo
                 integration_id_to_index = integration.id
@@ -1300,7 +1286,6 @@ class IntegrationsController:
                         print(f"✅ CocoIndex indexing completed for repository: {repo_name_to_index}")
                     except Exception as e:
                         print(f"⚠️  CocoIndex indexing failed for {repo_name_to_index}: {e}")
-                        import traceback
                         traceback.print_exc()
                 
                 # Add to FastAPI background tasks (non-blocking)
@@ -1308,7 +1293,6 @@ class IntegrationsController:
             except Exception as e:
                 # Don't fail setup if indexing trigger fails
                 print(f"Warning: Failed to trigger CocoIndex indexing: {e}")
-                import traceback
                 traceback.print_exc()
         
         return result

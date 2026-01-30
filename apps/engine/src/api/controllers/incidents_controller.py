@@ -1,23 +1,23 @@
 """
 Incidents Controller - Handles incident management and analysis.
 """
-from fastapi import Request, HTTPException, BackgroundTasks
-from sqlalchemy.orm import Session
-from typing import Optional, Dict, Any, List
-from datetime import datetime
+import traceback
 import time
 import asyncio
+from datetime import datetime
+from typing import Optional, Dict, Any, List
 
-from src.database.models import Incident, LogEntry, User, IncidentStatus, IncidentSeverity, Integration
-from src.database.database import SessionLocal
+from fastapi import Request, HTTPException, BackgroundTasks
+from sqlalchemy.orm import Session
+
+from src.api.controllers.base import get_user_id_from_request
 from src.core.ai_analysis import analyze_incident_with_openrouter
+from src.database.database import SessionLocal
+from src.database.models import Incident, LogEntry, User, IncidentStatus, IncidentSeverity, Integration
 from src.middleware import check_rate_limit
 from src.services.email.service import send_incident_resolved_email
-from src.agents.orchestrator import run_robust_crew
-from src.integrations import GithubIntegration
-from src.integrations.github import get_installation_repositories
-from src.api.controllers.base import get_user_id_from_request
-from src.services.incident_resolution_requests import ensure_incident_resolution_requested
+from src.services.incident_resolution_requests import ensure_incident_resolution_requested, run_incident_resolution_job
+from src.utils.integrations import sync_linear_ticket_status, sync_linear_ticket_resolution
 
 
 class IncidentsController:
@@ -334,7 +334,6 @@ class IncidentsController:
                 print(f"⚠️  Failed to track analytics: {analytics_error}")
             
         except Exception as e:
-            import traceback
             error_trace = traceback.format_exc()
             analysis_error = str(e)
             analysis_duration = time.time() - analysis_start_time
@@ -410,8 +409,6 @@ class IncidentsController:
         # This is optional - Linear integration may not be available for all clients
         if "status" in update_data and old_status != incident.status:
             try:
-                from src.utils.integrations import sync_linear_ticket_status, sync_linear_ticket_resolution
-                
                 # Update Linear ticket state based on incident status
                 # These functions handle cases where Linear is not configured gracefully
                 sync_linear_ticket_status(
@@ -428,7 +425,6 @@ class IncidentsController:
                 # Log error but don't fail the request
                 # This catch is for unexpected errors in the sync functions themselves
                 print(f"⚠️  Unexpected error in Linear sync for incident {incident.id}: {e}")
-                import traceback
                 traceback.print_exc()
         
         # Send email notification if incident was just resolved
@@ -483,7 +479,6 @@ class IncidentsController:
             except Exception as e:
                 # Log error but don't fail the request
                 print(f"⚠️  Error preparing incident resolved email notification: {e}")
-                import traceback
                 traceback.print_exc()
         
         return incident
@@ -491,268 +486,65 @@ class IncidentsController:
     @staticmethod
     async def test_agent(incident_id: int, request: Request, db: Session):
         """
-        Test endpoint to run the agent synchronously and see detailed thinking process.
-        
-        This endpoint runs the agent directly and returns all events, steps, and thinking
-        in the response. Useful for debugging and understanding agent behavior.
-        
+        Test endpoint to run the incident resolution pipeline (same as production).
+
+        This endpoint calls the same code path as production incident resolution:
+        run_incident_resolution_job -> analyze_incident_with_openrouter -> (if code needed) run_robust_crew.
+        No duplicate logic; it only invokes the original coding agent flow.
+
         NOTE: This endpoint does NOT require authentication - it's for testing only.
         It will work with any incident ID without checking user permissions.
-        
+
         Args:
             incident_id: ID of the incident to test
-        
+
         Returns:
-            Detailed response with agent execution, events, thinking, and results
+            Response with the same result structure as production resolution
         """
-        # No authentication required for testing endpoint
-        # Get incident without user filtering
         incident = db.query(Incident).filter(Incident.id == incident_id).first()
-        
         if not incident:
             raise HTTPException(
-                status_code=404, 
+                status_code=404,
                 detail=f"Incident {incident_id} not found"
             )
-        
+        if not incident.user_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Incident has no user_id; resolution job requires it"
+            )
+
         print(f"\n{'='*60}")
-        print(f"🧪 TEST AGENT ENDPOINT - Incident {incident_id}")
-        print(f"{'='*60}")
-        print(f"Incident: {incident.title}")
-        print(f"Status: {incident.status}")
-        print(f"Root cause: {incident.root_cause[:100] if incident.root_cause else 'Not set'}")
+        print(f"🧪 TEST AGENT ENDPOINT - Incident {incident_id} (same path as production)")
         print(f"{'='*60}\n")
-        
+
         try:
-            # Get logs
-            logs = []
-            if incident.log_ids:
-                log_id_list = incident.log_ids if isinstance(incident.log_ids, list) else []
-                if log_id_list:
-                    logs = db.query(LogEntry).filter(LogEntry.id.in_(log_id_list)).order_by(LogEntry.timestamp.desc()).all()
-            
-            # Get GitHub integration (use incident's integration_id or fallback to user's first ACTIVE GitHub integration)
-            github_integration = None
-            integration = None
-            effective_integration_id = incident.integration_id
-            if not effective_integration_id and incident.user_id:
-                fallback = db.query(Integration).filter(
-                    Integration.user_id == incident.user_id,
-                    Integration.provider == "GITHUB",
-                    Integration.status == "ACTIVE"
-                ).first()
-                if fallback:
-                    effective_integration_id = fallback.id
-                    print(f"   📌 No integration on incident; using user's GitHub integration (ID: {effective_integration_id})")
-            if effective_integration_id:
-                integration = db.query(Integration).filter(Integration.id == effective_integration_id).first()
-                try:
-                    print(f"🔧 Loading GitHub integration (ID: {effective_integration_id})...")
-                    github_integration = GithubIntegration(integration_id=effective_integration_id)
-                    print(f"✅ GitHub integration loaded (ID: {effective_integration_id})")
-                    
-                    # Verify connection
-                    if github_integration.client:
-                        verification = github_integration.verify_connection()
-                        if verification.get("status") == "verified":
-                            print(f"✅ GitHub connection verified: {verification.get('username', 'N/A')}")
-                        else:
-                            print(f"⚠️  GitHub connection verification failed: {verification.get('message', 'Unknown error')}")
-                            if integration and not integration.installation_id:
-                                print(f"⚠️  This integration uses a legacy OAuth token (no GitHub App linked). Go to Settings → Integrations → click Reconnect on GitHub to link the App and fix 401 errors.")
-                    else:
-                        print(f"⚠️  GitHub client not initialized after loading integration")
-                except Exception as e:
-                    print(f"⚠️  Warning: Failed to load GitHub integration: {e}")
-                    import traceback
-                    traceback.print_exc()
-            
-            # Resolve repo_name: incident first, then integration default/service mapping, then first repo from installation
-            repo_name = incident.repo_name
-            if not repo_name and integration:
-                if integration.config and isinstance(integration.config, dict):
-                    config = integration.config
-                    service_mappings = config.get("service_mappings") or {}
-                    repo_name = service_mappings.get(incident.service_name) or config.get("repo_name") or config.get("repository")
-                # Fallback: use first repo from GitHub App installation if no default/service mapping set
-                if not repo_name and integration.installation_id:
-                    try:
-                        repos = get_installation_repositories(integration.installation_id)
-                        if repos:
-                            repo_name = repos[0].get("full_name")
-                            if repo_name:
-                                print(f"   📌 Using first repo from installation: {repo_name}")
-                    except Exception as e:
-                        print(f"   ⚠️  Could not list installation repos: {e}")
-            repo_name = repo_name or "owner/repo"
-            root_cause = incident.root_cause or "Test root cause - agent testing"
-            
-            if repo_name == "owner/repo":
-                print(f"⚠️  Repository not set: set incident.repo_name or integration default repo / service mapping for '{incident.service_name}'")
-                if integration and not integration.installation_id:
-                    print(f"⚠️  Cannot list repos: this integration has no GitHub App installation. Reconnect GitHub from Settings → Integrations to link the App.")
-            if not incident.root_cause:
-                print(f"⚠️  Root cause not set, using placeholder: {root_cause}")
-            
-            print(f"\n🚀 Starting agent execution...")
-            print(f"   Repository: {repo_name}")
-            print(f"   Logs: {len(logs)} entries")
-            print(f"   Root cause: {root_cause[:100]}\n")
-            
-            # Run agent synchronously
             start_time = time.time()
-            result = run_robust_crew(
-                incident=incident,
-                logs=logs,
-                root_cause=root_cause,
-                github_integration=github_integration,
-                repo_name=repo_name,
-                db=db
+            job_result = run_incident_resolution_job(
+                incident_id=incident_id,
+                requested_by_user_id=incident.user_id,
             )
             execution_time = time.time() - start_time
-            
-            print(f"\n✅ Agent execution completed in {execution_time:.2f}s")
-            
-            # Format response with detailed information
+
+            success = job_result.get("success", False)
+            result = job_result.get("result") or {}
+
             response = {
-                "success": result.get("success", False),
-                "status": result.get("status", "unknown"),
+                "success": success,
                 "execution_time_seconds": round(execution_time, 2),
                 "incident_id": incident_id,
-                "incident_info": {
-                    "title": incident.title,
-                    "status": incident.status,
-                    "severity": incident.severity,
-                    "service_name": incident.service_name,
-                    "root_cause": incident.root_cause,
-                    "repo_name": repo_name,
-                    "has_integration": github_integration is not None
-                },
-                "github_reconnect_required": bool(integration and not integration.installation_id),
-                "agent_execution": {
-                    "iterations": result.get("iterations", 0),
-                    "plan_progress": result.get("plan_progress", {}),
-                    "workspace_state": result.get("workspace_state", {})
-                },
-                "events": result.get("events", []),
-                "fixes": result.get("fixes", {}),
-                "error_signature": result.get("error_signature"),
-                "thinking_summary": IncidentsController._extract_thinking_summary(result.get("events", [])),
-                "steps_taken": IncidentsController._extract_steps_taken(result.get("events", [])),
-                "error": result.get("error")
+                "result": result,
+                "error": job_result.get("error"),
             }
-            
             return response
-            
+
         except Exception as e:
-            import traceback
             error_trace = traceback.format_exc()
             print(f"\n❌ Error in test agent endpoint: {e}")
             print(f"Full traceback:\n{error_trace}")
-            
             return {
                 "success": False,
-                "status": "error",
                 "incident_id": incident_id,
                 "error": str(e),
                 "error_trace": error_trace,
-                "message": "Agent execution failed. Check error details."
+                "message": "Agent execution failed. Check error details.",
             }
-    
-    @staticmethod
-    def _extract_thinking_summary(events: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Extract a summary of agent thinking from events."""
-        thinking = {
-            "total_events": len(events),
-            "event_types": {},
-            "agent_actions": [],
-            "observations": [],
-            "plan_changes": [],
-            "errors": []
-        }
-        
-        for event in events:
-            event_type = event.get("type", "unknown")
-            thinking["event_types"][event_type] = thinking["event_types"].get(event_type, 0) + 1
-            
-            data = event.get("data", {})
-            
-            if event_type == "agent_action":
-                thinking["agent_actions"].append({
-                    "agent": event.get("agent"),
-                    "action": data.get("action", ""),
-                    "timestamp": event.get("timestamp")
-                })
-            elif event_type == "observation":
-                thinking["observations"].append({
-                    "observation": data.get("observation", "")[:200],
-                    "timestamp": event.get("timestamp")
-                })
-            elif event_type in ["plan_created", "plan_updated"]:
-                thinking["plan_changes"].append({
-                    "type": event_type,
-                    "steps_count": len(data.get("plan", [])),
-                    "timestamp": event.get("timestamp")
-                })
-            elif event_type == "error":
-                thinking["errors"].append({
-                    "message": data.get("message", ""),
-                    "timestamp": event.get("timestamp")
-                })
-        
-        return thinking
-    
-    @staticmethod
-    def _extract_steps_taken(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Extract chronological steps taken by the agent."""
-        steps = []
-        
-        for event in events:
-            event_type = event.get("type", "unknown")
-            data = event.get("data", {})
-            
-            if event_type == "plan_step_started":
-                steps.append({
-                    "step_number": data.get("step_number"),
-                    "description": data.get("description", ""),
-                    "status": "started",
-                    "timestamp": event.get("timestamp")
-                })
-            elif event_type == "plan_step_completed":
-                # Update existing step or add new
-                step_found = False
-                for step in steps:
-                    if step.get("step_number") == data.get("step_number"):
-                        step["status"] = "completed"
-                        step["result"] = data.get("result", "")
-                        step["completed_at"] = event.get("timestamp")
-                        step_found = True
-                        break
-                if not step_found:
-                    steps.append({
-                        "step_number": data.get("step_number"),
-                        "description": data.get("description", ""),
-                        "status": "completed",
-                        "result": data.get("result", ""),
-                        "timestamp": event.get("timestamp")
-                    })
-            elif event_type == "plan_step_failed":
-                # Update existing step or add new
-                step_found = False
-                for step in steps:
-                    if step.get("step_number") == data.get("step_number"):
-                        step["status"] = "failed"
-                        step["error"] = data.get("error", "")
-                        step["failed_at"] = event.get("timestamp")
-                        step_found = True
-                        break
-                if not step_found:
-                    steps.append({
-                        "step_number": data.get("step_number"),
-                        "description": data.get("description", ""),
-                        "status": "failed",
-                        "error": data.get("error", ""),
-                        "timestamp": event.get("timestamp")
-                    })
-        
-        return steps

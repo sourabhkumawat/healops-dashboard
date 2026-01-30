@@ -9,7 +9,12 @@ if str(_engine_root) not in sys.path:
     sys.path.insert(0, str(_engine_root))
 import os
 import json
+import re
+import traceback
+import redis
+from jose import jwt, JWTError
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request, Query
+from fastapi import WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import PlainTextResponse, FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
@@ -18,18 +23,22 @@ from sqlalchemy import func
 from src.database import engine, Base, get_db, SessionLocal
 from src.database import (
     Incident, LogEntry, User, Integration, ApiKey,
-    IntegrationStatus, SourceMap, IncidentStatus, IncidentSeverity
+    IntegrationStatus, SourceMap, IncidentStatus, IncidentSeverity, AgentEmployee
 )
 from src.memory import (
-    AgentEvent, AgentPlan, AgentWorkspace, AgentMemoryError,
+     AgentPlan, AgentWorkspace, AgentMemoryError,
     AgentMemoryFix, AgentRepoContext, AgentLearningPattern
 )  # Ensure memory tables are created
 from src.auth import verify_password, get_password_hash, create_access_token, verify_token
 from src.auth import encrypt_token, decrypt_token
 from src.integrations import generate_api_key, GithubIntegration
 from src.integrations.github import get_installation_info, get_installation_repositories
+from src.core.ai_analysis import get_repo_name_from_integration, MODEL_CONFIG, analyze_incident_with_openrouter
+from src.core.openrouter_client import openrouter_chat_completion, get_api_key
 from src.middleware import APIKeyMiddleware, check_rate_limit
 from src.memory import ensure_partition_exists_for_timestamp
+from src.services.redpanda_task_processor import setup_redpanda_task_processor
+from src.services.slack.service import SlackService
 from src.api.controllers.base import get_user_id_from_request
 from src.api.controllers.auth_controller import AuthController, get_current_user, UserUpdateRequest, TestEmailRequest, RegisterRequest
 from src.api.controllers.slack_controller import SlackController
@@ -41,13 +50,11 @@ from src.api.controllers.stats_controller import StatsController
 from src.api.controllers.incidents_controller import IncidentsController
 from src.api.controllers.integrations_controller import IntegrationsController, GithubConfig, ServiceMappingRequest, ServiceMappingsUpdateRequest
 from src.api.controllers.linear_ticket_controller import router as linear_ticket_router
+from src.utils.redpanda_websocket_manager import connection_manager as manager, agent_event_manager
 from datetime import timedelta, datetime
-import secrets
 import time
-from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
-import requests
-import redis
+
 import asyncio
 import threading
 import logging
@@ -103,7 +110,6 @@ def backfill_integration_to_incidents(db: Session, integration_id: int, user_id:
         # If we're updating the integration, also get repo_name
         if should_update:
             # Get repo_name from integration config based on service_name
-            from src.core.ai_analysis import get_repo_name_from_integration
             if not incident.repo_name:
                 repo_name = get_repo_name_from_integration(integration, incident.service_name)
                 if repo_name:
@@ -170,13 +176,11 @@ async def startup_event():
         print("✓ Redpanda WebSocket manager initialized")
 
         # Initialize Redpanda task processor
-        from src.services.redpanda_task_processor import setup_redpanda_task_processor
         setup_redpanda_task_processor()
         print("✓ Redpanda task processor initialized")
 
     except Exception as e:
         print(f"⚠ Error initializing Redpanda services: {e}")
-        import traceback
         traceback.print_exc()
 
 def get_main_event_loop():
@@ -208,7 +212,7 @@ app.add_middleware(
     expose_headers=["Location"],
 )
 
-# Timeout Middleware - Add early to catch long-running requests
+# Timeout Middleware - Add early to catch long-running 
 # This prevents Cloudflare tunnel "context canceled" errors
 app.add_middleware(TimeoutMiddleware)
 
@@ -252,7 +256,6 @@ def update_me(update: UserUpdateRequest, current_user: User = Depends(get_curren
 def test_email_endpoint(request_data: TestEmailRequest, current_user: User = Depends(get_current_user)):
     """Test email - delegates to AuthController."""
     return AuthController.test_email(request_data)
-from fastapi import WebSocket, WebSocketDisconnect, BackgroundTasks
 
 # Redis Configuration
 
@@ -269,7 +272,6 @@ except Exception as e:
     redis_client = None
 
 # Import Redpanda-powered connection manager
-from src.utils.redpanda_websocket_manager import connection_manager as manager, agent_event_manager
 
 @app.websocket("/ws/logs")
 async def websocket_endpoint(websocket: WebSocket):
@@ -312,11 +314,6 @@ async def websocket_endpoint(websocket: WebSocket):
         # In production, you may want to require authentication
         if token:
             try:
-                from jose import jwt, JWTError
-                from src.database.database import SessionLocal
-                from src.database.models import User
-                import os
-                
                 SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
                 ALGORITHM = "HS256"
                 
@@ -355,7 +352,6 @@ async def websocket_endpoint(websocket: WebSocket):
             print(f"🔌 WebSocket disconnected normally from {client_host}")
         except Exception as e:
             print(f"⚠️  WebSocket error during connection: {e}")
-            import traceback
             traceback.print_exc()
         finally:
             # Remove from connection manager
@@ -365,7 +361,6 @@ async def websocket_endpoint(websocket: WebSocket):
             
     except Exception as e:
         print(f"❌ WebSocket connection error: {e}")
-        import traceback
         traceback.print_exc()
         try:
             await websocket.close(code=1011, reason=f"Server error: {str(e)}")
@@ -412,7 +407,6 @@ def get_bot_token_for_agent(agent_name: str, agent_role: str = None, agent_store
     # Try agent's stored token first (if provided)
     if agent_stored_token:
         try:
-            from src.auth.crypto_utils import decrypt_token
             decrypted = decrypt_token(agent_stored_token)
             if decrypted:
                 return decrypted
@@ -456,9 +450,6 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str], us
         used_secret_name: Which signing secret was used (identifies which bot received the event)
     """
     try:
-        from src.services.slack.service import SlackService
-        from src.database.models import AgentEmployee
-        from src.database.database import SessionLocal
         
         channel_id = event.get("channel")
         user_id = event.get("user")
@@ -494,7 +485,6 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str], us
         agent_name_match = None
         
         # Extract Slack user mentions BEFORE cleaning to match by display name
-        import re
         mentioned_user_ids = []
         mentioned_display_names = []
         # Extract Slack user mentions: <@U123456> or <@U123456|Display Name>
@@ -580,14 +570,12 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str], us
                             # Try to get bot token and fetch bot_user_id from Slack
                             # This works even if agent doesn't have token in DB - get_bot_token_for_agent checks env vars
                             try:
-                                from src.auth.crypto_utils import decrypt_token
                                 bot_token = get_bot_token_for_agent(
                                     agent_name=agent.name,
                                     agent_role=agent.role,
                                     agent_stored_token=agent.slack_bot_token
                                 )
                                 if bot_token:
-                                    from src.services.slack.service import SlackService
                                     slack_service = SlackService(bot_token)
                                     auth_test = slack_service.test_connection()
                                     if auth_test.get("ok"):
@@ -787,7 +775,6 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str], us
                     try:
                         bot_token = os.getenv("SLACK_BOT_TOKEN")
                         if bot_token:
-                            from src.services.slack.service import SlackService
                             slack_service = SlackService(bot_token)
                             slack_service.client.chat_postMessage(
                                 channel=channel_id,
@@ -953,9 +940,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str], us
                         _recently_responded_threads.add(ts)
                         print(f"🔒 Tracked thread {ts[:10]}... as recently responded to")
                         # Clean up after 3 seconds (enough time for Slack to send events back)
-                        import threading
                         def clear_thread_tracking():
-                            import time
                             time.sleep(3)
                             _recently_responded_threads.discard(ts)
                             print(f"🔓 Removed thread {ts[:10]}... from tracking")
@@ -963,9 +948,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str], us
                     
                     # NOW add to conversation context AFTER successfully posting
                     # Use a delay to prevent the bot from responding to its own messages
-                    import threading
                     def add_context_after_posting():
-                        import time
                         time.sleep(2)  # Wait 2 seconds before adding context to prevent recursion
                         # Only add context if thread_id is valid (not None)
                         if thread_id:
@@ -981,9 +964,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str], us
                     print(f"   Tracked messages: {len(_recently_posted_messages)}")
                     print(f"   Tracked threads: {len(_recently_responded_threads)}")
                     # Clean up after 10 seconds
-                    import threading
                     def clear_posted_message():
-                        import time
                         time.sleep(10)
                         _recently_posted_messages.discard(response_ts)
                         print(f"🗑️  Removed message {response_ts[:10]}... from tracking")
@@ -1005,9 +986,7 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str], us
                     _recently_posted_messages.add(response_ts)
                     print(f"✅ Posted response message fallback (ts: {response_ts[:10]}...)")
                     # Clean up after 10 seconds
-                    import threading
                     def clear_posted_message():
-                        import time
                         time.sleep(10)
                         _recently_posted_messages.discard(response_ts)
                     threading.Thread(target=clear_posted_message, daemon=True).start()
@@ -1017,7 +996,6 @@ async def handle_slack_mention(event: Dict[str, Any], team_id: Optional[str], us
             
     except Exception as e:
         print(f"❌ Error handling Slack mention: {e}")
-        import traceback
         traceback.print_exc()
         # Try to send error message to Slack if possible
         try:
@@ -1045,7 +1023,6 @@ async def handle_slack_dm(event: Dict[str, Any], team_id: Optional[str], used_se
         await handle_slack_mention(event, team_id, used_secret_name=used_secret_name)
     except Exception as e:
         print(f"❌ Error handling Slack DM: {e}")
-        import traceback
         traceback.print_exc()
 
 
@@ -1059,9 +1036,6 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
         thread_id: Thread timestamp (used as conversation context ID)
     """
     try:
-        from src.services.slack.service import SlackService
-        from src.database.models import AgentEmployee
-        from src.database.database import SessionLocal
         
         channel_id = event.get("channel")
         user_id = event.get("user")
@@ -1113,7 +1087,6 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
             
             # Try to match agent name from text (similar to mention handler)
             # Extract Slack user mentions BEFORE cleaning to match by display name
-            import re
             mentioned_user_ids = []
             mentioned_display_names = []
             # Extract Slack user mentions: <@U123456> or <@U123456|Display Name>
@@ -1163,14 +1136,12 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
                             
                             # Try to get bot token and fetch bot_user_id from Slack
                             try:
-                                from src.auth.crypto_utils import decrypt_token
                                 bot_token = get_bot_token_for_agent(
                                     agent_name=candidate_agent.name,
                                     agent_role=candidate_agent.role,
                                     agent_stored_token=candidate_agent.slack_bot_token
                                 )
                                 if bot_token:
-                                    from src.services.slack.service import SlackService
                                     slack_service = SlackService(bot_token)
                                     auth_test = slack_service.test_connection()
                                     if auth_test.get("ok"):
@@ -1416,18 +1387,14 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
                         _recently_responded_threads.add(thread_ts)
                         print(f"🔒 Tracked thread {thread_ts[:10]}... as recently responded to")
                         # Clean up after 3 seconds
-                        import threading
                         def clear_thread_tracking():
-                            import time
                             time.sleep(3)
                             _recently_responded_threads.discard(thread_ts)
                             print(f"🔓 Removed thread {thread_ts[:10]}... from tracking")
                         threading.Thread(target=clear_thread_tracking, daemon=True).start()
                     
                     # Add to conversation context AFTER posting with delay
-                    import threading
                     def add_context_after_posting():
-                        import time
                         time.sleep(2)  # Wait 2 seconds before adding context to prevent recursion
                         if thread_id:
                             add_to_conversation_context(thread_id, "user", text)
@@ -1439,9 +1406,7 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
                     print(f"✅ Posted thread reply (ts: {response_ts[:10]}...), tracked to prevent recursion")
                     print(f"   Tracked threads: {len(_recently_responded_threads)}")
                     # Clean up after 10 seconds
-                    import threading
                     def clear_posted_message():
-                        import time
                         time.sleep(10)
                         _recently_posted_messages.discard(response_ts)
                     threading.Thread(target=clear_posted_message, daemon=True).start()
@@ -1461,9 +1426,7 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
                     _recently_posted_messages.add(response_ts)
                     print(f"✅ Posted thread reply fallback (ts: {response_ts[:10]}...)")
                     # Clean up after 10 seconds
-                    import threading
                     def clear_posted_message():
-                        import time
                         time.sleep(10)
                         _recently_posted_messages.discard(response_ts)
                     threading.Thread(target=clear_posted_message, daemon=True).start()
@@ -1475,7 +1438,6 @@ async def handle_thread_reply(event: Dict[str, Any], team_id: Optional[str], thr
             
     except Exception as e:
         print(f"❌ Error handling thread reply: {e}")
-        import traceback
         traceback.print_exc()
 
 
@@ -1509,8 +1471,6 @@ def get_bot_user_id_from_db(channel_id: str, agent_name: Optional[str] = None) -
         Bot user ID string or None if not found
     """
     try:
-        from src.database.models import AgentEmployee
-        from src.database.database import SessionLocal
         
         db = SessionLocal()
         try:
@@ -1549,7 +1509,6 @@ def get_bot_user_id() -> Optional[str]:
     try:
         bot_token = os.getenv("SLACK_BOT_TOKEN")
         if bot_token:
-            from src.services.slack.service import SlackService
             slack_service = SlackService(bot_token)
             _cached_bot_user_id = slack_service.bot_user_id
             return _cached_bot_user_id
@@ -1586,7 +1545,6 @@ def generate_agent_response_llm(agent: Any, query: str, thread_id: str = None, c
     Returns:
         Response text
     """
-    from src.core.openrouter_client import openrouter_chat_completion, get_api_key
     if not get_api_key():
         # Fallback to simple responses if LLM not configured
         return generate_agent_response_simple(agent, query)
@@ -1620,7 +1578,6 @@ Keep responses conversational and friendly. If asked about specific incidents or
     messages.append({"role": "user", "content": query})
     
     try:
-        from src.core.ai_analysis import MODEL_CONFIG
         
         chat_config = MODEL_CONFIG.get("chat", MODEL_CONFIG["simple_analysis"])
         r = openrouter_chat_completion(
@@ -1641,7 +1598,6 @@ Keep responses conversational and friendly. If asked about specific incidents or
             
     except Exception as e:
         print(f"⚠️  Error calling LLM: {e}")
-        import traceback
         traceback.print_exc()
         return generate_agent_response_simple(agent, query)
 
@@ -1928,8 +1884,6 @@ async def analyze_incident(incident_id: int, background_tasks: BackgroundTasks, 
     return await IncidentsController.analyze_incident(incident_id, background_tasks, request, db)
 async def analyze_incident_async(incident_id: int, user_id: Optional[int] = None):
     """Background task to analyze an incident."""
-    from src.database.database import SessionLocal
-    from src.core.ai_analysis import analyze_incident_with_openrouter
     
     db = SessionLocal()
     incident = None
@@ -2059,7 +2013,6 @@ async def analyze_incident_async(incident_id: int, user_id: Optional[int] = None
             print(f"⚠️  Failed to track analytics: {analytics_error}")
         
     except Exception as e:
-        import traceback
         error_trace = traceback.format_exc()
         analysis_error = str(e)
         analysis_duration = time.time() - analysis_start_time
@@ -2126,99 +2079,3 @@ async def test_agent_endpoint(
 ):
     """Test agent - delegates to IncidentsController."""
     return await IncidentsController.test_agent(incident_id, request, db)
-def _extract_thinking_summary(events: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Extract a summary of agent thinking from events."""
-    thinking = {
-        "total_events": len(events),
-        "event_types": {},
-        "agent_actions": [],
-        "observations": [],
-        "plan_changes": [],
-        "errors": []
-    }
-    
-    for event in events:
-        event_type = event.get("type", "unknown")
-        thinking["event_types"][event_type] = thinking["event_types"].get(event_type, 0) + 1
-        
-        data = event.get("data", {})
-        
-        if event_type == "agent_action":
-            thinking["agent_actions"].append({
-                "agent": event.get("agent"),
-                "action": data.get("action", ""),
-                "timestamp": event.get("timestamp")
-            })
-        elif event_type == "observation":
-            thinking["observations"].append({
-                "observation": data.get("observation", "")[:200],
-                "timestamp": event.get("timestamp")
-            })
-        elif event_type in ["plan_created", "plan_updated"]:
-            thinking["plan_changes"].append({
-                "type": event_type,
-                "steps_count": len(data.get("plan", [])),
-                "timestamp": event.get("timestamp")
-            })
-        elif event_type == "error":
-            thinking["errors"].append({
-                "message": data.get("message", ""),
-                "timestamp": event.get("timestamp")
-            })
-    
-    return thinking
-
-
-def _extract_steps_taken(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Extract chronological steps taken by the agent."""
-    steps = []
-    
-    for event in events:
-        event_type = event.get("type", "unknown")
-        data = event.get("data", {})
-        
-        if event_type == "plan_step_started":
-            steps.append({
-                "step_number": data.get("step_number"),
-                "description": data.get("description", ""),
-                "status": "started",
-                "timestamp": event.get("timestamp")
-            })
-        elif event_type == "plan_step_completed":
-            # Update existing step or add new
-            step_found = False
-            for step in steps:
-                if step.get("step_number") == data.get("step_number"):
-                    step["status"] = "completed"
-                    step["result"] = data.get("result", "")
-                    step["completed_at"] = event.get("timestamp")
-                    step_found = True
-                    break
-            if not step_found:
-                steps.append({
-                    "step_number": data.get("step_number"),
-                    "description": data.get("description", ""),
-                    "status": "completed",
-                    "result": data.get("result", ""),
-                    "timestamp": event.get("timestamp")
-                })
-        elif event_type == "plan_step_failed":
-            # Update existing step or add new
-            step_found = False
-            for step in steps:
-                if step.get("step_number") == data.get("step_number"):
-                    step["status"] = "failed"
-                    step["error"] = data.get("error", "")
-                    step["failed_at"] = event.get("timestamp")
-                    step_found = True
-                    break
-            if not step_found:
-                steps.append({
-                    "step_number": data.get("step_number"),
-                    "description": data.get("description", ""),
-                    "status": "failed",
-                    "error": data.get("error", ""),
-                    "timestamp": event.get("timestamp")
-                })
-    
-    return steps

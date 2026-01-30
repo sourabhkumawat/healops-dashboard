@@ -4,7 +4,10 @@ Uses Tree-sitter for AST-aware chunking and PostgreSQL for persistent storage.
 """
 import os
 import re
+import traceback
 import cocoindex
+
+from src.database.database import DATABASE_URL
 from src.memory.cocoindex_github_source import GitHubSource, FileKey, FileValue
 
 
@@ -184,7 +187,6 @@ def execute_flow_update(repo_name: str, integration_id: int, ref: str = "main"):
     """
     # Set COCOINDEX_DATABASE_URL if not set (defaults to DATABASE_URL)
     if not os.getenv("COCOINDEX_DATABASE_URL"):
-        from src.database.database import DATABASE_URL
         os.environ["COCOINDEX_DATABASE_URL"] = DATABASE_URL
     
     # Initialize CocoIndex if not already initialized
@@ -219,7 +221,6 @@ def execute_flow_update(repo_name: str, integration_id: int, ref: str = "main"):
         return True
     except Exception as e:
         print(f"❌ CocoIndex flow update failed for {repo_name}: {e}")
-        import traceback
         traceback.print_exc()
         return False
 
@@ -235,7 +236,6 @@ async def execute_flow_update_async(repo_name: str, integration_id: int, ref: st
         ref: Branch or commit SHA
     """
     if not os.getenv("COCOINDEX_DATABASE_URL"):
-        from src.database.database import DATABASE_URL
         os.environ["COCOINDEX_DATABASE_URL"] = DATABASE_URL
     try:
         cocoindex.init()
@@ -256,6 +256,5 @@ async def execute_flow_update_async(repo_name: str, integration_id: int, ref: st
         return True
     except Exception as e:
         print(f"❌ CocoIndex flow update failed for {repo_name}: {e}")
-        import traceback
         traceback.print_exc()
         return False

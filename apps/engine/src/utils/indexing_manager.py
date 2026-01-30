@@ -3,10 +3,16 @@ Indexing Manager - Handles repository indexing with debouncing to prevent
 duplicate indexing operations from multiple push events.
 """
 import asyncio
-from typing import Dict, Optional
-from threading import Lock
+import traceback
 from datetime import datetime
+from threading import Lock
+from typing import Dict, Optional
+
 import os
+
+from src.database.database import SessionLocal
+from src.database.models import Integration
+from src.memory.cocoindex_flow import execute_flow_update_async
 
 
 class IndexingManager:
@@ -79,7 +85,6 @@ class IndexingManager:
                     
                     try:
                         print(f"🔄 Starting indexing for {repo_name} (ref: {ref})")
-                        from src.memory.cocoindex_flow import execute_flow_update_async
                         
                         # Execute the indexing (async to avoid event-loop RuntimeWarnings)
                         success = await execute_flow_update_async(repo_name, integration_id, ref)
@@ -89,8 +94,6 @@ class IndexingManager:
                             
                             # Update last_indexed_at (create new session to avoid closure issues)
                             try:
-                                from src.database.database import SessionLocal
-                                from src.database.models import Integration
                                 db = SessionLocal()
                                 try:
                                     integration = db.query(Integration).filter(
@@ -111,7 +114,6 @@ class IndexingManager:
                             print(f"❌ Failed to index {repo_name}")
                     except Exception as e:
                         print(f"❌ Error indexing {repo_name}: {e}")
-                        import traceback
                         traceback.print_exc()
                     finally:
                         with self.lock:

@@ -4,6 +4,7 @@ AI Analysis module for incident root cause analysis using OpenRouter.
 import os
 import json
 import re
+import traceback
 import hashlib
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Tuple
@@ -434,7 +435,6 @@ def is_stacktrace_from_node_modules(stack_trace: str) -> bool:
             
     except Exception as e:
         print(f"⚠️  Error in is_stacktrace_from_node_modules: {e}")
-        import traceback
         traceback.print_exc()
         # On error, default to False (assume application code to be safe)
         return False
@@ -852,7 +852,6 @@ def get_trace_logs(logs: list[LogEntry], db: Session, user_id: Optional[int] = N
         
     except Exception as e:
         print(f"⚠️  Error querying trace logs: {e}")
-        import traceback
         traceback.print_exc()
         # Fallback to original logs on error
         return logs
@@ -1282,7 +1281,6 @@ def analyze_incident_with_openrouter(incident: Incident, logs: list[LogEntry], d
                 # Continue with normal analysis
     except Exception as e:
         print(f"⚠️  Error checking for similar incidents: {e}")
-        import traceback
         traceback.print_exc()
         # Continue with normal analysis
     
@@ -1301,7 +1299,6 @@ def analyze_incident_with_openrouter(incident: Incident, logs: list[LogEntry], d
                 print(f"📊 Built trace execution flow with {trace_flow.get('total_spans', 0)} spans")
         except Exception as e:
             print(f"⚠️  Error gathering trace context: {e}")
-            import traceback
             traceback.print_exc()
             # Fallback to original logs if trace gathering fails
             trace_logs = logs
@@ -1704,7 +1701,6 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                                     print(f"⚠️  GitHub client not initialized after loading integration")
                             except Exception as e:
                                 print(f"⚠️  Warning: Failed to load GitHub integration: {e}")
-                                import traceback
                                 traceback.print_exc()
                                 # Continue without GitHub integration - analysis can still proceed
                             
@@ -1889,7 +1885,6 @@ This PR was generated using the enhanced multi-agent system with:
                                                                     print(f"✅ Added PR link to Linear issue {linear_issue_identifier}")
                                                             except Exception as e:
                                                                 print(f"⚠️  Failed to update Linear issue with PR link: {e}")
-                                                                import traceback
                                                                 traceback.print_exc()
                                                         
                                                         # Trigger QA review
@@ -1973,7 +1968,6 @@ This PR was generated using the enhanced multi-agent system with:
                                                 result["original_contents"] = original_contents
                                     
                                     except Exception as e:
-                                        import traceback
                                         error_trace = traceback.format_exc()
                                         print(f"⚠️  Enhanced crew failed: {e}")
                                         print(f"Full traceback:\n{error_trace}")
@@ -1983,7 +1977,6 @@ This PR was generated using the enhanced multi-agent system with:
                             print(f"⚠️  No repository name found for incident {incident.id} (integration {integration.id})")
                             code_fix_explanation = f"No repository name configured for this service ({incident.service_name}). Please configure the repository name in the GitHub integration settings (service mappings or default repo_name)."
                 except Exception as e:
-                    import traceback
                     print(f"⚠️  Error during GitHub analysis: {e}")
                     print(traceback.format_exc())
                     # Don't fail the whole analysis if PR creation fails
@@ -2003,7 +1996,6 @@ This PR was generated using the enhanced multi-agent system with:
             }
             
     except Exception as e:
-        import traceback
         error_trace = traceback.format_exc()
         print(f"❌ Error calling OpenRouter API: {e}")
         print(f"Full traceback: {error_trace}")

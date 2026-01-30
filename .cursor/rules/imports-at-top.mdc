@@ -1,0 +1,54 @@
+---
+description: Imports must be at the top of the file
+globs: **/*.py
+alwaysApply: false
+---
+
+# Imports at Top of File
+
+Keep all `import` and `from ... import` statements at the **top of the file**, after the module docstring (if any) and before any other code.
+
+## Rules
+
+- **Python**: Put all imports in a single block at the top, after any file docstring and `__future__` imports. Use the standard order: standard library → third-party → local/project.
+- **Avoid lazy imports**: Do not place imports inside functions, classes, or `try` blocks unless required to break a circular import or to make an optional dependency (document the reason in a comment).
+
+## Good
+
+```python
+"""Module docstring."""
+from __future__ import annotations
+
+import os
+from typing import Optional
+
+from fastapi import Request
+from src.database.models import Incident
+
+
+def my_function():
+    ...
+```
+
+## Bad
+
+```python
+"""Module docstring."""
+
+def my_function():
+    from src.database.models import Incident  # ❌ import inside function
+    ...
+```
+
+```python
+def handler():
+    import traceback  # ❌ move to top
+    traceback.print_exc()
+```
+
+## Exceptions
+
+- **Circular imports**: If moving an import to the top causes a circular import, keep it inside the function that needs it and add a short comment: `# Lazy import to avoid circular import with X`.
+- **Optional dependencies**: Imports for optional packages (e.g. `try: import slack_sdk`) may stay in a try/except at the top of the file; do not scatter them in the middle of the file.
+
+When adding or editing code, add new imports at the top of the file and do not introduce new inline imports unless one of the exceptions above applies.
