@@ -1666,45 +1666,62 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
             elif incident.integration_id and should_generate_code:
                 try:
                     integration = db.query(Integration).filter(Integration.id == incident.integration_id).first()
+                    repo_name = None
+                    github_integration = None
+
                     if integration and integration.provider == "GITHUB":
                         # Use repo_name from incident if available (assigned during creation),
                         # otherwise fall back to looking it up from integration config
-                        repo_name = None
                         if hasattr(incident, 'repo_name') and incident.repo_name:
                             repo_name = incident.repo_name
                             print(f"📌 Using repo_name from incident: {repo_name}")
                         else:
-                            # Fallback: Get repo name using service-to-repo mapping
                             repo_name = get_repo_name_from_integration(integration, service_name=incident.service_name)
                             if repo_name:
                                 print(f"🔍 Found repo_name from integration config: {repo_name}")
-                        
-                        if repo_name:
-                            print(f"🔍 Analyzing repository {repo_name} for incident {incident.id} (service: {incident.service_name})")
-                            
-                            # Load GitHub integration with verification (matching test-agent endpoint)
-                            github_integration = None
-                            try:
-                                print(f"🔧 Loading GitHub integration (ID: {integration.id})...")
-                                github_integration = GithubIntegration(integration_id=integration.id)
-                                print(f"✅ GitHub integration loaded (ID: {integration.id})")
-                                
-                                # Verify connection
-                                if github_integration.client:
-                                    verification = github_integration.verify_connection()
-                                    if verification.get("status") == "verified":
-                                        print(f"✅ GitHub connection verified: {verification.get('username', 'N/A')}")
-                                    else:
-                                        print(f"⚠️  GitHub connection verification failed: {verification.get('message', 'Unknown error')}")
-                                        # Continue anyway - connection might still work for some operations
+                        try:
+                            github_integration = GithubIntegration(integration_id=integration.id)
+                            if github_integration.client:
+                                verification = github_integration.verify_connection()
+                                if verification.get("status") == "verified":
+                                    print(f"✅ GitHub connection verified: {verification.get('username', 'N/A')}")
                                 else:
-                                    print(f"⚠️  GitHub client not initialized after loading integration")
-                            except Exception as e:
-                                print(f"⚠️  Warning: Failed to load GitHub integration: {e}")
-                                traceback.print_exc()
-                                # Continue without GitHub integration - analysis can still proceed
-                            
-                            # Only proceed with agent if GitHub integration is available
+                                    print(f"⚠️  GitHub connection verification failed: {verification.get('message', 'Unknown error')}")
+                            else:
+                                print(f"⚠️  GitHub client not initialized after loading integration")
+                        except Exception as e:
+                            print(f"⚠️  Warning: Failed to load GitHub integration: {e}")
+                            traceback.print_exc()
+                            github_integration = None
+                    else:
+                        # Incident from SigNoz or other non-GitHub source: use incident.repo_name and user's GitHub integration
+                        if hasattr(incident, 'repo_name') and incident.repo_name:
+                            repo_name = incident.repo_name
+                            print(f"📌 Using repo_name from incident (non-GitHub source): {repo_name}")
+                            github_integration_obj = (
+                                db.query(Integration)
+                                .filter(
+                                    Integration.user_id == incident.user_id,
+                                    Integration.provider == "GITHUB",
+                                    Integration.status == "ACTIVE",
+                                )
+                                .first()
+                            )
+                            if github_integration_obj:
+                                try:
+                                    github_integration = GithubIntegration(integration_id=github_integration_obj.id)
+                                    if github_integration.client:
+                                        verification = github_integration.verify_connection()
+                                        if verification.get("status") == "verified":
+                                            print(f"✅ GitHub connection verified (user's GitHub): {verification.get('username', 'N/A')}")
+                                except Exception as e:
+                                    print(f"⚠️  Warning: Failed to load user GitHub integration: {e}")
+                                    traceback.print_exc()
+                                    github_integration = None
+
+                    if repo_name and github_integration:
+                            print(f"🔍 Analyzing repository {repo_name} for incident {incident.id} (service: {incident.service_name})")
+                            # Only proceed with agent if GitHub integration is available (already loaded above)
                             if not github_integration:
                                 print(f"⚠️  Skipping agent execution - GitHub integration not available")
                                 code_fix_explanation = (

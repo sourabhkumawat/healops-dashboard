@@ -34,6 +34,15 @@ class IntegrationRegistry:
                 "icon": "linear",
                 "oauth": True,
                 "api_key": False
+            },
+            {
+                "id": "signoz",
+                "name": "SigNoz",
+                "provider": IntegrationProvider.SIGNOZ.value,
+                "description": "Connect SigNoz to fetch error logs and error traces and create incidents",
+                "icon": "signoz",
+                "oauth": False,
+                "api_key": True
             }
         ]
         

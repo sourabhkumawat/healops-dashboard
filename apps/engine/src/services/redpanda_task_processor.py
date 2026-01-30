@@ -271,6 +271,19 @@ def get_available_integration_for_user(db, user_id: int, service_name: str = Non
     return integrations[0].id if integrations else None, integrations[0] if integrations else None
 
 
+def get_github_integration_for_user(db, user_id: int):
+    """Return first Integration where provider=GITHUB and status=ACTIVE for the user, or None."""
+    return (
+        db.query(Integration)
+        .filter(
+            Integration.user_id == user_id,
+            Integration.provider == "GITHUB",
+            Integration.status == "ACTIVE",
+        )
+        .first()
+    )
+
+
 def get_repo_name_from_integration(integration: Integration, service_name: str = None) -> str:
     """
     Get repository name from integration config based on service mappings.
@@ -563,7 +576,8 @@ def process_log_entry_from_redpanda(task_data: Dict[str, Any]):
 
         # 2. Incident Logic
         # Only care about ERROR or CRITICAL
-        if log.severity.upper() in ["ERROR", "CRITICAL"]:
+        severity_upper = (log.severity or "").upper()
+        if severity_upper in ["ERROR", "CRITICAL"]:
             print(f"Processing critical log: {log.message[:50]}... Checking for existing incidents...")
 
             # Deduplication: Look for OPEN incidents for same service & source in last 3 mins
@@ -611,13 +625,18 @@ def process_log_entry_from_redpanda(task_data: Dict[str, Any]):
 
                     # Get repo_name if integration is available
                     if existing_incident.integration_id and not existing_incident.repo_name:
+                        repo_name_existing = None
                         if not integration_obj:
                             integration_obj = get_cached_integration(db, existing_incident.integration_id, integration_cache)
                         if integration_obj:
-                            repo_name = get_repo_name_from_integration(integration_obj, existing_incident.service_name)
-                            if repo_name:
-                                existing_incident.repo_name = repo_name
-                                print(f"Auto-assigned repo_name {repo_name} to incident {existing_incident.id}")
+                            repo_name_existing = get_repo_name_from_integration(integration_obj, existing_incident.service_name)
+                        if not repo_name_existing:
+                            github_integration = get_github_integration_for_user(db, log.user_id)
+                            if github_integration:
+                                repo_name_existing = get_repo_name_from_integration(github_integration, existing_incident.service_name)
+                        if repo_name_existing:
+                            existing_incident.repo_name = repo_name_existing
+                            print(f"Auto-assigned repo_name {repo_name_existing} to incident {existing_incident.id}")
 
                 # Update metadata_json if log has it and incident doesn't, or merge it
                 if log.metadata_json:
@@ -672,8 +691,13 @@ def process_log_entry_from_redpanda(task_data: Dict[str, Any]):
                         integration_obj = get_cached_integration(db, integration_id, integration_cache)
                     if integration_obj:
                         repo_name = get_repo_name_from_integration(integration_obj, log.service_name)
-                        if repo_name:
-                            print(f"Auto-assigned repo_name {repo_name} to new incident")
+                    if not repo_name:
+                        # SigNoz (and other non-GitHub) integrations don't have repo_name; use GitHub if available
+                        github_integration = get_github_integration_for_user(db, log.user_id)
+                        if github_integration:
+                            repo_name = get_repo_name_from_integration(github_integration, log.service_name)
+                    if repo_name:
+                        print(f"Auto-assigned repo_name {repo_name} to new incident")
 
                 # Generate meaningful title and description from error logs
                 title, description = generate_incident_title_and_description(log, log.service_name)

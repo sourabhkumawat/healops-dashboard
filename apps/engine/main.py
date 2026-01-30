@@ -38,6 +38,7 @@ from src.core.openrouter_client import openrouter_chat_completion, get_api_key
 from src.middleware import APIKeyMiddleware, check_rate_limit
 from src.memory import ensure_partition_exists_for_timestamp
 from src.services.redpanda_task_processor import setup_redpanda_task_processor
+from src.services.signoz_polling_service import start_signoz_polling_background
 from src.services.slack.service import SlackService
 from src.api.controllers.base import get_user_id_from_request
 from src.api.controllers.auth_controller import AuthController, get_current_user, UserUpdateRequest, TestEmailRequest, RegisterRequest
@@ -48,7 +49,7 @@ from src.api.controllers.sourcemaps_controller import SourceMapsController, Sour
 from src.api.controllers.services_controller import ServicesController
 from src.api.controllers.stats_controller import StatsController
 from src.api.controllers.incidents_controller import IncidentsController
-from src.api.controllers.integrations_controller import IntegrationsController, GithubConfig, ServiceMappingRequest, ServiceMappingsUpdateRequest
+from src.api.controllers.integrations_controller import IntegrationsController, GithubConfig, ServiceMappingRequest, ServiceMappingsUpdateRequest, SignozConfig
 from src.api.controllers.linear_ticket_controller import router as linear_ticket_router
 from src.utils.redpanda_websocket_manager import connection_manager as manager, agent_event_manager
 from datetime import timedelta, datetime
@@ -178,6 +179,10 @@ async def startup_event():
         # Initialize Redpanda task processor
         setup_redpanda_task_processor()
         print("✓ Redpanda task processor initialized")
+
+        # Start SigNoz polling (error logs/traces only)
+        start_signoz_polling_background()
+        print("✓ SigNoz polling service started")
 
     except Exception as e:
         print(f"⚠ Error initializing Redpanda services: {e}")
@@ -1759,6 +1764,11 @@ def linear_get_teams(integration_id: int, request: Request, db: Session = Depend
 def github_connect(config: GithubConfig, request: Request, db: Session = Depends(get_db)):
     """GitHub connect - delegates to IntegrationsController."""
     return IntegrationsController.github_connect(config, request, db)
+
+@app.post("/integrations/signoz")
+def add_signoz(config: SignozConfig, request: Request, db: Session = Depends(get_db)):
+    """Add SigNoz integration - delegates to IntegrationsController."""
+    return IntegrationsController.add_signoz(config, request, db)
 
 @app.get("/integrations")
 def list_integrations(request: Request, db: Session = Depends(get_db)):

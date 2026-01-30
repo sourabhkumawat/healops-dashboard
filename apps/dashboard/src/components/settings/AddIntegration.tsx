@@ -16,6 +16,7 @@ import { Cloud, Box, Key, Copy, ExternalLink, Loader2 } from 'lucide-react';
 import {
     generateApiKey,
     connectGithub,
+    connectSignoz,
     listProviders,
     initiateGitHubOAuth,
     initiateLinearOAuth
@@ -31,6 +32,8 @@ export function AddIntegration({ onCancel, onSuccess }: AddIntegrationProps) {
         null
     );
     const [newApiKey, setNewApiKey] = useState('');
+    const [signozUrl, setSignozUrl] = useState('');
+    const [signozApiKey, setSignozApiKey] = useState('');
     const [loading, setLoading] = useState(false);
     const keyCounterRef = useRef(0);
     const [providers, setProviders] = useState<
@@ -218,6 +221,59 @@ export function AddIntegration({ onCancel, onSuccess }: AddIntegrationProps) {
                                 >
                                     <Cloud className="h-4 w-4 mr-2" />
                                     Connect with Linear
+                                </Button>
+                            </div>
+                        ) : selectedProvider === 'signoz' ? (
+                            <div className="space-y-4 py-4">
+                                <p className="text-sm text-zinc-400">
+                                    Connect SigNoz to fetch error logs and error traces only. HealOps will create incidents and, if Linear is connected, create a ticket for each.
+                                </p>
+                                <div className="space-y-2">
+                                    <Label className="text-zinc-100">SigNoz URL</Label>
+                                    <Input
+                                        type="url"
+                                        placeholder="https://app.signoz.io"
+                                        value={signozUrl}
+                                        onChange={(e) => setSignozUrl(e.target.value)}
+                                        className="bg-zinc-800 border-zinc-700 text-zinc-100"
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <Label className="text-zinc-100">API Key</Label>
+                                    <Input
+                                        type="password"
+                                        placeholder="Your SigNoz API key"
+                                        value={signozApiKey}
+                                        onChange={(e) => setSignozApiKey(e.target.value)}
+                                        className="bg-zinc-800 border-zinc-700 text-zinc-100"
+                                    />
+                                </div>
+                                <Button
+                                    onClick={async () => {
+                                        if (!signozUrl.trim() || !signozApiKey.trim()) {
+                                            alert('Please enter SigNoz URL and API key.');
+                                            return;
+                                        }
+                                        setLoading(true);
+                                        const result = await connectSignoz(signozUrl, signozApiKey);
+                                        setLoading(false);
+                                        if (result.error) {
+                                            alert(result.error);
+                                        } else {
+                                            setSignozUrl('');
+                                            setSignozApiKey('');
+                                            onSuccess();
+                                        }
+                                    }}
+                                    disabled={loading}
+                                    className="w-full bg-orange-600 hover:bg-orange-700 text-white"
+                                >
+                                    {loading ? (
+                                        <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                                    ) : (
+                                        <Key className="h-4 w-4 mr-2" />
+                                    )}
+                                    Connect SigNoz
                                 </Button>
                             </div>
                         ) : (

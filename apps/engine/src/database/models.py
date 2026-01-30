@@ -93,6 +93,7 @@ class User(Base):
 class IntegrationProvider(str, enum.Enum):
     GITHUB = "GITHUB"
     LINEAR = "LINEAR"
+    SIGNOZ = "SIGNOZ"
 
 class IntegrationStatusEnum(str, enum.Enum):
     PENDING = "PENDING"

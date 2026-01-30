@@ -51,6 +51,11 @@ class ServiceMappingsUpdateRequest(BaseModel):
     default_repo: Optional[str] = None  # Default repo for services without mapping
 
 
+class SignozConfig(BaseModel):
+    signoz_url: str
+    signoz_api_key: str
+
+
 class IntegrationsController:
     """Controller for integration management."""
     
@@ -682,7 +687,68 @@ class IntegrationsController:
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to get teams: {str(e)}")
-    
+
+    @staticmethod
+    def add_signoz(config: SignozConfig, request: Request, db: Session):
+        """Add SigNoz integration: store URL and encrypted API key; create Integration(SIGNOZ, ACTIVE)."""
+        user_id = get_user_id_from_request(request, db=db)
+        url = (config.signoz_url or "").strip().rstrip("/")
+        if not url:
+            raise HTTPException(status_code=400, detail="signoz_url is required")
+        if not config.signoz_api_key or not config.signoz_api_key.strip():
+            raise HTTPException(status_code=400, detail="signoz_api_key is required")
+        # Optional: verify connection (auth failure or connection error)
+        try:
+            import requests
+            from src.integrations.signoz.client import _post_query_range, _build_logs_query_payload
+            end_ms = int(time.time() * 1000)
+            start_ms = end_ms - 60 * 1000
+            payload = _build_logs_query_payload(start_ms, end_ms, limit=1)
+            _post_query_range(url, config.signoz_api_key.strip(), payload)
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code in (401, 403):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid SigNoz URL or API key. Check Settings in SigNoz for your API key.",
+                )
+            raise HTTPException(status_code=400, detail=f"SigNoz returned error: {str(e)}")
+        except requests.exceptions.RequestException as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not connect to SigNoz: {str(e)}. Check URL and API key.",
+            )
+        existing = (
+            db.query(Integration)
+            .filter(
+                Integration.user_id == user_id,
+                Integration.provider == "SIGNOZ",
+            )
+            .first()
+        )
+        if existing:
+            existing.config = dict(existing.config or {})
+            existing.config["signoz_url"] = url
+            existing.config["signoz_api_key"] = encrypt_token(config.signoz_api_key.strip())
+            existing.status = "ACTIVE"
+            existing.name = "SigNoz"
+            db.commit()
+            db.refresh(existing)
+            return {"id": existing.id, "provider": "SIGNOZ", "status": "ACTIVE", "message": "SigNoz integration updated"}
+        integration = Integration(
+            user_id=user_id,
+            provider="SIGNOZ",
+            name="SigNoz",
+            status="ACTIVE",
+            config={
+                "signoz_url": url,
+                "signoz_api_key": encrypt_token(config.signoz_api_key.strip()),
+            },
+        )
+        db.add(integration)
+        db.commit()
+        db.refresh(integration)
+        return {"id": integration.id, "provider": "SIGNOZ", "status": "ACTIVE", "message": "SigNoz integration added"}
+
     @staticmethod
     def get_integration_config(integration_id: int, request: Request, db: Session):
         """Get integration configuration including service mappings."""
@@ -1355,6 +1421,8 @@ class IntegrationsController:
         if integration.config:
             # Keep basic config but clear sensitive data
             sensitive_keys = ["workspace_id", "user_id", "user_email", "team_id"]
+            if integration.provider == "SIGNOZ":
+                sensitive_keys.extend(["signoz_url", "signoz_api_key"])
             for key in sensitive_keys:
                 integration.config.pop(key, None)
             flag_modified(integration, "config")

@@ -30,6 +30,22 @@ export async function connectGithub(accessToken: string) {
     return await res.json();
 }
 
+export async function connectSignoz(signozUrl: string, signozApiKey: string) {
+    const res = await fetchClient('/integrations/signoz', {
+        method: 'POST',
+        body: JSON.stringify({
+            signoz_url: signozUrl.trim(),
+            signoz_api_key: signozApiKey.trim()
+        })
+    });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const detail = data.detail ?? await res.text();
+        return { error: typeof detail === 'string' ? detail : JSON.stringify(detail) };
+    }
+    return await res.json();
+}
+
 export async function listProviders() {
     const res = await fetchClient('/integrations/providers');
     if (!res.ok) return { providers: [] };
