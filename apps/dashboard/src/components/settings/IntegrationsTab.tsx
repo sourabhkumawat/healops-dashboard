@@ -50,6 +50,15 @@ const AVAILABLE_INTEGRATIONS = [
         logo: '/integration-logos/linear-dark-logo.svg',
         color: 'bg-[#5E6AD2] hover:bg-[#5E6AD2]/90',
         badge: 'NEW'
+    },
+    {
+        id: 'signoz',
+        name: 'SigNoz',
+        description:
+            'Fetch error logs and error traces from SigNoz to create incidents and auto-resolve with PRs.',
+        logo: '/integration-logos/linear-dark-logo.svg',
+        color: 'bg-orange-600/90 hover:bg-orange-600',
+        badge: undefined
     }
 ];
 
@@ -190,6 +199,10 @@ export function IntegrationsTab() {
     };
 
     const handleReconnect = async (integrationId: number, provider: string) => {
+        if (provider === 'SIGNOZ') {
+            alert('To update SigNoz URL or API key, disconnect this integration and add SigNoz again with the new credentials.');
+            return;
+        }
         setReconnecting(integrationId);
         try {
             let result;
@@ -198,7 +211,8 @@ export function IntegrationsTab() {
             } else if (provider === 'LINEAR') {
                 result = await reconnectLinearIntegration(integrationId);
             } else {
-                throw new Error('Unsupported provider for reconnection');
+                setReconnecting(null);
+                return;
             }
 
             if (result.error) {

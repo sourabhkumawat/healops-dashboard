@@ -1990,9 +1990,9 @@ This PR was generated using the enhanced multi-agent system with:
                                         print(f"Full traceback:\n{error_trace}")
                                         result["pr_error"] = str(e)
                                         result["code_fix_explanation"] = f"Enhanced crew execution failed: {str(e)[:200]}. Please check logs for details."
-                        else:
-                            print(f"⚠️  No repository name found for incident {incident.id} (integration {integration.id})")
-                            code_fix_explanation = f"No repository name configured for this service ({incident.service_name}). Please configure the repository name in the GitHub integration settings (service mappings or default repo_name)."
+                    else:
+                        print(f"⚠️  No repository name found for incident {incident.id} (integration {integration.id})")
+                        code_fix_explanation = f"No repository name configured for this service ({incident.service_name}). Please configure the repository name in the GitHub integration settings (service mappings or default repo_name)."
                 except Exception as e:
                     print(f"⚠️  Error during GitHub analysis: {e}")
                     print(traceback.format_exc())

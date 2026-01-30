@@ -55,6 +55,12 @@ export function AddIntegration({ onCancel, onSuccess }: AddIntegrationProps) {
             name: 'Linear',
             icon: Box,
             color: 'text-white'
+        },
+        {
+            id: 'signoz',
+            name: 'SigNoz',
+            icon: Box,
+            color: 'text-white'
         }
     ]);
 
