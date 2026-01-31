@@ -72,7 +72,11 @@ from src.memory.memory import CodeMemory
 from src.integrations.github.integration import GithubIntegration
 from src.database.models import Incident, LogEntry, AgentEmployee
 from sqlalchemy.orm import Session
-from src.core.ai_analysis import get_incident_fingerprint
+from src.core.ai_analysis import (
+    get_incident_fingerprint,
+    extract_file_paths_from_log,
+    extract_file_paths_from_incident_metadata,
+)
 from src.agents.definitions import create_all_enhanced_agents
 from src.tools.coding import set_coding_tools_context, CodingToolsContext
 from src.memory.models import AgentWorkspace
@@ -212,8 +216,14 @@ def run_robust_crew(
         "memory": code_memory
     })
     
-    # Extract file paths from logs
-    affected_files = _extract_file_paths_from_logs(logs)
+    # Extract file paths from incident.metadata_json and logs (stack traces + metadata)
+    combined: List[str] = []
+    if incident.metadata_json and isinstance(incident.metadata_json, dict):
+        combined.extend(extract_file_paths_from_incident_metadata(incident.metadata_json))
+    for log in logs:
+        combined.extend(extract_file_paths_from_log(log))
+    combined.extend(_extract_file_paths_from_logs(logs))
+    affected_files = list(dict.fromkeys(combined))
     
     # Get repository structure to provide available files to the agent
     available_files = []
@@ -292,9 +302,14 @@ def run_robust_crew(
     
     # Scope files for the coding agent: only affected + learned files initially to save cost and time.
     # Agent can use list_files() / read_file() when it needs to view other files.
-    scoped_files_for_agent = list(dict.fromkeys(affected_files)) if affected_files else (available_files[:50] if available_files else [])
-    if scoped_files_for_agent and scoped_files_for_agent != available_files:
+    if affected_files:
+        scoped_files_for_agent = list(dict.fromkeys(affected_files))
         print(f"📁 Scoped coding agent to {len(scoped_files_for_agent)} relevant file(s); use list_files() only when needed.")
+    else:
+        fallback_cap = 20 if (logs or (incident.metadata_json and isinstance(incident.metadata_json, dict))) else 50
+        scoped_files_for_agent = (available_files[:fallback_cap] if available_files else [])
+        if scoped_files_for_agent:
+            print(f"📁 No file paths from stack trace or metadata; scoped to first {len(scoped_files_for_agent)} repo files.")
     
     # Index knowledge base
     # Note: Full repository indexing happens at connection time via CocoIndex

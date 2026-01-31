@@ -709,6 +709,19 @@ def normalize_path(path: str) -> str:
     return path.lstrip("/")
 
 
+def _filter_and_normalize_paths(paths: list[str], *, dedupe: bool = False) -> list[str]:
+    """
+    Filter out node_modules and .next, normalize each path.
+    Optionally deduplicate (order preserved).
+    """
+    valid_paths: list[str] = []
+    for p in paths:
+        if not p or "/node_modules/" in p or "/.next/" in p:
+            continue
+        valid_paths.append(normalize_path(p))
+    return list(dict.fromkeys(valid_paths)) if dedupe else valid_paths
+
+
 def extract_file_paths_from_log(log: LogEntry) -> list[str]:
     """
     Extract potential file paths from log message and metadata.
@@ -750,17 +763,40 @@ def extract_file_paths_from_log(log: LogEntry) -> list[str]:
     # Also check message for stack trace-like patterns if it's long
     if log.message and len(log.message) > 100 and ("File \"" in log.message or "at " in log.message):
         paths.extend(extract_paths_from_stacktrace(log.message))
-        
-    # Filter and Normalize
-    valid_paths = []
-    for p in paths:
-        # Filter out node_modules and .next (build artifacts)
-        if "/node_modules/" in p or "/.next/" in p:
-            continue
-            
-        valid_paths.append(normalize_path(p))
-        
-    return valid_paths
+
+    return _filter_and_normalize_paths(paths)
+
+
+def extract_file_paths_from_incident_metadata(metadata_json: dict) -> list[str]:
+    """
+    Extract file paths from incident.metadata_json (stack traces and direct path fields).
+    Filters out node_modules and .next; returns normalized, deduplicated paths.
+    """
+    if not isinstance(metadata_json, dict):
+        return []
+
+    paths: list[str] = []
+
+    # Direct path fields
+    for key in ("filePath", "code.file.path"):
+        val = metadata_json.get(key)
+        if val and isinstance(val, str):
+            paths.append(val)
+
+    # Stack trace string fields
+    for key in ("stack", "errorStack", "fullStack"):
+        val = metadata_json.get(key)
+        if val and isinstance(val, str):
+            paths.extend(extract_paths_from_stacktrace(val))
+
+    # exception.stacktrace (nested)
+    exc = metadata_json.get("exception")
+    if isinstance(exc, dict):
+        st = exc.get("stacktrace")
+        if st and isinstance(st, str):
+            paths.extend(extract_paths_from_stacktrace(st))
+
+    return _filter_and_normalize_paths(paths, dedupe=True)
 
 
 def get_trace_logs(logs: list[LogEntry], db: Session, user_id: Optional[int] = None) -> list[LogEntry]:

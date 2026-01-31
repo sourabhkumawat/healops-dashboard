@@ -277,9 +277,11 @@ class LinearTicketResolver:
                     }
                 }
 
-            # 2. Update Linear ticket status to "In Progress"
+            # 2. Update Linear ticket status to "In Progress" (pass team_id so correct workflow is used)
+            team_id = (ticket.get("team") or {}).get("id") if isinstance(ticket.get("team"), dict) else None
             await self._update_ticket_status(ticket_id, "In Progress",
-                                           f"🤖 Automated resolution started by coding agent")
+                                           f"🤖 Automated resolution started by coding agent",
+                                           team_id=team_id)
 
             # 3. Update attempt status
             attempt.status = LinearResolutionAttemptStatus.ANALYZING
@@ -366,7 +368,8 @@ class LinearTicketResolver:
 
             # Update Linear ticket with more helpful error message
             error_msg = f"❌ Automated resolution failed: {str(e)[:100]}"
-            await self._update_ticket_status(ticket_id, "Todo", error_msg)
+            team_id = (ticket.get("team") or {}).get("id") if isinstance(ticket.get("team"), dict) else None
+            await self._update_ticket_status(ticket_id, "Todo", error_msg, team_id=team_id)
 
             return {
                 "success": False,
@@ -425,7 +428,8 @@ class LinearTicketResolver:
 
             # Update Linear ticket
             resolution_message = self._build_resolution_message(action_taken, pr_url)
-            await self._update_ticket_with_resolution(ticket_id, resolution_message)
+            team_id = (ticket.get("team") or {}).get("id") if isinstance(ticket.get("team"), dict) else None
+            await self._update_ticket_with_resolution(ticket_id, resolution_message, team_id=team_id)
 
             # Clean up temporary incident
             self.db.delete(incident)
@@ -438,8 +442,10 @@ class LinearTicketResolver:
             attempt.completed_at = datetime.utcnow()
 
             # Update Linear ticket
+            team_id = (ticket.get("team") or {}).get("id") if isinstance(ticket.get("team"), dict) else None
             await self._update_ticket_status(ticket_id, "Todo",
-                                           f"❌ Automated resolution failed: {failure_reason[:100]}")
+                                           f"❌ Automated resolution failed: {failure_reason[:100]}",
+                                           team_id=team_id)
 
             # Clean up temporary incident
             self.db.delete(incident)
@@ -479,25 +485,38 @@ class LinearTicketResolver:
 
         return "\n".join(parts)
 
-    async def _update_ticket_status(self, ticket_id: str, state_name: str, comment: str):
-        """Update Linear ticket status and add comment."""
+    async def _update_ticket_status(
+        self,
+        ticket_id: str,
+        state_name: str,
+        comment: str,
+        team_id: Optional[str] = None
+    ):
+        """Update Linear ticket status and add comment. Pass team_id so the correct workflow states are used."""
         try:
-            # Update state
-            self.linear.update_issue_state(ticket_id, state_name)
+            # Update state (team_id required for correct workflow state lookup per team)
+            self.linear.update_issue_state(ticket_id, state_name, team_id=team_id)
 
             # Add comment
             self.linear.add_comment_to_issue(ticket_id, comment)
-
+            logger.info("Updated Linear ticket %s to state '%s'", ticket_id, state_name)
         except Exception as e:
+            logger.exception("Failed to update Linear ticket %s to '%s': %s", ticket_id, state_name, e)
             print(f"⚠️  Error updating Linear ticket status: {e}")
 
-    async def _update_ticket_with_resolution(self, ticket_id: str, resolution_message: str):
-        """Update Linear ticket with resolution details."""
+    async def _update_ticket_with_resolution(
+        self,
+        ticket_id: str,
+        resolution_message: str,
+        team_id: Optional[str] = None
+    ):
+        """Update Linear ticket with resolution details. Pass team_id for correct workflow state."""
         try:
             # Update ticket with resolution and mark as done
-            self.linear.update_issue_with_resolution(ticket_id, resolution_message, "Done")
-
+            self.linear.update_issue_with_resolution(ticket_id, resolution_message, "Done", team_id=team_id)
+            logger.info("Updated Linear ticket %s with resolution and set to Done", ticket_id)
         except Exception as e:
+            logger.exception("Failed to update Linear ticket %s with resolution: %s", ticket_id, e)
             print(f"⚠️  Error updating Linear ticket with resolution: {e}")
 
     def _get_repository_name(self) -> Optional[str]:
