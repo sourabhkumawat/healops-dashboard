@@ -214,6 +214,10 @@ export async function initiateGitHubOAuth() {
         const data = await res.json().catch(() => ({}));
         if (data.redirect_url) return { redirectUrl: data.redirect_url };
     }
+    // 401 = not logged in or session expired; fetchClient may redirect to /login
+    if (res.status === 401) {
+        return { error: 'Please log in to connect GitHub. If you were redirected to the login page, sign in and try again.' };
+    }
     const text = await res.text().catch(() => '');
     try {
         const err = text ? JSON.parse(text) : {};
@@ -232,6 +236,9 @@ export async function reconnectGitHubIntegration(integrationId: number) {
     if (res.ok) {
         const data = await res.json().catch(() => ({}));
         if (data.redirect_url) return { redirectUrl: data.redirect_url };
+    }
+    if (res.status === 401) {
+        return { error: 'Please log in to reconnect GitHub. Sign in and try again.' };
     }
     const text = await res.text().catch(() => '');
     try {

@@ -362,6 +362,152 @@ def extract_paths_from_stacktrace(text: str) -> list[str]:
     return paths
 
 
+def extract_path_line_pairs_from_stacktrace(text: str) -> List[Tuple[str, int]]:
+    """Extract (file_path, line) pairs from a stack trace string. Filters bundled paths."""
+    pairs: List[Tuple[str, int]] = []
+    if not text or not text.strip():
+        return pairs
+
+    # Python: File "/path/to/file.py", line 123
+    python_pattern = r'File "([^"]+)", line (\d+)'
+    for m in re.finditer(python_pattern, text):
+        path, line_str = m.group(1), m.group(2)
+        try:
+            pairs.append((path.strip(), int(line_str)))
+        except ValueError:
+            continue
+
+    # Node.js/JS: at ... (/path/to/file.js:123:45) or path:123:45
+    js_pattern = r'(?:at\s+.*?\s+)?\(?([^:)]+(?:\.js|\.ts|\.jsx|\.tsx)):(\d+):\d+\)?'
+    bundled_patterns = [
+        r'/_next/static/chunks/',
+        r'/_next/static/.*\.js',
+        r'webpack://',
+        r'\.min\.js',
+        r'chunk-[a-f0-9]+\.js',
+    ]
+    for m in re.finditer(js_pattern, text):
+        path, line_str = m.group(1).strip(), m.group(2)
+        if any(re.search(p, path) for p in bundled_patterns):
+            continue
+        try:
+            pairs.append((path, int(line_str)))
+        except ValueError:
+            continue
+
+    return pairs
+
+
+def collect_path_line_pairs_from_incident_and_logs(
+    incident: Incident, logs: list[LogEntry]
+) -> List[Tuple[str, int]]:
+    """Collect (file_path, line) pairs from incident and logs. Deduplicated, filtered (no node_modules)."""
+    seen: set = set()
+    result: List[Tuple[str, int]] = []
+    trace_strings = _collect_stack_traces_from_incident(incident, logs)
+    for trace_str in trace_strings:
+        for path, line in extract_path_line_pairs_from_stacktrace(trace_str):
+            normalized = normalize_path(path)
+            if not normalized or "/node_modules/" in path or "/.next/" in path:
+                continue
+            key = (normalized, line)
+            if key not in seen:
+                seen.add(key)
+                result.append((normalized, line))
+    return result
+
+
+def fetch_code_snippets_for_rca(
+    incident: Incident,
+    logs: list[LogEntry],
+    repo_name: Optional[str],
+    github_integration: Optional[Any],
+) -> List[Dict[str, Any]]:
+    """Fetch code snippets at (path, line) for deep RCA. Returns list of {file, line, snippet}."""
+    pairs = collect_path_line_pairs_from_incident_and_logs(incident, logs)
+    snippets: List[Dict[str, Any]] = []
+    for path, line in pairs[:20]:  # Limit to 20 locations
+        if repo_name and github_integration:
+            try:
+                content = github_integration.get_file_contents(repo_name, path, ref="main")
+                if content:
+                    lines_arr = content.splitlines()
+                    start = max(0, line - 6)  # 0-based; show ±5 lines
+                    end = min(len(lines_arr), line + 5)
+                    snippet_text = "\n".join(lines_arr[start:end])
+                    snippets.append({"file": path, "line": line, "snippet": snippet_text})
+                else:
+                    snippets.append({"file": path, "line": line, "snippet": f"{path}:{line}"})
+            except Exception as e:
+                print(f"⚠️  Failed to fetch snippet for {path}:{line}: {e}")
+                snippets.append({"file": path, "line": line, "snippet": f"{path}:{line}"})
+        else:
+            snippets.append({"file": path, "line": line, "snippet": f"{path}:{line}"})
+    return snippets
+
+
+def build_deep_rca_string(
+    incident: Incident,
+    logs: list[LogEntry],
+    root_cause: str,
+    action_taken: Optional[str],
+    snippets: List[Dict[str, Any]],
+) -> str:
+    """Build a markdown string for deep RCA: root cause, action taken, and code snippets."""
+    parts = [
+        "## Root Cause",
+        root_cause or "Not determined.",
+        "",
+        "## Recommended Action",
+        action_taken or "None.",
+        "",
+    ]
+    if snippets:
+        parts.append("## Code Locations / Snippets")
+        for s in snippets[:10]:
+            file_path = s.get("file", "?")
+            line = s.get("line", "?")
+            snippet = s.get("snippet", "")
+            parts.append(f"### {file_path}:{line}")
+            if snippet and ":" not in snippet.strip()[:50]:  # Likely actual code
+                parts.append("```")
+                parts.append(snippet[:1500])
+                parts.append("```")
+            else:
+                parts.append(snippet)
+            parts.append("")
+    return "\n".join(parts)
+
+
+def generate_cursor_prompt(
+    deep_rca_str: str, incident_title: str, service_name: str
+) -> str:
+    """Generate a copy-paste-ready Cursor prompt from deep RCA. Uses OpenRouter."""
+    if not get_api_key():
+        return "Set OPENCOUNCIL_API to generate Cursor prompt."
+    cfg = MODEL_CONFIG.get("simple_analysis", {"model": "xiaomi/mimo-v2-flash", "max_tokens": 500, "temperature": 0.3})
+    prompt = f"""Given this incident RCA, write a single short prompt that a developer can copy-paste into Cursor to fix the issue. Be specific: mention file paths and line numbers from the RCA. Output only the prompt, no preamble.
+
+Incident: {incident_title}
+Service: {service_name}
+
+RCA:
+{deep_rca_str[:6000]}
+
+Cursor prompt (one short paragraph):"""
+    r = openrouter_chat_completion(
+        cfg["model"],
+        [{"role": "user", "content": prompt}],
+        temperature=cfg.get("temperature", 0.3),
+        max_tokens=cfg.get("max_tokens", 500),
+        timeout=int(os.getenv("HTTP_LLM_API_TIMEOUT", "60")),
+        title="HealOps Cursor Prompt",
+    )
+    if r.get("success") and r.get("content"):
+        return (r["content"] or "").strip()
+    return "Failed to generate Cursor prompt."
+
+
 def is_stacktrace_from_node_modules(stack_trace: str) -> bool:
     """
     Use AI to determine if a stack trace is from node_modules or actual application code.
@@ -1777,6 +1923,12 @@ Keep the root_cause to 2-3 sentences max, and action_taken to 1-2 sentences max.
                                     result["resolution_skipped"] = True
                                     result["resolution_skipped_reason"] = "node_modules_or_external_code"
                                     # Skip agent execution - will continue to code_fix_explanation handling at end
+                                elif not (os.getenv("ENABLE_CODING_AGENT", "").strip().lower() in ("1", "true", "yes")):
+                                    # Coding agent disabled: RCA + Slack only; keep code path for future
+                                    code_fix_explanation = (
+                                        "Coding agent is disabled. RCA and Cursor prompt have been sent to Slack. "
+                                        "Set ENABLE_CODING_AGENT=1 to enable automatic code fixes."
+                                    )
                                 else:
                                     # Use robust crew system (Manus-style architecture)
                                     try:

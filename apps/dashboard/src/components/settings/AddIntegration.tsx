@@ -186,7 +186,9 @@ export function AddIntegration({ onCancel, onSuccess }: AddIntegrationProps) {
                                                 result.error
                                             );
                                             alert(
-                                                'Failed to connect GitHub. Please try again.'
+                                                result.error.includes('log in')
+                                                    ? result.error
+                                                    : 'Failed to connect GitHub. Please try again.'
                                             );
                                         } else if (result.redirectUrl) {
                                             window.location.href =

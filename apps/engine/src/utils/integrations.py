@@ -63,6 +63,28 @@ def backfill_integration_to_incidents(db: Session, integration_id: int, user_id:
         print(f"✅ Backfilled integration {integration_id} to {updated_count} incident(s)")
 
 
+def get_github_integration_for_user(db: Session, user_id: int) -> Optional[Integration]:
+    """
+    Get active GitHub integration for a user.
+
+    Args:
+        db: Database session
+        user_id: User ID
+
+    Returns:
+        Integration object or None if not found
+    """
+    return (
+        db.query(Integration)
+        .filter(
+            Integration.user_id == user_id,
+            Integration.provider == "GITHUB",
+            Integration.status == "ACTIVE",
+        )
+        .first()
+    )
+
+
 def get_linear_integration_for_user(db: Session, user_id: int) -> Optional[Integration]:
     """
     Get active Linear integration for a user.

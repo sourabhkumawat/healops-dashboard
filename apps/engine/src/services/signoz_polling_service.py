@@ -76,8 +76,11 @@ def _update_last_processed(db: Session, integration: Integration, end_ts_ms: int
 
 
 def _run_one_cycle() -> None:
-    """Load active SigNoz integrations, fetch error events, create LogEntries, publish tasks."""
-    from src.services.redpanda_task_processor import publish_log_processing_task
+    """Load active SigNoz integrations, fetch error events, create LogEntries, process incidents, publish tasks."""
+    from src.services.redpanda_task_processor import (
+        process_log_entry_from_redpanda,
+        publish_log_processing_task,
+    )
 
     db = SessionLocal()
     try:
@@ -113,6 +116,12 @@ def _run_one_cycle() -> None:
                 db.add(log_entry)
                 db.commit()
                 db.refresh(log_entry)
+                task_data = {
+                    "task_type": "process_log_entry",
+                    "log_id": log_entry.id,
+                    "created_at": log_ts.isoformat(),
+                }
+                process_log_entry_from_redpanda(task_data)
                 publish_log_processing_task(log_entry.id)
             # Update cursor after each successful run (plan: update last_processed_end_ts after each successful run)
             _update_last_processed(db, integration, end_ms)

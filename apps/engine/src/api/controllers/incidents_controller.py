@@ -11,12 +11,12 @@ from fastapi import Request, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 
 from src.api.controllers.base import get_user_id_from_request
-from src.core.ai_analysis import analyze_incident_with_openrouter
 from src.database.database import SessionLocal
 from src.database.models import Incident, LogEntry, User, IncidentStatus, IncidentSeverity, Integration
 from src.middleware import check_rate_limit
 from src.services.email.service import send_incident_resolved_email
 from src.services.incident_resolution_requests import ensure_incident_resolution_requested, run_incident_resolution_job
+from src.services.rca_cursor_slack import rca_cursor_slack_flow
 from src.utils.integrations import sync_linear_ticket_status, sync_linear_ticket_resolution
 
 
@@ -226,112 +226,20 @@ class IncidentsController:
                 print(f"❌ Incident {incident_id} not found for analysis")
                 return
             
-            # Fetch related logs
-            logs = []
-            if incident.log_ids:
-                # Ensure log_ids is a list and not empty
-                log_id_list = incident.log_ids if isinstance(incident.log_ids, list) else []
-                if log_id_list:
-                    logs = db.query(LogEntry).filter(LogEntry.id.in_(log_id_list)).order_by(LogEntry.timestamp.desc()).all()
-            
-            # Perform analysis
-            analysis = analyze_incident_with_openrouter(incident, logs, db)
-            
-            # Update incident with analysis results
-            # Always update root_cause (even if it's an error message) to stop infinite loading
-            if analysis.get("root_cause"):
-                incident.root_cause = analysis["root_cause"]
-            if analysis.get("action_taken"):
-                incident.action_taken = analysis["action_taken"]
-            
-            # Store PR information in action_result if PR was created
-            if analysis.get("pr_url"):
-                changes = analysis.get("changes", {})
-                original_contents = analysis.get("original_contents", {})
-                
-                # Ensure original_contents has entries for all changed files
-                # If missing, set to empty string (new file) to prevent UI errors
-                for file_path in changes.keys():
-                    if file_path not in original_contents:
-                        original_contents[file_path] = ""
-                
-                incident.action_result = {
-                    "pr_url": analysis.get("pr_url"),
-                    "pr_number": analysis.get("pr_number"),
-                    "pr_files_changed": analysis.get("pr_files_changed", []),
-                    "changes": changes,
-                    "original_contents": original_contents,
-                    "is_draft": analysis.get("is_draft", False),
-                    "confidence_score": analysis.get("confidence_score"),
-                    "decision": analysis.get("decision", {}),
-                    "status": "pr_created_draft" if analysis.get("is_draft") else "pr_created"
-                }
-                pr_type = "DRAFT PR" if analysis.get("is_draft") else "PR"
-                print(f"✅ {pr_type} created for incident {incident_id}: {analysis.get('pr_url')}")
-            elif analysis.get("pr_error"):
-                # Store PR error if creation failed
-                incident.action_result = {
-                    "status": "pr_failed",
-                    "error": analysis.get("pr_error"),
-                    "code_fix_explanation": analysis.get("code_fix_explanation", f"Failed to create pull request: {analysis.get('pr_error')}")
-                }
-            elif analysis.get("changes"):
-                # Store changes even if PR wasn't created (for UI display)
-                changes = analysis.get("changes", {})
-                original_contents = analysis.get("original_contents", {})
-                
-                # Ensure original_contents has entries for all changed files
-                # If missing, set to empty string (new file) to prevent UI errors
-                for file_path in changes.keys():
-                    if file_path not in original_contents:
-                        original_contents[file_path] = ""
-                
-                incident.action_result = {
-                    "changes": changes,
-                    "original_contents": original_contents,
-                    "pr_files_changed": list(changes.keys()),  # Set file list for UI display
-                    "confidence_score": analysis.get("confidence_score"),
-                    "decision": analysis.get("decision", {}),
-                    "status": "changes_generated",
-                    "code_fix_explanation": analysis.get("code_fix_explanation")
-                }
-                print(f"📝 Changes generated for incident {incident_id} (no PR created)")
-            
-            # Store explanation if no code fixes were attempted
-            elif analysis.get("code_fix_explanation"):
-                incident.action_result = {
-                    "status": "no_code_fix",
-                    "code_fix_explanation": analysis.get("code_fix_explanation")
-                }
-            
-            # Ensure we always set something to stop infinite loading
-            if not incident.root_cause:
-                incident.root_cause = "Analysis failed - no results returned. Please check logs."
-            
-            # Commit with error handling
+            # Run RCA + Cursor prompt + Slack only (no analyze_incident_with_openrouter).
             try:
-                db.commit()
+                rca_cursor_slack_flow(incident_id, user_id)
                 analysis_success = True
-            except Exception as commit_error:
-                db.rollback()
-                print(f"❌ Failed to commit analysis results for incident {incident_id}: {commit_error}")
-                # Try to set error message and commit again
-                try:
-                    incident.root_cause = f"Analysis completed but failed to save: {str(commit_error)[:200]}"
-                    db.commit()
-                except Exception as retry_error:
-                    db.rollback()
-                    print(f"❌ Failed to save error message: {retry_error}")
+                print(f"✅ RCA + Cursor + Slack completed for incident {incident_id}")
+            except Exception as rca_err:
+                print(f"⚠️  RCA/Slack flow failed for incident {incident_id}: {rca_err}")
             
             analysis_duration = time.time() - analysis_start_time
             if analysis_success:
-                print(f"✅ AI analysis completed for incident {incident_id}: {incident.root_cause[:100]}")
-            
-            # Track successful analysis analytics
-            try:
-                print(f"📊 Analytics: Analysis succeeded for incident {incident_id}, duration: {analysis_duration:.2f}s, user: {user_id}")
-            except Exception as analytics_error:
-                print(f"⚠️  Failed to track analytics: {analytics_error}")
+                try:
+                    print(f"📊 Analytics: RCA+Slack succeeded for incident {incident_id}, duration: {analysis_duration:.2f}s, user: {user_id}")
+                except Exception as analytics_error:
+                    print(f"⚠️  Failed to track analytics: {analytics_error}")
             
         except Exception as e:
             error_trace = traceback.format_exc()
@@ -489,7 +397,7 @@ class IncidentsController:
         Test endpoint to run the incident resolution pipeline (same as production).
 
         This endpoint calls the same code path as production incident resolution:
-        run_incident_resolution_job -> analyze_incident_with_openrouter -> (if code needed) run_robust_crew.
+        run_incident_resolution_job -> rca_cursor_slack_flow (RCA + Cursor prompt + Slack).
         No duplicate logic; it only invokes the original coding agent flow.
 
         NOTE: This endpoint does NOT require authentication - it's for testing only.

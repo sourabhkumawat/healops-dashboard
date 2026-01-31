@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from src.database.models import Incident, LogEntry
 from src.database.database import SessionLocal
 from src.services.redpanda_service import redpanda_service
-from src.core.ai_analysis import analyze_incident_with_openrouter
+from src.services.rca_cursor_slack import rca_cursor_slack_flow
 
 ResolutionStatus = Literal["queued", "running", "completed", "failed"]
 
@@ -115,14 +115,28 @@ def ensure_incident_resolution_requested(
         task_data, key=str(incident_id)
     )
     if not published:
-        # Mark failed if we couldn't publish the trigger.
-        failed_meta = dict(queued_meta)
-        failed_meta["status"] = "failed"
-        failed_meta["last_error"] = "failed_to_publish_redpanda_task"
-        _set_resolution_meta(incident, failed_meta)
-        db.commit()
+        # Fallback: run resolution inline so we still get analysis + RCA + Cursor + Slack
+        import logging
+        logging.getLogger(__name__).info(
+            "Redpanda publish failed for incident %s, running resolution inline",
+            incident_id,
+        )
+        try:
+            run_incident_resolution_job(
+                incident_id=incident_id,
+                requested_by_user_id=requested_by_user_id,
+            )
+        except Exception as e:
+            failed_meta = dict(queued_meta)
+            failed_meta["status"] = "failed"
+            failed_meta["last_error"] = f"inline_fallback_error: {str(e)[:200]}"
+            _set_resolution_meta(incident, failed_meta)
+            db.commit()
+            return ResolutionRequestResult(
+                enqueued=False, resolution_status="failed", reason="publish_failed_and_inline_failed"
+            )
         return ResolutionRequestResult(
-            enqueued=False, resolution_status="failed", reason="publish_failed"
+            enqueued=False, resolution_status="completed", reason="ran_inline_after_publish_failed"
         )
 
     return ResolutionRequestResult(
@@ -214,8 +228,18 @@ def run_incident_resolution_job(*, incident_id: int, requested_by_user_id: int) 
                     .all()
                 )
 
-        result = analyze_incident_with_openrouter(incident, logs, db)
-        # analyze_incident_with_openrouter is expected to update incident fields and commit.
+        # Run RCA + Cursor prompt + Slack only (no analyze_incident_with_openrouter).
+        result = None
+        try:
+            rca_cursor_slack_flow(incident_id, requested_by_user_id)
+            result = True
+        except Exception as rca_err:
+            import logging
+            logging.getLogger(__name__).warning(
+                "rca_cursor_slack_flow failed for incident %s (Redpanda path): %s",
+                incident_id,
+                rca_err,
+            )
         return {"success": True, "result": result}
     finally:
         db.close()

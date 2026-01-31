@@ -169,12 +169,23 @@ async def process_log_background(log_data: dict, api_key_id: int, user_id: int, 
                 )
                 await asyncio.to_thread(_persist_log_sync, db, db_log)
                 
-                # Trigger incident check
+                # Always run incident processing inline so incidents are created even when
+                # Redpanda consumer is down or publish fails (publish is best-effort for scale).
                 try:
-                    from src.services.redpanda_task_processor import publish_log_processing_task
+                    from src.services.redpanda_task_processor import (
+                        process_log_entry_from_redpanda,
+                        publish_log_processing_task,
+                    )
+                    task_data = {
+                        "task_type": "process_log_entry",
+                        "log_id": db_log.id,
+                        "created_at": datetime.utcnow().isoformat(),
+                    }
+                    process_log_entry_from_redpanda(task_data)
+                    # Optionally publish for async consumers (e.g. multiple workers)
                     publish_log_processing_task(db_log.id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Error triggering incident processing for log {db_log.id}: {e}")
             except Exception as e:
                 print(f"Error in background log processing: {e}")
     finally:
@@ -299,9 +310,12 @@ async def process_otel_spans_background(payload_dict: dict, api_key_id: int, use
             
             await asyncio.to_thread(_bulk_insert_logs_sync, db, logs_to_add)
             
-            # Trigger incident checks
+            # Trigger incident checks: run inline so incidents are always created
             try:
-                from src.services.redpanda_task_processor import publish_log_processing_task
+                from src.services.redpanda_task_processor import (
+                    process_log_entry_from_redpanda,
+                    publish_log_processing_task,
+                )
                 # Fetch recent logs to get IDs
                 def _fetch_recent_logs_sync(db: Session, service_name: str, source: str, limit: int):
                     return db.query(LogEntry).filter(
@@ -318,9 +332,15 @@ async def process_otel_spans_background(payload_dict: dict, api_key_id: int, use
                 )
                 
                 for log in recent_logs:
+                    task_data = {
+                        "task_type": "process_log_entry",
+                        "log_id": log.id,
+                        "created_at": datetime.utcnow().isoformat(),
+                    }
+                    process_log_entry_from_redpanda(task_data)
                     publish_log_processing_task(log.id)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error triggering incident processing for OTel batch: {e}")
     finally:
         if close_db:
             db.close()

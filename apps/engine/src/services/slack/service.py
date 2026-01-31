@@ -613,3 +613,39 @@ class SlackService:
                 "success": False,
                 "error": str(e)
             }
+
+
+def build_rca_cursor_slack_blocks(
+    incident_id: int,
+    title: str,
+    deep_rca_str: str,
+    cursor_prompt_str: str,
+) -> tuple:
+    """Build Slack Block Kit blocks and fallback text for RCA + Cursor prompt. Truncates to ~3000 chars per block."""
+    MAX = 3000
+    rca_trunc = deep_rca_str[:MAX] + ("..." if len(deep_rca_str) > MAX else "")
+    prompt_trunc = cursor_prompt_str[:MAX] + ("..." if len(cursor_prompt_str) > MAX else "")
+    blocks: List[Dict[str, Any]] = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "RCA + Cursor prompt", "emoji": True},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Incident #{incident_id}:* {title[:200]}"},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Deep RCA:*\n{rca_trunc}"},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*Copy Cursor prompt below:*"},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"```{prompt_trunc.replace('```', '`')}```"},
+        },
+    ]
+    fallback_text = f"Incident #{incident_id}: {title}\n\nRCA: {rca_trunc[:500]}...\n\nCursor prompt: {prompt_trunc[:500]}..."
+    return blocks, fallback_text

@@ -169,7 +169,11 @@ export function IntegrationsTab() {
                 const result = await initiateGitHubOAuth();
                 if (result.error) {
                     console.error('Failed to initiate OAuth:', result.error);
-                    alert('Failed to connect GitHub. Please try again.');
+                    alert(
+                        result.error.includes('log in')
+                            ? result.error
+                            : 'Failed to connect GitHub. Please try again.'
+                    );
                 } else if (result.redirectUrl) {
                     window.location.href = result.redirectUrl;
                 }

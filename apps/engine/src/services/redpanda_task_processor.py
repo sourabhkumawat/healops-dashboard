@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import json
 import asyncio
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime
 from contextlib import contextmanager
 
@@ -23,9 +23,11 @@ from src.services.incident_resolution_requests import (
     mark_incident_resolution_failed,
     run_incident_resolution_job,
 )
+from src.services.rca_cursor_slack import rca_cursor_slack_flow
 from src.database.database import SessionLocal
 from src.database.models import LogEntry, Incident, IncidentSeverity, IntegrationStatus, IntegrationStatusEnum, Integration
 from src.core.ai_analysis import generate_incident_title_and_description, build_enhanced_linear_description
+from src.utils.integrations import get_github_integration_for_user
 from sqlalchemy import func
 from sqlalchemy.orm import joinedload, selectinload
 from datetime import datetime, timedelta
@@ -157,15 +159,49 @@ def route_incident_task(task_data: Dict[str, Any]):
     Route incident-topic tasks by task_type.
 
     - process_log_entry: existing log->incident processing
-    - resolve_incident: heavy incident resolution (agent)
+    - resolve_incident: heavy incident resolution (analysis + RCA + Cursor + Slack)
+    - rca_cursor_slack: deep RCA + Cursor prompt + Slack only (incident must have root_cause)
     """
     task_type = task_data.get("task_type")
     if task_type == "process_log_entry":
         return process_log_entry_from_redpanda(task_data)
     if task_type == "resolve_incident":
         return handle_resolve_incident_task(task_data)
+    if task_type == "rca_cursor_slack":
+        return handle_rca_cursor_slack_task(task_data)
     print(f"⚠️  Unknown incident task type: {task_type}")
     return None
+
+
+def handle_rca_cursor_slack_task(task_data: Dict[str, Any]):
+    """
+    Consume from Redpanda: run deep RCA, create Cursor prompt, persist to action_result, send to Slack.
+    Incident should already have root_cause (e.g. from prior analysis).
+    """
+    incident_id = task_data.get("incident_id")
+    user_id = task_data.get("user_id")
+    if not incident_id:
+        print("⚠️  rca_cursor_slack task missing incident_id")
+        return None
+    uid = user_id
+    if uid is None:
+        db = SessionLocal()
+        try:
+            inc = db.query(Incident).filter(Incident.id == incident_id).first()
+            if inc:
+                uid = inc.user_id
+        finally:
+            db.close()
+    print(f"🔄 [Redpanda Consumer] Running RCA + Cursor + Slack for incident {incident_id}")
+    try:
+        rca_cursor_slack_flow(int(incident_id), uid)
+        print(f"✓ RCA + Cursor + Slack completed for incident {incident_id}")
+        return f"rca_cursor_slack done: {incident_id}"
+    except Exception as e:
+        print(f"✗ RCA + Cursor + Slack failed for incident {incident_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def handle_resolve_incident_task(task_data: Dict[str, Any]):
@@ -269,19 +305,6 @@ def get_available_integration_for_user(db, user_id: int, service_name: str = Non
 
     # Return the first available integration
     return integrations[0].id if integrations else None, integrations[0] if integrations else None
-
-
-def get_github_integration_for_user(db, user_id: int):
-    """Return first Integration where provider=GITHUB and status=ACTIVE for the user, or None."""
-    return (
-        db.query(Integration)
-        .filter(
-            Integration.user_id == user_id,
-            Integration.provider == "GITHUB",
-            Integration.status == "ACTIVE",
-        )
-        .first()
-    )
 
 
 def get_repo_name_from_integration(integration: Integration, service_name: str = None) -> str:
@@ -664,10 +687,15 @@ def process_log_entry_from_redpanda(task_data: Dict[str, Any]):
                     db.rollback()
                     raise
 
-                # Automatically trigger analysis if root_cause is not set
+                # Queue resolution via Redpanda so consumer runs analysis + deep RCA + Cursor prompt + Slack
                 if not existing_incident.root_cause:
-                    print(f"🤖 Auto-triggering analysis for incident {existing_incident.id}")
-                    trigger_incident_analysis_async(existing_incident.id, existing_incident.user_id)
+                    print(f"🤖 Queuing resolution (analysis + RCA + Cursor + Slack) for incident {existing_incident.id}")
+                    ensure_incident_resolution_requested(
+                        db=db,
+                        incident_id=existing_incident.id,
+                        requested_by_user_id=existing_incident.user_id,
+                        requested_by_trigger="incident_updated_from_log",
+                    )
 
                 return f"Updated incident: {existing_incident.id}"
 
@@ -895,6 +923,27 @@ def publish_log_processing_task(log_id: int):
         print("Running task directly as fallback...")
         process_log_entry_from_redpanda(task_data)
 
+    return success
+
+
+def publish_rca_cursor_slack_task(incident_id: int, user_id: Optional[int] = None) -> bool:
+    """
+    Publish an rca_cursor_slack task to Redpanda so the consumer runs deep RCA,
+    creates Cursor prompt, persists to action_result, and sends to Slack.
+    Incident should already have root_cause. If publish fails, runs inline as fallback.
+    """
+    task_data = {
+        "task_type": "rca_cursor_slack",
+        "incident_id": incident_id,
+        "user_id": user_id,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    success = redpanda_service.producer.publish_incident_task(task_data, key=str(incident_id))
+    if success:
+        print(f"✓ Published rca_cursor_slack task for incident {incident_id}")
+    else:
+        print(f"✗ Failed to publish rca_cursor_slack task for incident {incident_id}, running inline")
+        handle_rca_cursor_slack_task(task_data)
     return success
 
 
