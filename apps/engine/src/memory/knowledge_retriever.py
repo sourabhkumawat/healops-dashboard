@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional
 import os
 import time
 
-from src.utils.observability import log_phase, log_phase_start
+from src.utils.observability import log_phase
 
 # Lazy import CocoIndex dependencies to avoid import errors when module not installed
 try:
@@ -18,6 +18,9 @@ except ImportError:
     github_code_embedding_flow = None
 
 from src.database.database import DATABASE_URL, engine
+
+# Embedding dimension for sentence-transformers/all-MiniLM-L6-v2 (must match CocoIndex flow)
+EMBEDDING_DIM = 384
 
 
 class KnowledgeRetriever:
@@ -82,6 +85,71 @@ class KnowledgeRetriever:
         
         return table_name
     
+    def _get_table_name_for_db(self) -> str:
+        """
+        Table name for use in SQL, truncated to PostgreSQL's 63-char identifier limit.
+        Use this for existence checks, CREATE, INSERT, and SELECT so we match the
+        actual stored name when CocoIndex or we create the table.
+        """
+        name = self._get_table_name()
+        return name[:63] if len(name) > 63 else name
+    
+    def _ensure_table_exists(self) -> bool:
+        """
+        Create the CocoIndex table if it does not exist, so retrieval and fix indexing can proceed.
+        Schema matches CocoIndex export: filename, location, code, embedding vector(384), type.
+        Returns True if the table exists (after possibly creating it), False on error.
+        """
+        from sqlalchemy import text
+        table_name_safe = self._get_table_name_for_db()
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(text("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_schema = 'public'
+                        AND table_name = :table_name
+                    )
+                """), {"table_name": table_name_safe})
+                if result.scalar():
+                    return True
+                # Create pgvector extension if needed
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                conn.commit()
+            # Create table and index in separate connection so DDL commits
+            with self.engine.connect() as conn:
+                # Schema matches CocoIndex: primary_key_fields=["filename", "location"], vector on embedding
+                conn.execute(text(f"""
+                    CREATE TABLE IF NOT EXISTS {table_name_safe} (
+                        filename TEXT NOT NULL,
+                        location TEXT NOT NULL,
+                        code TEXT,
+                        embedding vector({EMBEDDING_DIM}),
+                        type TEXT,
+                        PRIMARY KEY (filename, location)
+                    )
+                """))
+                conn.commit()
+            with self.engine.connect() as conn:
+                # HNSW works on empty tables and builds incrementally (ivfflat requires data first)
+                try:
+                    conn.execute(text(f"""
+                        CREATE INDEX IF NOT EXISTS ix_{table_name_safe.replace('.', '_')[:50]}_embedding
+                        ON {table_name_safe} USING hnsw (embedding vector_cosine_ops)
+                    """))
+                    conn.commit()
+                except Exception as idx_err:
+                    conn.rollback()
+                    # Older pgvector may not have HNSW; table is still usable (sequential scan)
+                    print(f"Note: Could not create vector index (hnsw): {idx_err}")
+            print(f"✅ CocoIndex table created: {table_name_safe}")
+            return True
+        except Exception as e:
+            print(f"Warning: Could not create CocoIndex table {table_name_safe}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def index_codebase_patterns(self, file_paths: List[str]):
         """
         Trigger CocoIndex flow update for specific files.
@@ -100,17 +168,16 @@ class KnowledgeRetriever:
         # This method is kept for interface compatibility but may be a no-op
         # or trigger incremental updates if CocoIndex supports it
         
-        # Check if CocoIndex table exists (assumes indexing happened at connection time)
+        # Check if CocoIndex table exists; create it if missing so we can proceed
         try:
             from sqlalchemy import text
-            table_name = self._get_table_name()
+            table_name = self._get_table_name_for_db()
             with self.engine.connect() as conn:
-                # PostgreSQL table names are case-insensitive, but we need to check with proper quoting
                 result = conn.execute(text("""
                     SELECT EXISTS (
                         SELECT FROM information_schema.tables 
                         WHERE table_schema = 'public'
-                        AND LOWER(table_name) = LOWER(:table_name)
+                        AND table_name = :table_name
                     )
                 """), {"table_name": table_name})
                 exists = result.scalar()
@@ -119,6 +186,9 @@ class KnowledgeRetriever:
                     print(f"✅ CocoIndex table found: {table_name}")
                 else:
                     print(f"⚠️  CocoIndex table not found: {table_name}")
+                    if self._ensure_table_exists():
+                        self.indexed = True
+                        print(f"✅ Proceeding with created table: {table_name}")
         except Exception as e:
             print(f"Warning: Could not check index status: {e}")
             import traceback
@@ -138,6 +208,11 @@ class KnowledgeRetriever:
         # This requires embedding each fix and inserting into PostgreSQL
         if not COCOINDEX_AVAILABLE:
             print("Warning: CocoIndex not available, skipping fix indexing")
+            return
+        
+        # Ensure table exists so inserts can proceed
+        if not self._ensure_table_exists():
+            print("Warning: Could not ensure CocoIndex table exists, skipping fix indexing")
             return
         
         try:
@@ -184,7 +259,7 @@ Error Signature: {fix.get('error_signature', '')}
                     actual_conn = getattr(raw_conn, 'driver_connection', None) or getattr(raw_conn, 'connection', None) or raw_conn
                     register_vector(actual_conn, globally=False)
                     with raw_conn.cursor() as cur:
-                        table_name = self._get_table_name()
+                        table_name = self._get_table_name_for_db()
                         # Insert with type="fix" metadata
                         # Schema matches CocoIndex: (filename, location, code, embedding, type)
                         # Primary key is (filename, location) as defined in CocoIndex export
@@ -259,23 +334,24 @@ Error Signature: {fix.get('error_signature', '')}
             ]
         """
         if not self.indexed:
-            # Check if table exists
+            # Check if table exists; create if missing so we can proceed (empty results until indexed)
             try:
                 from sqlalchemy import text
-                table_name = self._get_table_name()
+                table_name = self._get_table_name_for_db()
                 with self.engine.connect() as conn:
-                    # Check if table exists (case-insensitive check)
                     result = conn.execute(text("""
                         SELECT EXISTS (
                             SELECT FROM information_schema.tables 
                             WHERE table_schema = 'public'
-                            AND LOWER(table_name) = LOWER(:table_name)
+                            AND table_name = :table_name
                         )
                     """), {"table_name": table_name})
                     exists = result.scalar()
                     if not exists:
                         print(f"⚠️  CocoIndex table not found: {table_name}")
-                        return []
+                        if not self._ensure_table_exists():
+                            return []
+                        # Table created; proceed with retrieval (will return [] until data exists)
                     self.indexed = True
             except Exception as e:
                 print(f"Warning: Error checking table existence: {e}")
@@ -321,7 +397,7 @@ Error Signature: {fix.get('error_signature', '')}
                 register_vector(actual_conn, globally=False)
                 
                 with raw_conn.cursor(cursor_factory=RealDictCursor) as cur:
-                        table_name = self._get_table_name()
+                        table_name = self._get_table_name_for_db()
                         # Use cosine similarity (<=> operator in pgvector)
                         # Distance: 0 = identical, higher = less similar
                         # Convert to similarity score: 1 - distance
